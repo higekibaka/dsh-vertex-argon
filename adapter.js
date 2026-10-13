@@ -59,6 +59,29 @@ export function detectPiAiArgonRoutes(ctx, explicitRoutes) {
   return { hasVertex: true, hasGoogle: false, googleApiKeyEnv: 'GOOGLE_API_KEY' }
 }
 
+const TRANSIENT_GEMINI_STOP_RE = /(?:Unhandled stop reason:\s*(?:MALFORMED_RESPONSE|MALFORMED_FUNCTION_CALL|UNEXPECTED_TOOL_CALL|TOO_MANY_TOOL_CALLS)|Provider stopped with:\s*(?:MALFORMED_RESPONSE|MALFORMED_FUNCTION_CALL|UNEXPECTED_TOOL_CALL|OTHER|FINISH_REASON_UNSPECIFIED))/i
+
+function wrapGemini4Stream(rawStream) {
+  if (!rawStream || typeof rawStream[Symbol.asyncIterator] !== 'function') return rawStream
+  return {
+    [Symbol.asyncIterator]: async function* () {
+      for await (const event of rawStream) {
+        if (event?.type === 'error' && typeof event?.error?.errorMessage === 'string' && TRANSIENT_GEMINI_STOP_RE.test(event.error.errorMessage)) {
+          yield {
+            ...event,
+            error: {
+              ...event.error,
+              errorMessage: `${event.error.errorMessage} (502 upstream transient finishReason)`,
+            },
+          }
+          continue
+        }
+        yield event
+      }
+    },
+  }
+}
+
 export function gemini4StreamSimple(nativeStream, requestModel, context, options = {}, defaultLevel = 'medium', upstreamModelId = requestModel.id) {
   const fallback = defaultLevel ?? (/cyber-permissive/i.test(requestModel?.id ?? '') ? 'high' : 'medium')
   const rawLevel = options.reasoning ?? fallback
@@ -66,7 +89,7 @@ export function gemini4StreamSimple(nativeStream, requestModel, context, options
   const level = typeof mapped === 'string' ? mapped.toLowerCase() : fallback
   if (!LEVELS.includes(level)) throw new LlmError('Gemini 4 Argon requires low, medium or high.', 'UNSUPPORTED_REASONING_EFFORT')
   const { reasoning, thinking, thinkingBudgets, temperature, onPayload: prior, ...rest } = options
-  return nativeStream(requestModel, context, {
+  return wrapGemini4Stream(nativeStream(requestModel, context, {
     ...rest,
     maxTokens: options.maxTokens ?? requestModel.maxTokens,
     async onPayload(payload, payloadModel) {
@@ -85,7 +108,7 @@ export function gemini4StreamSimple(nativeStream, requestModel, context, options
         config: { ...cleanConfig, thinkingConfig: { thinkingLevel: level.toUpperCase(), includeThoughts: true } },
       }
     },
-  })
+  }))
 }
 
 export function installGemini4PiAiPatch() {

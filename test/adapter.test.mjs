@@ -15,7 +15,8 @@ const wire=[];let mode='tool'
 globalThis.fetch=async(input,init)=>{
  wire.push({url:typeof input==='string'?input:input.url,body:JSON.parse(init?.body??await input.text())})
  const parts=mode==='tool'?[{text:'Using the tool.',thought:true,thoughtSignature:'dGhvdWdodA=='},{functionCall:{id:'fixture-id',name:'add',args:{a:17,b:25}},thoughtSignature:'dG9vbA=='}]:[{text:'42',thoughtSignature:'dGV4dA=='}]
- const data={candidates:[{content:{role:'model',parts},finishReason:'STOP'}],usageMetadata:{promptTokenCount:12,candidatesTokenCount:6,thoughtsTokenCount:4,totalTokenCount:22}}
+ const finishReason=mode==='malformed'?'MALFORMED_RESPONSE':'STOP'
+ const data={candidates:[{content:{role:'model',parts},finishReason}],usageMetadata:{promptTokenCount:12,candidatesTokenCount:6,thoughtsTokenCount:4,totalTokenCount:22}}
  return new Response('data: '+JSON.stringify(data)+String.fromCharCode(10,10),{headers:{'Content-Type':'text/event-stream'}})
 }
 test('auto-detects google & google-vertex Argon configs and exposes both in plugin group',async()=>{
@@ -99,4 +100,9 @@ test('abort, config validation, legacy max listener migration and scoped registr
  const migrated1=await requestListener({},async()=>({provider:PROVIDER,model:GOOGLE_API_MODEL,reasoningEffort:'max'}))
  assert.equal(migrated1.reasoningEffort,'high')
  cleanup();assert.ok(disposed)
+ mode='malformed'
+ const malformed=await collect(createArgonAdapter(ctx,config).stream(req('medium')))
+ assert.equal(malformed.at(-1).reason.kind,'error')
+ assert.equal(malformed.at(-1).reason.failure.code,'SERVER')
+ mode='tool'
 })
