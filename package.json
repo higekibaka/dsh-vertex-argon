@@ -1,0 +1,90 @@
+{
+  "name": "dsh-vertex-argon",
+  "version": "1.1.2",
+  "description": "Google Vertex AI & Gemini API Argon plugin for DeepSeek Harness — native Low/Medium/High thinking levels, thought summaries, signed tool-call replay, and dedicated Settings UI.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/higekibaka/dsh-vertex-argon.git"
+  },
+  "bugs": "https://github.com/higekibaka/dsh-vertex-argon/issues",
+  "homepage": "https://github.com/higekibaka/dsh-vertex-argon#readme",
+  "type": "module",
+  "main": "index.js",
+  "icon": "./icon.svg",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "LICENSE",
+    "README.md",
+    "runtime.js",
+    "index.js",
+    "adapter.js",
+    "client.js",
+    "icon.svg",
+    "cordis.patch.yml",
+    "locale"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "vertex-ai",
+    "gemini",
+    "gemini-4-argon",
+    "plugin"
+  ],
+  "dsh": {
+    "engines": {
+      "dsh": "0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-model-selection"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": ">=0.1.7-rc.2",
+    "@deepseek-ai/dsh-llm-pi-ai": ">=0.1.7-rc.2",
+    "@deepseek-ai/dsh-launch-environment": ">=0.1.7-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.4",
+    "@earendil-works/pi-ai": "0.85.1 || 0.87.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm-pi-ai": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-launch-environment": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    },
+    "@earendil-works/pi-ai": {
+      "optional": true
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}
