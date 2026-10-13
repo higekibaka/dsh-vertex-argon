@@ -34,15 +34,15 @@ Current release: **[1.1.2](https://github.com/higekibaka/dsh-vertex-argon)** · 
 
 ```mermaid
 flowchart TD
-    U[DSH 模型配置扫描] --> D{自动检测 gemini-4-argon}
-    D -->|检测到 google-vertex 或默认| V["Vertex Argon → Gemini 4 Argon (Vertex AI)<br/>复用 GOOGLE_APPLICATION_CREDENTIALS"]
-    D -->|检测到 google (Gemini API)| G["Vertex Argon → Gemini 4 Argon (Gemini API)<br/>复用 GOOGLE_API_KEY"]
-    V --> P[onPayload 请求级净化与注入]
+    U["DSH 模型配置扫描"] --> D{"自动检测 gemini-4-argon"}
+    D -->|"检测到 google-vertex 或默认"| V["Vertex Argon → Gemini 4 Argon (Vertex AI)<br/>复用 GOOGLE_APPLICATION_CREDENTIALS"]
+    D -->|"检测到 google (Gemini API)"| G["Vertex Argon → Gemini 4 Argon (Gemini API)<br/>复用 GOOGLE_API_KEY"]
+    V --> P["onPayload 请求级净化与注入"]
     G --> P
-    P --> T["thinkingConfig: { thinkingLevel: LOW/MEDIUM/HIGH, includeThoughts: true }<br/>剔除 thinkingBudget 与 temperature/topP/topK"]
-    T --> S[Google GenAI Stream 响应]
-    S --> R1[thought: true → DSH 思维链面板]
-    S --> R2[functionCall + thoughtSignature → 原生工具卡片与多轮签名回放]
+    P --> T["注入 thinkingLevel: LOW / MEDIUM / HIGH 与 includeThoughts: true<br/>剔除 thinkingBudget 与 temperature / topP / topK"]
+    T --> S["Google GenAI Stream 响应"]
+    S --> R1["thought: true → DSH 思维链面板"]
+    S --> R2["functionCall + thoughtSignature → 原生工具卡片与多轮签名回放"]
 ```
 
 除提供独立的 **Vertex Argon** 分组外，插件在启动时还会为内置 `PiAiAdapter` 注入 `installGemini4PiAiPatch` 运行时兜底——即便用户在模型选择器中误点了原 `Google` 或 `Google Vertex AI` 分组下的 `gemini-4-argon`，也会被自动改写为合法的 `thinkingLevel` 请求。
