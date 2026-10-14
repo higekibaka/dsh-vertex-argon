@@ -107,6 +107,33 @@ dsh plugin --profile web add dsh-vertex-argon
 
 ---
 
+## ⚠️ 与 billion-context 配合使用的已知问题
+
+### Vertex 工具续答 400（2026-10-14）
+
+在 **DSH 0.2.0-rc.2 / dsh-vertex-argon 1.1.4 / billion-context 0.1.196** 上，已复现：工具执行成功后，Bili 将压缩提醒（nudge）追加到最后一个 user 消息的工具结果后面，Vertex 拒绝下一次请求：
+
+> HTTP 400: Requests ending with a model turn are not supported.
+
+这条报错容易误导：实际请求仍以 user 消息结束，且工具结果没有丢失；本次触发点是同一消息内的 **parts 顺序**，不是 Argon 的 thinkingLevel 参数或思考摘要开关。
+
+| 最后一个 user 消息的 parts | 官方 Vertex 实测 |
+|---|---|
+| functionResponse | 200，正常续答 |
+| functionResponse → text（短提醒或完整 Bili nudge） | 400，上述报错 |
+| text（同一提醒）→ functionResponse | 200，正常续答 |
+
+测试使用新生成、带签名的 add(37,29) 调用，保持模型消息和签名不变，仅改变工具结果与提醒的顺序，成功组均得到 66。另一次直接 Vertex SSE 验证使用新签名工具调用和本地候选修复，返回 200 / STOP；6 个 thought 文本片段和签名在候选响应过滤器中保持原值，最终答案也通过独立校验。**这些不等于线上 DSH 全链路或 GUI 已修复。**
+
+**修复归属与当前状态：**
+
+- 应由 **billion-context 上游**在 Google 请求转换／提醒注入后处理兼容顺序；相关位置为 [coreToGoogle](https://github.com/ranxianglei/billion-context/blob/master/kernel/src/wire/google.ts) 和 [appendGoogleNudge](https://github.com/ranxianglei/billion-context/blob/master/src/server/prepare-google.ts)。本次基线来自已发布 0.1.196，后续版本需重新确认。
+- 本插件的 onPayload 发生在 Bili 后续改写之前，不能把前置处理当作此问题的完整修复。**当前 Argon 发布版没有包含该修复，也没有据此修改 Bili 安装文件。**
+- 等待上游修复期间，可先在不经过 Bili 的新测试会话验证 Vertex。若自建兼容桥，排序必须位于 **Bili 之后、Vertex 之前**，只调整 user 工具结果消息中的普通、无签名、非 thought 文本；不得修改模型消息、工具 ID、签名或流式思考内容。桥接是实验性绕过，不是本插件自带功能；会话连续性、代理出口与重启回退仍需单独验证。
+- 本仓库尚未验证 Gemini Developer API 的相同问题。[第三方同类报告](https://github.com/router-for-me/CLIProxyAPI/issues/5607)称相同请求在 Gemini API 可用、在 Vertex 失败；不要据此断言两条通道都受影响，或改动正常工作的 Antigravity 通道。
+
+---
+
 ## ❓ 常见问题
 
 - **为什么极简问题有时候不显示思维链文本？**
