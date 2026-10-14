@@ -131,14 +131,24 @@ dsh plugin --profile web add dsh-vertex-argon
 
 用合成 SSE 做不经过桥接的对照，直接通过同一 Bili 也会把独立 `{thoughtSignature: "..."}` part 丢掉，思考文本和普通回答仍保留。已发布源码中的 [Google loop adapter](https://github.com/ranxianglei/billion-context/blob/master/src/loop/adapter-google.ts) 跳过无非空 text 的普通 part，而 metadata 回退要求 parts 为空；这是与请求排序不同的响应侧问题。**此前只验证 stripGoogleChunk 的结果不能代表完整流式链；实验桥目前不应宣称可上线。**
 
-此证据针对独立签名片段，不代表所有签名或所有思考摘要都会丢失；带 functionCall 的签名有单独处理分支，后续轮次的实际影响仍需分别验证。当前没有在桥内补造／回填签名，也未切换线上 DSH 或 Antigravity 路由。
+此证据针对独立签名片段，不代表所有签名或所有思考摘要都会丢失。根据 [Google 官方说明](https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures)，非 functionCall 签名用于延续推理状态，缺失不做严格校验，但可能影响推理质量；本次没有测出质量下降。它不同于当前工具轮次必需的 functionCall 签名：后者被主动删除后，Gemini API 对照请求返回 400。不要把独立签名丢失直接说成“下一轮必然报错”。当前没有补造／回填签名，也未切换线上 DSH 或 Antigravity 路由。
+
+Gemini Developer API 的真实流式响应也做了受控回放：官方返回 200 / STOP，4×4 分配答案为 13；两段思考摘要共 701 字符及一个独立签名。将该响应原样送过隔离 Bili 0.1.196，摘要哈希不变、签名由 1 变 0。随后直接向官方 API 发起后续轮次，保留／删除这个独立签名都返回 200 / STOP / 13。此结果验证的是“真实响应回放 + 直接后续轮次”，不是实时完整压缩链成功；后者尝试遇到传输失败。**单纯改用 Gemini API 不会修复 Bili 的响应重写缺陷。**
+
+### 配置绕过与版本复核
+
+隔离复核 **0.1.196 / 0.1.197**：默认配置与仅关闭 `compress.injectNudge` 都丢独立签名；关闭 `compress.injectTool` 的合成样例保留签名，但仍走响应解析／标签清理，不是字节透传，而且该开关全局生效。
+
+较窄的临时绕过是匹配实际上游 URL 的 `providers[URL].passthrough=true`：该路由不再由 Bili 压缩、注入工具／提醒或跟踪内核会话，响应直接透传。请求兼容性／鉴权钩子仍可能生效，不能把样例中的请求字节一致泛化为所有配置。应精确匹配全局或区域 Vertex URL，不要顺带改正常 Antigravity 通道；手改配置文件后需重启对应专用代理或通过受支持的配置入口刷新，再验证实际生效实例。**尚无保留完整 Bili 压缩能力的纯配置修复。**
+
+上游已提交：[独立签名丢失 #3158](https://github.com/ranxianglei/billion-context/issues/3158)、[Vertex 请求顺序 #3159](https://github.com/ranxianglei/billion-context/issues/3159)。
 
 **修复归属与当前状态：**
 
 - 应由 **billion-context 上游**在 Google 请求转换／提醒注入后处理兼容顺序；相关位置为 [coreToGoogle](https://github.com/ranxianglei/billion-context/blob/master/kernel/src/wire/google.ts) 和 [appendGoogleNudge](https://github.com/ranxianglei/billion-context/blob/master/src/server/prepare-google.ts)。本次基线来自已发布 0.1.196，后续版本需重新确认。
 - 本插件的 onPayload 发生在 Bili 后续改写之前，不能把前置处理当作此问题的完整修复。**当前 Argon 发布版没有包含该修复，也没有据此修改 Bili 安装文件。**
 - 等待上游修复期间，可先在不经过 Bili 的新测试会话验证 Vertex。若自建兼容桥，排序必须位于 **Bili 之后、Vertex 之前**，只调整 user 工具结果消息中的普通、无签名、非 thought 文本；不得修改模型消息、工具 ID、签名或流式思考内容。桥接是实验性绕过，不是本插件自带功能；会话连续性、代理出口与重启回退仍需单独验证。
-- 本仓库尚未验证 Gemini Developer API 的相同问题。[第三方同类报告](https://github.com/router-for-me/CLIProxyAPI/issues/5607)称相同请求在 Gemini API 可用、在 Vertex 失败；不要据此断言两条通道都受影响，或改动正常工作的 Antigravity 通道。
+- **Gemini Developer API 已做官方端点对照**：同一新签名 `add(37,29)` 调用，工具结果单独、短文本在前／在后都返回 200 / STOP / 66，没有复现 Vertex 的顺序 400。完整 Bili nudge 放在工具结果后的一次测试虽为 HTTP 200，却以 `MALFORMED_FUNCTION_CALL` 空回答结束；该缩减样例没有注册 Bili 压缩工具且工具模式为 NONE，不能把这个结果归因为同一顺序校验缺陷。完整 nudge 放前返回 66。HTTP 成功不等于完整 Bili 使用场景已验证无问题，不能据此承诺换到 Gemini API 就能消除响应侧签名丢失。
 
 ---
 
