@@ -125,6 +125,14 @@ dsh plugin --profile web add dsh-vertex-argon
 
 测试使用新生成、带签名的 add(37,29) 调用，保持模型消息和签名不变，仅改变工具结果与提醒的顺序，成功组均得到 66。另一次直接 Vertex SSE 验证使用新签名工具调用和本地候选修复，返回 200 / STOP；6 个 thought 文本片段和签名在候选响应过滤器中保持原值，最终答案也通过独立校验。**这些不等于线上 DSH 全链路或 GUI 已修复。**
 
+### 补充：完整 Bili 流式链会丢失独立签名片段
+
+随后使用**未修补的 Bili 0.1.196 完整 HTTP 链路**验证实验桥：请求侧排序修复后 Vertex 返回 200 / STOP，6×6 分配答案经穷举校验正确；11 段思考摘要（3105 字符）在上下游哈希一致，但 1 个输出签名片段未传出 Bili。
+
+用合成 SSE 做不经过桥接的对照，直接通过同一 Bili 也会把独立 `{thoughtSignature: "..."}` part 丢掉，思考文本和普通回答仍保留。已发布源码中的 [Google loop adapter](https://github.com/ranxianglei/billion-context/blob/master/src/loop/adapter-google.ts) 跳过无非空 text 的普通 part，而 metadata 回退要求 parts 为空；这是与请求排序不同的响应侧问题。**此前只验证 stripGoogleChunk 的结果不能代表完整流式链；实验桥目前不应宣称可上线。**
+
+此证据针对独立签名片段，不代表所有签名或所有思考摘要都会丢失；带 functionCall 的签名有单独处理分支，后续轮次的实际影响仍需分别验证。当前没有在桥内补造／回填签名，也未切换线上 DSH 或 Antigravity 路由。
+
 **修复归属与当前状态：**
 
 - 应由 **billion-context 上游**在 Google 请求转换／提醒注入后处理兼容顺序；相关位置为 [coreToGoogle](https://github.com/ranxianglei/billion-context/blob/master/kernel/src/wire/google.ts) 和 [appendGoogleNudge](https://github.com/ranxianglei/billion-context/blob/master/src/server/prepare-google.ts)。本次基线来自已发布 0.1.196，后续版本需重新确认。
