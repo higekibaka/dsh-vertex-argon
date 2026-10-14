@@ -2,3 +2,11 @@ node_modules/
 dev/
 *.tgz
 .DS_Store
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*credentials*.json
+*service-account*.json
+*-sa.json
