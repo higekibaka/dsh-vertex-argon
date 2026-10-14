@@ -107,48 +107,50 @@ dsh plugin --profile web add dsh-vertex-argon
 
 ---
 
-## ⚠️ 与 billion-context 配合使用的已知问题
+## ⚠️ 与 `billion-context` 配合使用的兼容性说明
 
-### Vertex 工具续答 400（2026-10-14）
+在 `billion-context`（`0.1.196` / `0.1.197`）下启用 Google 通道代理时，存在两个属于代理侧处理链路的已知兼容性问题（均已向上游提交 Issue 并有对应修复 PR 跟进）：
 
-在 **DSH 0.2.0-rc.2 / dsh-vertex-argon 1.1.4 / billion-context 0.1.196** 上，已复现：工具执行成功后，Bili 将压缩提醒（nudge）追加到最后一个 user 消息的工具结果后面，Vertex 拒绝下一次请求：
+### 1. Vertex AI 工具续答 `HTTP 400`（`user.parts` 顺序校验）
 
-> HTTP 400: Requests ending with a model turn are not supported.
+工具执行完毕后，若 `billion-context` 向最后一条 `user` 消息追加压缩提醒（nudge），会形成 `[functionResponse, text]` 的数组顺序，触发 Vertex AI 报错：
 
-这条报错容易误导：实际请求仍以 user 消息结束，且工具结果没有丢失；本次触发点是同一消息内的 **parts 顺序**，不是 Argon 的 thinkingLevel 参数或思考摘要开关。
+> `HTTP 400: Requests ending with a model turn are not supported.`
 
-| 最后一个 user 消息的 parts | 官方 Vertex 实测 |
-|---|---|
-| functionResponse | 200，正常续答 |
-| functionResponse → text（短提醒或完整 Bili nudge） | 400，上述报错 |
-| text（同一提醒）→ functionResponse | 200，正常续答 |
+- **根因说明**：报错文案具有一定误导性——实际请求仍以 `user` 角色结尾且工具结果完好，触发校验的真正原因是同一条 `user` 消息内的 **`parts` 排列顺序**（与 `dsh-vertex-argon` 的 `thinkingLevel` 或思考摘要配置无关）。
+- **端点对照**：
 
-测试使用新生成、带签名的 add(37,29) 调用，保持模型消息和签名不变，仅改变工具结果与提醒的顺序，成功组均得到 66。另一次直接 Vertex SSE 验证使用新签名工具调用和本地候选修复，返回 200 / STOP；6 个 thought 文本片段和签名在候选响应过滤器中保持原值，最终答案也通过独立校验。**这些不等于线上 DSH 全链路或 GUI 已修复。**
+| 最后一条 `user` 消息的 `parts` 顺序 | Google Vertex AI | Google Gemini Developer API |
+|---|---|---|
+| `[functionResponse]`（无追加提醒） | `200 OK`，正常续答 | `200 OK`，正常续答 |
+| `[functionResponse, text]`（工具结果后追加提醒） | **`400 Bad Request`** | 未复现该顺序 `400` |
+| `[text, functionResponse]`（普通文本置于工具结果前） | `200 OK`，正常续答 | `200 OK`，正常续答 |
 
-### 补充：完整 Bili 流式链会丢失独立签名片段
+- **修复归属**：`dsh-vertex-argon` 的 `onPayload` 钩子运行在 `billion-context` 介入之前，无法在前置阶段调整代理后续注入的提醒顺序；该问题需由 `billion-context` 在 Google 请求转换与提醒注入阶段（`coreToGoogle` / `appendGoogleNudge`）统一处理。
+  - 上游跟踪：[Issue #3159](https://github.com/ranxianglei/billion-context/issues/3159) · [PR #3167](https://github.com/ranxianglei/billion-context/pull/3167)
 
-随后使用**未修补的 Bili 0.1.196 完整 HTTP 链路**验证实验桥：请求侧排序修复后 Vertex 返回 200 / STOP，6×6 分配答案经穷举校验正确；11 段思考摘要（3105 字符）在上下游哈希一致，但 1 个输出签名片段未传出 Bili。
+### 2. 流式响应中独立 `thoughtSignature` 片段被过滤
 
-用合成 SSE 做不经过桥接的对照，直接通过同一 Bili 也会把独立 `{thoughtSignature: "..."}` part 丢掉，思考文本和普通回答仍保留。已发布源码中的 [Google loop adapter](https://github.com/ranxianglei/billion-context/blob/master/src/loop/adapter-google.ts) 跳过无非空 text 的普通 part，而 metadata 回退要求 parts 为空；这是与请求排序不同的响应侧问题。**此前只验证 stripGoogleChunk 的结果不能代表完整流式链；实验桥目前不应宣称可上线。**
+在完整 `billion-context` 流式处理链路中，Vertex AI 与 Gemini Developer API 返回的思考摘要文本（`thought: true`）均可完整保留，但**不携带文本的独立 `{ thoughtSignature: "..." }` SSE 片段**会被当前的 [Google loop adapter](https://github.com/ranxianglei/billion-context/blob/master/src/loop/adapter-google.ts) 跳过。
 
-此证据针对独立签名片段，不代表所有签名或所有思考摘要都会丢失。根据 [Google 官方说明](https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures)，非 functionCall 签名用于延续推理状态，缺失不做严格校验，但可能影响推理质量；本次没有测出质量下降。它不同于当前工具轮次必需的 functionCall 签名：后者被主动删除后，Gemini API 对照请求返回 400。不要把独立签名丢失直接说成“下一轮必然报错”。当前没有补造／回填签名，也未切换线上 DSH 或 Antigravity 路由。
+- **实际影响边界**：
+  - **工具调用签名（必需）**：绑定在 `functionCall` 上的签名若缺失会导致下一轮请求直接报 `400`；该类签名在正常工具调用中可随工具块保留。
+  - **独立输出签名（非严格校验）**：根据 [Google 官方文档](https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures)，非 `functionCall` 的独立签名用于跨轮次延续推理状态，缺失不会触发服务端 `400` 报错，但可能对长链路推理连贯性产生潜在影响。
+  - 上游跟踪：[Issue #3158](https://github.com/ranxianglei/billion-context/issues/3158) · [PR #3162](https://github.com/ranxianglei/billion-context/pull/3162)
 
-Gemini Developer API 的真实流式响应也做了受控回放：官方返回 200 / STOP，4×4 分配答案为 13；两段思考摘要共 701 字符及一个独立签名。将该响应原样送过隔离 Bili 0.1.196，摘要哈希不变、签名由 1 变 0。随后直接向官方 API 发起后续轮次，保留／删除这个独立签名都返回 200 / STOP / 13。此结果验证的是“真实响应回放 + 直接后续轮次”，不是实时完整压缩链成功；后者尝试遇到传输失败。**单纯改用 Gemini API 不会修复 Bili 的响应重写缺陷。**
+### 3. 上游修复合入前的临时规避方式
 
-### 配置绕过与版本复核
+在等待上游合并发版期间，若需在开启 `billion-context` 的环境中稳定使用 Vertex AI，可在生效的 `billion-context` 配置中对目标上游设置路由级透传（仅跳过该路由的代理改写与压缩，不影响其他通道）：
 
-隔离复核 **0.1.196 / 0.1.197**：默认配置与仅关闭 `compress.injectNudge` 都丢独立签名；关闭 `compress.injectTool` 的合成样例保留签名，但仍走响应解析／标签清理，不是字节透传，而且该开关全局生效。
+```json
+{
+  "providers": {
+    "https://aiplatform.googleapis.com": { "passthrough": true }
+  }
+}
+```
 
-较窄的临时绕过是匹配实际上游 URL 的 `providers[URL].passthrough=true`：该路由不再由 Bili 压缩、注入工具／提醒或跟踪内核会话，响应直接透传。请求兼容性／鉴权钩子仍可能生效，不能把样例中的请求字节一致泛化为所有配置。应精确匹配全局或区域 Vertex URL，不要顺带改正常 Antigravity 通道；手改配置文件后需重启对应专用代理或通过受支持的配置入口刷新，再验证实际生效实例。**尚无保留完整 Bili 压缩能力的纯配置修复。**
-
-上游已提交：[独立签名丢失 #3158](https://github.com/ranxianglei/billion-context/issues/3158)、[Vertex 请求顺序 #3159](https://github.com/ranxianglei/billion-context/issues/3159)。
-
-**修复归属与当前状态：**
-
-- 应由 **billion-context 上游**在 Google 请求转换／提醒注入后处理兼容顺序；相关位置为 [coreToGoogle](https://github.com/ranxianglei/billion-context/blob/master/kernel/src/wire/google.ts) 和 [appendGoogleNudge](https://github.com/ranxianglei/billion-context/blob/master/src/server/prepare-google.ts)。本次基线来自已发布 0.1.196，后续版本需重新确认。
-- 本插件的 onPayload 发生在 Bili 后续改写之前，不能把前置处理当作此问题的完整修复。**当前 Argon 发布版没有包含该修复，也没有据此修改 Bili 安装文件。**
-- 等待上游修复期间，可先在不经过 Bili 的新测试会话验证 Vertex。若自建兼容桥，排序必须位于 **Bili 之后、Vertex 之前**，只调整 user 工具结果消息中的普通、无签名、非 thought 文本；不得修改模型消息、工具 ID、签名或流式思考内容。桥接是实验性绕过，不是本插件自带功能；会话连续性、代理出口与重启回退仍需单独验证。
-- **Gemini Developer API 已做官方端点对照**：同一新签名 `add(37,29)` 调用，工具结果单独、短文本在前／在后都返回 200 / STOP / 66，没有复现 Vertex 的顺序 400。完整 Bili nudge 放在工具结果后的一次测试虽为 HTTP 200，却以 `MALFORMED_FUNCTION_CALL` 空回答结束；该缩减样例没有注册 Bili 压缩工具且工具模式为 NONE，不能把这个结果归因为同一顺序校验缺陷。完整 nudge 放前返回 66。HTTP 成功不等于完整 Bili 使用场景已验证无问题，不能据此承诺换到 Gemini API 就能消除响应侧签名丢失。
+> **提示**：若使用区域级 Vertex 端点（如 `https://us-central1-aiplatform.googleapis.com`）或 Gemini Developer API（`https://generativelanguage.googleapis.com`），请按实际请求的域名填写。仅关闭 `compress.injectNudge` 无法规避独立签名片段丢失；设置 `passthrough: true` 后该路由将直接透传，不再执行 `billion-context` 上下文压缩。
 
 ---
 
