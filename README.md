@@ -14,7 +14,7 @@
 
 `dsh-vertex-argon` 为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) 提供完整的 **Gemini 4 Argon** 接入支持，自动聚合 **Google Vertex AI**（服务账号 / ADC）与 **Google Gemini Developer API**（AI Studio API Key）双通道，修复内置 `pi-ai` 适配器误传 `thinkingBudget` 导致的 `HTTP 400` 报错，完整打通原生三档思考、思维链（Thought Summaries）、`v1beta1` **Long Decode 跨段长生成自动续传**与带签名的多轮工具调用。
 
-Current release: **[1.2.0](https://github.com/higekibaka/dsh-vertex-argon)** · [npm](https://www.npmjs.com/package/dsh-vertex-argon)
+Current release: **[1.2.1](https://github.com/higekibaka/dsh-vertex-argon)** · [npm](https://www.npmjs.com/package/dsh-vertex-argon)
 
 ---
 
@@ -25,7 +25,7 @@ Current release: **[1.2.0](https://github.com/higekibaka/dsh-vertex-argon)** · 
 | **思考控制参数** | 误判为旧模型并发送 `thinkingBudget: -1`，触发云端 `HTTP 400` | 原生发送 `thinkingLevel: "LOW" \| "MEDIUM" \| "HIGH"`，绝不传 `thinkingBudget` |
 | **思维链（思考摘要）** | 手动新增模型默认无 `reasoning` 标记，不请求摘要 | 固定开启 `includeThoughts: true`，流式解析 `thought: true` 实时展示思维链 |
 | **多轮工具调用回传** | 路由切换或签名不对齐时易丢失上下文 | 保持 `provider` / `model` 与 `thoughtSignature` 签名全链路一致 |
-| **Long Decode 长生成** | Vertex 硬编码 `v1` 且锁死 64K，遇 `CONTINUATION` 直接抛错断流 | 自动切换 `v1beta1` 跨 64K 分段续传（最高 512K）、断流检查点恢复，按首跳输入上报水位防误压缩 |
+| **Long Decode 长生成** | Vertex 硬编码 `v1` 且锁死 64K，遇 `CONTINUATION` 直接抛错断流 | 自动切换 `v1beta1` 跨 64K 分段零延迟续传（最高 512K）、断流检查点指数退避恢复，按首跳输入上报水位防误压缩 |
 | **采样参数净化** | 可能携带被 Argon 拒绝或忽略的采样字段 | 自动剥离 `temperature`、`topP`、`topK` 等无效采样参数 |
 | **通道管理与设置** | 需手改 `cordis.patch.yml` 并反复排查校验报错 | 自动检测双通道 + 内置 **设置 → Vertex Argon** 图形化实时调节页面 |
 

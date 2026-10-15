@@ -12,6 +12,7 @@ import {
   LEVELS,
   MAX_SINGLE_CALL_TOKENS,
   MAX_LONG_DECODE_TOKENS,
+  computeReconnectDelayMs,
 } from '../adapter.js'
 import { Config, apply } from '../index.js'
 import { shared } from '../runtime.js'
@@ -343,6 +344,10 @@ test('resumes dropped stream from intermediate checkpoint token and stops on MAX
         usageMetadata: { promptTokenCount: 30, candidatesTokenCount: 10, thoughtsTokenCount: 5, totalTokenCount: 45 },
       }])
     }
+    if (step === 2) {
+      // Simulate transient "fetch failed" during first reconnect attempt
+      throw new TypeError('fetch failed')
+    }
     return sseResponse([{
       candidates: [{
         content: { role: 'model', parts: [{ text: 'Part B' }] },
@@ -353,8 +358,20 @@ test('resumes dropped stream from intermediate checkpoint token and stops on MAX
   }
 
   try {
+    assert.equal(computeReconnectDelayMs(1, { random: () => 0.5 }), 500)
+    assert.equal(computeReconnectDelayMs(2, { random: () => 0.5 }), 1000)
+    assert.equal(computeReconnectDelayMs(3, { random: () => 0.5 }), 2000)
+    assert.equal(computeReconnectDelayMs(4, { random: () => 0.5 }), 4000)
+    assert.equal(computeReconnectDelayMs(5, { random: () => 0.5 }), 8000)
+    assert.equal(computeReconnectDelayMs(6, { random: () => 0.5 }), 10000)
+    const jittered = computeReconnectDelayMs(1, { random: () => 0.41 })
+    assert.ok(jittered >= 450 && jittered <= 550)
+
+    const t0 = Date.now()
     const resumed = await collect(a.stream(req('medium', MODEL, 131072)))
-    assert.equal(step, 2)
+    const elapsed = Date.now() - t0
+    assert.equal(step, 3)
+    assert.ok(elapsed >= 1300, `expected exponential backoff delay (~500ms + ~1000ms), got ${elapsed}ms`)
     assert.equal(wire.at(-1).body.continuationToken, 'ckpt-resume-1')
     const textBlock = resumed.filter(c => c.type === 'block-end').map(c => c.block).find(b => b.type === 'text')
     assert.equal(textBlock.text, 'Part A Part B')

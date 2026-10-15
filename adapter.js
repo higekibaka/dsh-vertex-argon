@@ -17,6 +17,9 @@ export const LEVELS = ['low', 'medium', 'high']
 export const MAX_SINGLE_CALL_TOKENS = 65536
 export const MAX_LONG_DECODE_TOKENS = 524288
 export const MAX_CONTINUATION_HOPS = 32
+export const RECONNECT_INITIAL_DELAY_MS = 500
+export const RECONNECT_MAX_DELAY_MS = 10000
+export const RECONNECT_JITTER_RATIO = 0.1
 const MAX_STREAM_RECONNECTS_WITHOUT_PROGRESS = 3
 const COMPACTION_HEADROOM_FLOOR = 131072
 const ENV_KEYS = ['GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_CLOUD_PROJECT', 'GCLOUD_PROJECT', 'GOOGLE_CLOUD_LOCATION', 'GOOGLE_CLOUD_API_KEY']
@@ -91,12 +94,49 @@ function isAbortedError(err, signal) {
   return Boolean(signal?.aborted) || (err instanceof Error && err.name === 'AbortError')
 }
 
-function isInitialApiRejection(err, receivedAnyChunk) {
-  return Boolean(
-    !receivedAnyChunk &&
-    err instanceof Error &&
-    (err.name === 'ApiError' || ('status' in err && typeof err.status === 'number')),
-  )
+function isNonRetryableApiRejection(err, receivedAnyChunk, hopCount, hasCheckpointToken) {
+  if (receivedAnyChunk) return false
+  if (!(err instanceof Error && (err.name === 'ApiError' || ('status' in err && typeof err.status === 'number')))) {
+    return false
+  }
+  if (!hasCheckpointToken || hopCount <= 1) return true
+  const status = typeof err.status === 'number' ? err.status : 0
+  if (status === 408 || status === 429 || (status >= 500 && status < 600)) return false
+  return true
+}
+
+export function computeReconnectDelayMs(attempt, options = {}) {
+  const initialDelayMs = options?.initialDelayMs ?? RECONNECT_INITIAL_DELAY_MS
+  if (!(initialDelayMs > 0)) return 0
+  const maxDelayMs = options?.maxDelayMs ?? RECONNECT_MAX_DELAY_MS
+  const jitterRatio = options?.jitterRatio ?? RECONNECT_JITTER_RATIO
+  const random = options?.random ?? Math.random
+  const exponent = Math.min(Math.max(0, attempt - 1), 10)
+  const exponential = Math.min(initialDelayMs * (2 ** exponent), maxDelayMs)
+  const jitter = 1 - jitterRatio + 2 * jitterRatio * random()
+  return Math.round(Math.min(exponential * jitter, maxDelayMs))
+}
+
+function waitWithAbort(delayMs, signal) {
+  if (!(delayMs > 0)) return Promise.resolve()
+  if (signal?.aborted) {
+    const err = new Error('The operation was aborted')
+    err.name = 'AbortError'
+    return Promise.reject(err)
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener?.('abort', onAbort)
+      resolve()
+    }, delayMs)
+    function onAbort() {
+      clearTimeout(timer)
+      const err = new Error('The operation was aborted')
+      err.name = 'AbortError'
+      reject(err)
+    }
+    signal?.addEventListener?.('abort', onAbort, { once: true })
+  })
 }
 
 async function continueArgonRequestStream(apiClient, origRequestStream, request, meta) {
@@ -120,6 +160,7 @@ async function continueArgonRequestStream(apiClient, origRequestStream, request,
     let baseBodyObj
     let resumeToken
     let reconnectsWithoutProgress = 0
+    let consecutiveReconnectFailures = 0
     let lastError
     let hopCount = 0
     let initialPromptTokens
@@ -250,7 +291,7 @@ async function continueArgonRequestStream(apiClient, origRequestStream, request,
       if (
         hopError &&
         (isAbortedError(hopError.error, request?.abortSignal) ||
-          isInitialApiRejection(hopError.error, hopReceivedAnyChunk))
+          isNonRetryableApiRejection(hopError.error, hopReceivedAnyChunk, hopCount, Boolean(hopToken || hopStartToken)))
       ) {
         throw hopError.error
       }
@@ -266,16 +307,20 @@ async function continueArgonRequestStream(apiClient, origRequestStream, request,
         if (hopFinishReason === 'CONTINUATION' && hasNewToken) {
           resumeToken = hopToken
           reconnectsWithoutProgress = 0
+          consecutiveReconnectFailures = hopError ? 1 : 0
         } else {
           resumeToken = undefined
           reconnectsWithoutProgress = 0
+          consecutiveReconnectFailures = 0
         }
       } else if (hasNewToken) {
         resumeToken = hopToken
         reconnectsWithoutProgress = 0
+        consecutiveReconnectFailures = 1
       } else if (!hopHasYieldedContent && hopStartToken && reconnectsWithoutProgress < MAX_STREAM_RECONNECTS_WITHOUT_PROGRESS) {
         resumeToken = hopStartToken
         reconnectsWithoutProgress += 1
+        consecutiveReconnectFailures += 1
       } else {
         resumeToken = undefined
       }
@@ -286,6 +331,10 @@ async function continueArgonRequestStream(apiClient, origRequestStream, request,
         (hopFinishReason === 'CONTINUATION' || hopFinishReason === undefined)
 
       if (canResume) {
+        if (consecutiveReconnectFailures > 0) {
+          const delayMs = computeReconnectDelayMs(consecutiveReconnectFailures, meta?.reconnectBackoff)
+          await waitWithAbort(delayMs, request?.abortSignal)
+        }
         if (!baseBodyObj) baseBodyObj = JSON.parse(request.body)
         const nextReq = {
           ...request,
