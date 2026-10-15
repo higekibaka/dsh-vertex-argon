@@ -12,7 +12,7 @@
 
 ---
 
-`dsh-vertex-argon` 为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) 提供完整的 **Gemini 4 Argon** 接入支持，自动聚合 **Google Vertex AI**（服务账号 / ADC）与 **Google Gemini Developer API**（AI Studio API Key）双通道，修复内置 `pi-ai` 适配器误传 `thinkingBudget` 导致的 `HTTP 400` 报错，完整打通原生三档思考、思维链（Thought Summaries）与带签名的多轮工具调用。
+`dsh-vertex-argon` 为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) 提供完整的 **Gemini 4 Argon** 接入支持，自动聚合 **Google Vertex AI**（服务账号 / ADC）与 **Google Gemini Developer API**（AI Studio API Key）双通道，修复内置 `pi-ai` 适配器误传 `thinkingBudget` 导致的 `HTTP 400` 报错，完整打通原生三档思考、思维链（Thought Summaries）、`v1beta1` **Long Decode 跨段长生成自动续传**与带签名的多轮工具调用。
 
 Current release: **[1.1.4](https://github.com/higekibaka/dsh-vertex-argon)** · [npm](https://www.npmjs.com/package/dsh-vertex-argon)
 
@@ -25,6 +25,7 @@ Current release: **[1.1.4](https://github.com/higekibaka/dsh-vertex-argon)** · 
 | **思考控制参数** | 误判为旧模型并发送 `thinkingBudget: -1`，触发云端 `HTTP 400` | 原生发送 `thinkingLevel: "LOW" \| "MEDIUM" \| "HIGH"`，绝不传 `thinkingBudget` |
 | **思维链（思考摘要）** | 手动新增模型默认无 `reasoning` 标记，不请求摘要 | 固定开启 `includeThoughts: true`，流式解析 `thought: true` 实时展示思维链 |
 | **多轮工具调用回传** | 路由切换或签名不对齐时易丢失上下文 | 保持 `provider` / `model` 与 `thoughtSignature` 签名全链路一致 |
+| **Long Decode 长生成** | Vertex 硬编码 `v1` 且锁死 64K，遇 `CONTINUATION` 直接抛错断流 | 自动切换 `v1beta1` 跨 64K 分段续传（最高 512K）、断流检查点恢复，按首跳输入上报水位防误压缩 |
 | **采样参数净化** | 可能携带被 Argon 拒绝或忽略的采样字段 | 自动剥离 `temperature`、`topP`、`topK` 等无效采样参数 |
 | **通道管理与设置** | 需手改 `cordis.patch.yml` 并反复排查校验报错 | 自动检测双通道 + 内置 **设置 → Vertex Argon** 图形化实时调节页面 |
 
@@ -40,7 +41,8 @@ flowchart TD
     V --> P["onPayload 请求级净化与注入"]
     G --> P
     P --> T["注入 thinkingLevel: LOW / MEDIUM / HIGH 与 includeThoughts: true<br/>剔除 thinkingBudget 与 temperature / topP / topK"]
-    T --> S["Google GenAI Stream 响应"]
+    T --> L["v1beta1 Long Decode 续传引擎<br/>自动处理 CONTINUATION 跨段续接、断流检查点恢复与首跳输入计量"]
+    L --> S["Google GenAI Stream 响应"]
     S --> R1["thought: true → DSH 思维链面板"]
     S --> R2["functionCall + thoughtSignature → 原生工具卡片与多轮签名回放"]
 ```
@@ -102,7 +104,8 @@ dsh plugin --profile web add dsh-vertex-argon
 |---|---|---|---|
 | `showInModelPicker` | `true` | `true` / `false` | 是否在会话模型选择器中显示 `Vertex Argon` 分组（隐藏不影响已打开会话） |
 | `reasoning` | `medium` | `low` / `medium` / `high` | 默认思考档位，分别映射为原生 `LOW` / `MEDIUM` / `HIGH` |
-| `maxTokens` | `65536` | `1` – `65536` | 单次流式请求最大输出上限（含思考与正文 token，官方单次流式上限为 `65,536`） |
+| `longDecode` | `true` | `true` / `false` | 是否启用 `v1beta1` Long Decode 跨段自动续传（含断流检查点恢复与首跳输入防误压缩） |
+| `maxTokens` | `65536` | `1` – `524288` | 最大输出预算（默认 `65,536`；开启 `longDecode` 后最高可设为 `524,288` 跨 64K 分段续传） |
 | `contextWindow` | `1048576` | `1` – `1048576` | 输入、思考与输出共享的总上下文窗口（官方上限为 `1,048,576`） |
 
 ---

@@ -1,7 +1,7 @@
 {
   "name": "dsh-vertex-argon",
   "version": "1.1.4",
-  "description": "Google Vertex AI & Gemini API Argon plugin for DeepSeek Harness — native Low/Medium/High thinking levels, thought summaries, signed tool-call replay, and dedicated Settings UI.",
+  "description": "Google Vertex AI & Gemini API Argon plugin for DeepSeek Harness — native Low/Medium/High thinking levels, v1beta1 Long Decode continuation, thought summaries, signed tool-call replay, and dedicated Settings UI.",
   "license": "MIT",
   "repository": {
     "type": "git",

@@ -7,14 +7,21 @@ const { PiAiAdapter } = await shared('@deepseek-ai/dsh-llm-pi-ai')
 const { launchEnvironmentOf } = await shared('@deepseek-ai/dsh-launch-environment')
 const { googleVertexProvider } = await shared('@earendil-works/pi-ai/providers/google-vertex')
 const { googleProvider } = await shared('@earendil-works/pi-ai/providers/google')
+const { GoogleGenAI } = await shared('@google/genai')
 
 export const PROVIDER = 'google-vertex-argon'
 export const NATIVE_PROVIDER = 'google-vertex'
 export const MODEL = 'gemini-4-argon'
 export const GOOGLE_API_MODEL = 'gemini-4-argon-google'
 export const LEVELS = ['low', 'medium', 'high']
+export const MAX_SINGLE_CALL_TOKENS = 65536
+export const MAX_LONG_DECODE_TOKENS = 524288
+export const MAX_CONTINUATION_HOPS = 32
+const MAX_STREAM_RECONNECTS_WITHOUT_PROGRESS = 3
+const COMPACTION_HEADROOM_FLOOR = 131072
 const ENV_KEYS = ['GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_CLOUD_PROJECT', 'GCLOUD_PROJECT', 'GOOGLE_CLOUD_LOCATION', 'GOOGLE_CLOUD_API_KEY']
 const DEFAULT_THINKING_MAP = { off: null, minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: null, max: null }
+const ARGON_LONG_DECODE_SYMBOL = Symbol.for('dsh.vertexArgon.longDecode')
 
 const readVal = v => (v && typeof v === 'object' && typeof v.get === 'function') ? v.get() : v
 
@@ -61,6 +68,282 @@ export function detectPiAiArgonRoutes(ctx, explicitRoutes) {
 
 const TRANSIENT_GEMINI_STOP_RE = /(?:Unhandled stop reason:\s*(?:MALFORMED_RESPONSE|MALFORMED_FUNCTION_CALL|UNEXPECTED_TOOL_CALL|TOO_MANY_TOOL_CALLS)|Provider stopped with:\s*(?:MALFORMED_RESPONSE|MALFORMED_FUNCTION_CALL|UNEXPECTED_TOOL_CALL|OTHER|FINISH_REASON_UNSPECIFIED))/i
 
+function isEmptyPlaceholderPart(part) {
+  return Boolean(
+    part &&
+    typeof part === 'object' &&
+    part.text === '' &&
+    !part.thought &&
+    !part.thoughtSignature &&
+    !part.functionCall,
+  )
+}
+
+function hasMeaningfulPart(parts) {
+  return Array.isArray(parts) && parts.some(p =>
+    p &&
+    typeof p === 'object' &&
+    (p.thought || p.thoughtSignature || p.functionCall || (typeof p.text === 'string' && p.text.length > 0)),
+  )
+}
+
+function isAbortedError(err, signal) {
+  return Boolean(signal?.aborted) || (err instanceof Error && err.name === 'AbortError')
+}
+
+function isInitialApiRejection(err, receivedAnyChunk) {
+  return Boolean(
+    !receivedAnyChunk &&
+    err instanceof Error &&
+    (err.name === 'ApiError' || ('status' in err && typeof err.status === 'number')),
+  )
+}
+
+async function continueArgonRequestStream(apiClient, origRequestStream, request, meta) {
+  const { [ARGON_LONG_DECODE_SYMBOL]: _, ...restHttpOptions } = request?.httpOptions ?? {}
+  const enableContinuation = meta?.enabled !== false
+  if (
+    enableContinuation &&
+    typeof apiClient?.isVertexAI === 'function' &&
+    apiClient.isVertexAI() &&
+    !restHttpOptions.apiVersion &&
+    apiClient?.clientOptions?.httpOptions?.apiVersion === 'v1'
+  ) {
+    restHttpOptions.apiVersion = 'v1beta1'
+  }
+  const hopHttpOptions = Object.keys(restHttpOptions).length > 0 ? restHttpOptions : undefined
+  const firstReq = { ...request, httpOptions: hopHttpOptions }
+  const firstStream = await origRequestStream.call(apiClient, firstReq)
+  if (!enableContinuation) return firstStream
+
+  return (async function* () {
+    let baseBodyObj
+    let resumeToken
+    let reconnectsWithoutProgress = 0
+    let lastError
+    let hopCount = 0
+    let initialPromptTokens
+    let initialCachedTokens
+    let completedCandidatesTokens = 0
+    let completedThoughtsTokens = 0
+    let completedToolUsePromptTokens = 0
+    let completedBilledPromptTokens = 0
+    let completedBilledCachedTokens = 0
+    let completedBilledTotalTokens = 0
+    let openHop = async () => firstStream
+
+    while (true) {
+      hopCount += 1
+      const hopStartToken = resumeToken
+      let hopToken
+      let hopFinishReason
+      let hopHasPromptFeedback = false
+      let hopHasYieldedContent = false
+      let hopReceivedAnyChunk = false
+      let hopUsage
+      let hopError
+
+      try {
+        for await (const httpChunk of await openHop()) {
+          const raw = await httpChunk.json()
+          if (!raw || typeof raw !== 'object') {
+            yield { headers: httpChunk.headers, json: async () => raw }
+            continue
+          }
+          hopReceivedAnyChunk = true
+          if (raw.promptFeedback !== undefined && raw.promptFeedback !== null) {
+            hopHasPromptFeedback = true
+          }
+          let outRaw = raw
+          const candidate = Array.isArray(raw.candidates) ? raw.candidates[0] : undefined
+          if (candidate && typeof candidate === 'object') {
+            if (typeof candidate.continuationToken === 'string' && candidate.continuationToken.length > 0) {
+              hopToken = candidate.continuationToken
+            } else if (candidate.finishReason !== undefined && candidate.finishReason !== 'CONTINUATION') {
+              hopToken = undefined
+            }
+            if (candidate.finishReason !== undefined) {
+              hopFinishReason = candidate.finishReason
+            }
+            if (hasMeaningfulPart(candidate.content?.parts)) {
+              hopHasYieldedContent = true
+            }
+            const canContinueHop =
+              !hopHasPromptFeedback &&
+              Boolean(hopToken) &&
+              hopToken !== hopStartToken &&
+              hopCount < MAX_CONTINUATION_HOPS
+            if (candidate.finishReason === 'CONTINUATION' && canContinueHop) {
+              const nextCandidate = { ...candidate }
+              delete nextCandidate.finishReason
+              if (Array.isArray(nextCandidate.content?.parts)) {
+                const filteredParts = nextCandidate.content.parts.filter(p => !isEmptyPlaceholderPart(p))
+                nextCandidate.content = { ...nextCandidate.content, parts: filteredParts }
+              }
+              const nextCandidates = [...raw.candidates]
+              nextCandidates[0] = nextCandidate
+              outRaw = { ...outRaw, candidates: nextCandidates }
+            }
+          }
+          if (raw.usageMetadata && typeof raw.usageMetadata === 'object') {
+            const prompt = raw.usageMetadata.promptTokenCount ?? 0
+            const cached = raw.usageMetadata.cachedContentTokenCount ?? 0
+            const candidates = raw.usageMetadata.candidatesTokenCount ?? 0
+            const thoughts = raw.usageMetadata.thoughtsTokenCount ?? 0
+            const toolUsePrompt = raw.usageMetadata.toolUsePromptTokenCount ?? 0
+            const total = raw.usageMetadata.totalTokenCount ?? (prompt + candidates + thoughts + toolUsePrompt)
+            if (initialPromptTokens === undefined) initialPromptTokens = prompt
+            if (initialCachedTokens === undefined) initialCachedTokens = cached
+            hopUsage = { prompt, cached, candidates, thoughts, toolUsePrompt, total }
+            if (hopCount === 1) {
+              outRaw = {
+                ...outRaw,
+                usageMetadata: {
+                  ...raw.usageMetadata,
+                  initialPromptTokenCount: initialPromptTokens,
+                },
+              }
+            } else {
+              const mergedCandidates = completedCandidatesTokens + candidates
+              const mergedThoughts = completedThoughtsTokens + thoughts
+              const mergedToolUsePrompt = completedToolUsePromptTokens + toolUsePrompt
+              const mergedTotal = initialPromptTokens + mergedCandidates + mergedThoughts + mergedToolUsePrompt
+              outRaw = {
+                ...outRaw,
+                usageMetadata: {
+                  ...raw.usageMetadata,
+                  promptTokenCount: initialPromptTokens,
+                  ...(initialCachedTokens > 0 || raw.usageMetadata.cachedContentTokenCount !== undefined
+                    ? { cachedContentTokenCount: initialCachedTokens }
+                    : {}),
+                  candidatesTokenCount: mergedCandidates,
+                  ...(mergedThoughts > 0 || raw.usageMetadata.thoughtsTokenCount !== undefined
+                    ? { thoughtsTokenCount: mergedThoughts }
+                    : {}),
+                  ...(mergedToolUsePrompt > 0 || raw.usageMetadata.toolUsePromptTokenCount !== undefined
+                    ? { toolUsePromptTokenCount: mergedToolUsePrompt }
+                    : {}),
+                  totalTokenCount: mergedTotal,
+                  initialPromptTokenCount: initialPromptTokens,
+                  billedPromptTokenCount: completedBilledPromptTokens + prompt,
+                  billedCachedContentTokenCount: completedBilledCachedTokens + cached,
+                  billedTotalTokenCount: completedBilledTotalTokens + total,
+                },
+              }
+            }
+          }
+          yield { headers: httpChunk.headers, json: async () => outRaw }
+        }
+      } catch (error) {
+        hopError = { error }
+      }
+
+      if (hopUsage) {
+        completedCandidatesTokens += hopUsage.candidates
+        completedThoughtsTokens += hopUsage.thoughts
+        completedToolUsePromptTokens += hopUsage.toolUsePrompt
+        completedBilledPromptTokens += hopUsage.prompt
+        completedBilledCachedTokens += hopUsage.cached
+        completedBilledTotalTokens += hopUsage.total
+      }
+
+      if (
+        hopError &&
+        (isAbortedError(hopError.error, request?.abortSignal) ||
+          isInitialApiRejection(hopError.error, hopReceivedAnyChunk))
+      ) {
+        throw hopError.error
+      }
+
+      const hasNewToken = Boolean(hopToken) && hopToken !== hopStartToken
+      const madeProgress = hopHasYieldedContent || hasNewToken
+      if (hopError) lastError = hopError
+      else if (madeProgress) lastError = undefined
+
+      if (hopCount >= MAX_CONTINUATION_HOPS || hopHasPromptFeedback) {
+        resumeToken = undefined
+      } else if (hopFinishReason !== undefined) {
+        if (hopFinishReason === 'CONTINUATION' && hasNewToken) {
+          resumeToken = hopToken
+          reconnectsWithoutProgress = 0
+        } else {
+          resumeToken = undefined
+          reconnectsWithoutProgress = 0
+        }
+      } else if (hasNewToken) {
+        resumeToken = hopToken
+        reconnectsWithoutProgress = 0
+      } else if (!hopHasYieldedContent && hopStartToken && reconnectsWithoutProgress < MAX_STREAM_RECONNECTS_WITHOUT_PROGRESS) {
+        resumeToken = hopStartToken
+        reconnectsWithoutProgress += 1
+      } else {
+        resumeToken = undefined
+      }
+
+      const canResume =
+        Boolean(resumeToken) &&
+        !hopHasPromptFeedback &&
+        (hopFinishReason === 'CONTINUATION' || hopFinishReason === undefined)
+
+      if (canResume) {
+        if (!baseBodyObj) baseBodyObj = JSON.parse(request.body)
+        const nextReq = {
+          ...request,
+          body: JSON.stringify({ ...baseBodyObj, continuationToken: resumeToken }),
+          httpOptions: hopHttpOptions,
+        }
+        openHop = () => origRequestStream.call(apiClient, nextReq)
+        continue
+      }
+
+      if (hopError) throw hopError.error
+      if (hopFinishReason === undefined && !hopHasPromptFeedback && lastError) throw lastError.error
+      return
+    }
+  })()
+}
+
+let apiClientProtoRef = null
+let origApiClientRequestStream = null
+
+function getApiClientPrototype() {
+  if (apiClientProtoRef) return apiClientProtoRef
+  try {
+    const probe = new GoogleGenAI({ apiKey: 'argon-probe' })
+    if (probe?.apiClient) {
+      apiClientProtoRef = Object.getPrototypeOf(probe.apiClient)
+    }
+  } catch {}
+  return apiClientProtoRef
+}
+
+export function ensureGemini4ApiClientPatch() {
+  const proto = getApiClientPrototype()
+  if (!proto || typeof proto.requestStream !== 'function') return () => {}
+  if (origApiClientRequestStream) {
+    return () => {
+      if (proto.requestStream !== origApiClientRequestStream && origApiClientRequestStream) {
+        proto.requestStream = origApiClientRequestStream
+        origApiClientRequestStream = null
+      }
+    }
+  }
+  const orig = proto.requestStream
+  origApiClientRequestStream = orig
+  function patchedRequestStream(request) {
+    const meta = request?.httpOptions?.[ARGON_LONG_DECODE_SYMBOL]
+    if (!meta) return orig.call(this, request)
+    return continueArgonRequestStream(this, orig, request, meta)
+  }
+  proto.requestStream = patchedRequestStream
+  return () => {
+    if (proto.requestStream === patchedRequestStream) {
+      proto.requestStream = orig
+    }
+    origApiClientRequestStream = null
+  }
+}
+
 function wrapGemini4Stream(rawStream) {
   if (!rawStream || typeof rawStream[Symbol.asyncIterator] !== 'function') return rawStream
   return {
@@ -82,16 +365,30 @@ function wrapGemini4Stream(rawStream) {
   }
 }
 
-export function gemini4StreamSimple(nativeStream, requestModel, context, options = {}, defaultLevel = 'medium', upstreamModelId = requestModel.id) {
+export function gemini4StreamSimple(
+  nativeStream,
+  requestModel,
+  context,
+  options = {},
+  defaultLevel = 'medium',
+  upstreamModelId = requestModel.id,
+  longDecode = true,
+) {
+  ensureGemini4ApiClientPatch()
   const fallback = defaultLevel ?? (/cyber-permissive/i.test(requestModel?.id ?? '') ? 'high' : 'medium')
   const rawLevel = options.reasoning ?? fallback
   const mapped = requestModel?.thinkingLevelMap?.[rawLevel] ?? rawLevel
   const level = typeof mapped === 'string' ? mapped.toLowerCase() : fallback
   if (!LEVELS.includes(level)) throw new LlmError('Gemini 4 Argon requires low, medium or high.', 'UNSUPPORTED_REASONING_EFFORT')
   const { reasoning, thinking, thinkingBudgets, temperature, onPayload: prior, ...rest } = options
+  const requestedMaxTokens = options.maxTokens ?? requestModel.maxTokens
+  const effectiveMaxTokens =
+    longDecode === false && typeof requestedMaxTokens === 'number' && requestedMaxTokens > MAX_SINGLE_CALL_TOKENS
+      ? MAX_SINGLE_CALL_TOKENS
+      : requestedMaxTokens
   return wrapGemini4Stream(nativeStream(requestModel, context, {
     ...rest,
-    maxTokens: options.maxTokens ?? requestModel.maxTokens,
+    maxTokens: effectiveMaxTokens,
     async onPayload(payload, payloadModel) {
       const replacement = await prior?.(payload, payloadModel)
       const body = replacement === undefined ? payload : replacement
@@ -102,18 +399,31 @@ export function gemini4StreamSimple(nativeStream, requestModel, context, options
         throw new LlmError('Gemini 4 Argon received an incompatible model payload.', 'INVALID_REQUEST')
       }
       const { temperature: _t, topP: _tp, topK: _tk, candidateCount: _cc, frequencyPenalty: _fp, presencePenalty: _pp, ...cleanConfig } = body.config
+      const prevHttpOptions =
+        cleanConfig.httpOptions && typeof cleanConfig.httpOptions === 'object' && !Array.isArray(cleanConfig.httpOptions)
+          ? cleanConfig.httpOptions
+          : {}
       return {
         ...body,
         model: upstreamModelId,
-        config: { ...cleanConfig, thinkingConfig: { thinkingLevel: level.toUpperCase(), includeThoughts: true } },
+        config: {
+          ...cleanConfig,
+          automaticContinuation: false,
+          thinkingConfig: { thinkingLevel: level.toUpperCase(), includeThoughts: true },
+          httpOptions: {
+            ...prevHttpOptions,
+            [ARGON_LONG_DECODE_SYMBOL]: { enabled: longDecode !== false },
+          },
+        },
       }
     },
   }))
 }
 
 export function installGemini4PiAiPatch() {
+  const unpatchApiClient = ensureGemini4ApiClientPatch()
   const proto = PiAiAdapter?.prototype
-  if (!proto || typeof proto.current !== 'function') return () => {}
+  if (!proto || typeof proto.current !== 'function') return unpatchApiClient
   const origCurrent = proto.current
   const patchedProviders = new Map()
   const ensureGemini4Capabilities = piProvider => {
@@ -135,7 +445,7 @@ export function installGemini4PiAiPatch() {
     patchedProviders.set(piProvider, origStreamSimple)
     piProvider.streamSimple = function (requestModel, context, options = {}) {
       if (isGemini4Model(requestModel)) {
-        return gemini4StreamSimple((m, c, o) => piProvider.stream(m, c, o), requestModel, context, options, defaultReasoning, requestModel.id)
+        return gemini4StreamSimple((m, c, o) => piProvider.stream(m, c, o), requestModel, context, options, defaultReasoning, requestModel.id, true)
       }
       return origStreamSimple.call(this, requestModel, context, options)
     }
@@ -151,6 +461,7 @@ export function installGemini4PiAiPatch() {
   }
   proto.current = patchedCurrent
   return () => {
+    unpatchApiClient()
     if (proto.current === patchedCurrent) proto.current = origCurrent
     for (const [piProvider, origStreamSimple] of patchedProviders.entries()) {
       piProvider.streamSimple = origStreamSimple
@@ -163,15 +474,21 @@ export function resolveConfigValues(raw = {}) {
   const source = typeof raw === 'function' ? raw() : raw
   const showInModelPicker = readVal(source?.showInModelPicker) ?? true
   const reasoning = readVal(source?.reasoning) ?? 'medium'
+  const longDecode = readVal(source?.longDecode) ?? true
   const contextWindow = readVal(source?.contextWindow) ?? 1048576
-  const maxTokens = readVal(source?.maxTokens) ?? 65536
+  const rawMaxTokens = readVal(source?.maxTokens) ?? MAX_SINGLE_CALL_TOKENS
   if (!LEVELS.includes(reasoning)) throw new LlmError('Invalid default Argon effort.', 'INVALID_CONFIG')
-  for (const [key, val] of [['contextWindow', contextWindow], ['maxTokens', maxTokens]]) {
+  for (const [key, val] of [['contextWindow', contextWindow], ['maxTokens', rawMaxTokens]]) {
     if (!Number.isSafeInteger(val) || val <= 0) throw new LlmError('Invalid Argon ' + key, 'INVALID_CONFIG')
   }
+  const enabledLongDecode = Boolean(longDecode)
+  const capByMode = enabledLongDecode ? Math.min(rawMaxTokens, MAX_LONG_DECODE_TOKENS) : Math.min(rawMaxTokens, MAX_SINGLE_CALL_TOKENS)
+  const safeCompactionCap = contextWindow > COMPACTION_HEADROOM_FLOOR ? contextWindow - COMPACTION_HEADROOM_FLOOR : contextWindow
+  const maxTokens = Math.max(1, Math.min(capByMode, safeCompactionCap))
   return {
     showInModelPicker: Boolean(showInModelPicker),
     reasoning,
+    longDecode: enabledLongDecode,
     contextWindow,
     maxTokens,
     routes: source?.routes,
@@ -179,7 +496,7 @@ export function resolveConfigValues(raw = {}) {
 }
 
 /** Serve both Vertex AI Argon and Gemini API (google) Argon under the unified plugin group. */
-export function argonProvider(nativeVertex, models, defaultLevel = 'medium', nativeGoogle = googleProvider()) {
+export function argonProvider(nativeVertex, models, defaultLevel = 'medium', nativeGoogle = googleProvider(), longDecode = true) {
   const modelMap = new Map((Array.isArray(models) ? models : [models]).map(m => [m.id, m]))
   return {
     id: PROVIDER,
@@ -204,6 +521,7 @@ export function argonProvider(nativeVertex, models, defaultLevel = 'medium', nat
           { ...restOptions, ...(cleanEnv ? { env: cleanEnv } : {}), ...(apiKey ? { apiKey } : {}), maxTokens: options.maxTokens ?? configured.maxTokens },
           defaultLevel,
           MODEL,
+          longDecode,
         )
       }
       if (requestModel.api !== 'google-vertex') {
@@ -216,6 +534,7 @@ export function argonProvider(nativeVertex, models, defaultLevel = 'medium', nat
         { ...restOptions, ...(cleanEnv ? { env: cleanEnv } : {}), maxTokens: options.maxTokens ?? configured.maxTokens },
         defaultLevel,
         MODEL,
+        longDecode,
       )
     },
   }
@@ -263,6 +582,7 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
     const detected = detectPiAiArgonRoutes(ctx, cfg.routes)
     const key = JSON.stringify({
       r: cfg.reasoning,
+      ld: cfg.longDecode,
       cw: cfg.contextWindow,
       mt: cfg.maxTokens,
       v: detected.hasVertex,
@@ -329,14 +649,14 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
       })
     }
     const configuredMaxTokens = new Map(models.map(m => [m.id, cfg.maxTokens]))
-    const provider = argonProvider({ ...nativeVertex, auth }, models, cfg.reasoning, nativeGoogle)
+    const provider = argonProvider({ ...nativeVertex, auth }, models, cfg.reasoning, nativeGoogle, cfg.longDecode)
     cachedKey = key
     cachedProfiles = new Map([[PROVIDER, {
       provider: PROVIDER,
       displayName: 'Vertex Argon',
       piProvider: provider,
       reasoning: cfg.reasoning,
-      streamIdleTimeoutMs: 300000,
+      streamIdleTimeoutMs: cfg.longDecode ? 600000 : 300000,
       maxRequestImageBytes: 20 * 1024 * 1024,
       requestImagePixelBudget: 2048 * 2048,
       requestImageMaxBytes: 1024 * 1024,

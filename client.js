@@ -7,7 +7,7 @@ window.__ModuleLoader__.load({
     const dictionaries = {
       zh: {
         title: 'Vertex Argon',
-        subtitle: '自动聚合 Vertex AI 与 Gemini API 的 Argon 通道 · 原生三档思考与工具签名回传',
+        subtitle: '自动聚合 Vertex AI 与 Gemini API 的 Argon 通道 · 原生三档思考、Long Decode 自动续传与工具签名回传',
         show: '在模型选择器中显示 Vertex Argon 分组',
         showHint: '控制是否在会话模型选择器中列出 Vertex Argon 分组下的模型。正在使用该模型的会话不受隐藏影响。',
         visible: '已显示',
@@ -17,8 +17,12 @@ window.__ModuleLoader__.load({
         level_low: 'Low（低）',
         level_medium: 'Medium（默认）',
         level_high: 'High（高）',
-        maxTokensLabel: '单次流式最大输出（Max Output Tokens）',
-        maxTokensHint: '官方单次流式请求上限为 65,536 tokens（含思考与正文输出），这是上限而非固定消耗。',
+        longDecodeLabel: '长生成自动续传（Long Decode Continuation）',
+        longDecodeHint: '开启后自动走 v1beta1 端点并处理 CONTINUATION 令牌与断流检查点恢复；多段续传时按首跳输入上报上下文水位，避免误触发自动压缩。',
+        longDecodeOn: '已开启',
+        longDecodeOff: '已关闭',
+        maxTokensLabel: '最大输出预算（Max Output Tokens）',
+        maxTokensHint: '默认 65,536 tokens（单次流式上限）；开启 Long Decode 后最高可设为 524,288 tokens（跨 64K 分段自动续传，与输入共享 1M 总窗口）。',
         contextWindowLabel: '共享上下文窗口（Context Window）',
         contextWindowHint: '官方总窗口为 1,048,576 tokens，由输入、思考和输出共同共享。',
         resetDefaults: '恢复官方默认配置',
@@ -29,15 +33,15 @@ window.__ModuleLoader__.load({
         unavailable: '当前连接无法修改宿主设置。',
         how: '自动检测与使用方法',
         step1: '自动检测：只要在 DSH「设置 → 模型」的 Google（Gemini API）或 Google Vertex AI 中添加了 gemini-4-argon，本插件分组下就会自动出现对应的「Gemini 4 Argon (Vertex AI)」与「Gemini 4 Argon (Gemini API)」。',
-        step2: '凭据复用：Vertex AI 通道自动读取 Windows 环境变量（GOOGLE_APPLICATION_CREDENTIALS / GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION）；Gemini API 通道自动复用 Google 提供商配置的 GOOGLE_API_KEY。',
+        step2: '凭据复用：Vertex AI 通道自动读取环境变量（GOOGLE_APPLICATION_CREDENTIALS / GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION）；Gemini API 通道自动复用 Google 提供商配置的 GOOGLE_API_KEY。',
         step3: '在会话模型选择器中选择 Vertex Argon 分组下的对应模型，即可正常切换 Low / Medium / High 三档并查看思维链与工具调用卡片。',
         scope: '通道特性与双保险',
-        detail: '本插件不仅在 Vertex Argon 分组下提供完整支持 thought: true 思考摘要与 thoughtSignature 签名回传的模型入口，还同时为原生的 google 与 google-vertex 路由注入了 Gemini 4 thinkingLevel 兼容补丁，即使误选原分组条目也不会再报 thinkingBudget 400 错误。',
+        detail: '本插件不仅提供完整支持 thought: true 思考摘要、thoughtSignature 签名回传与 v1beta1 Long Decode 自动续传的模型入口，还同时为原生的 google 与 google-vertex 路由注入了 Gemini 4 兼容补丁。',
         route: '提供方路由：google-vertex-argon · 模型 ID：gemini-4-argon (Vertex AI) / gemini-4-argon-google (Gemini API)',
       },
       en: {
         title: 'Vertex Argon',
-        subtitle: 'Auto-detected Vertex AI & Gemini API Argon routes · native thinking levels & signed tool replay',
+        subtitle: 'Auto-detected Vertex AI & Gemini API Argon routes · native thinking levels, Long Decode continuation & signed tool replay',
         show: 'Show Vertex Argon group in the model picker',
         showHint: 'Controls whether Vertex Argon models appear in the model picker. Active conversations are unaffected.',
         visible: 'Visible',
@@ -47,8 +51,12 @@ window.__ModuleLoader__.load({
         level_low: 'Low',
         level_medium: 'Medium (Default)',
         level_high: 'High',
-        maxTokensLabel: 'Single-Request Max Output Tokens',
-        maxTokensHint: 'Official per-request streaming cap is 65,536 tokens (thinking + response combined).',
+        longDecodeLabel: 'Long Decode Automatic Continuation',
+        longDecodeHint: 'Routes Vertex AI via v1beta1 and automatically resumes CONTINUATION tokens and mid-stream checkpoints while preserving first-hop prompt token accounting for compaction.',
+        longDecodeOn: 'Enabled',
+        longDecodeOff: 'Disabled',
+        maxTokensLabel: 'Max Output Budget (Max Output Tokens)',
+        maxTokensHint: 'Defaults to 65,536 tokens (single-request streaming cap). With Long Decode enabled, up to 524,288 tokens can be generated across 64K continuation hops.',
         contextWindowLabel: 'Shared Context Window',
         contextWindowHint: 'Official 1,048,576-token window shared across input, thinking, and output tokens.',
         resetDefaults: 'Restore Official Defaults',
@@ -62,7 +70,7 @@ window.__ModuleLoader__.load({
         step2: 'Credential reuse: Vertex AI uses GOOGLE_APPLICATION_CREDENTIALS / GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION; Gemini API reuses your configured GOOGLE_API_KEY.',
         step3: 'Select either model under Vertex Argon in the model picker for full Low / Medium / High thinking summaries and tool calls.',
         scope: 'Scope & fallback protection',
-        detail: 'In addition to the dedicated Vertex Argon group, this plugin patches native google and google-vertex Gemini 4 requests so selecting the original entries also sends thinkingLevel instead of thinkingBudget.',
+        detail: 'In addition to the dedicated Vertex Argon group with Long Decode continuation, this plugin patches native google and google-vertex Gemini 4 requests so selecting the original entries also sends thinkingLevel instead of thinkingBudget.',
         route: 'Provider route: google-vertex-argon · Models: gemini-4-argon (Vertex AI) / gemini-4-argon-google (Gemini API)',
       },
     }
@@ -130,6 +138,7 @@ window.__ModuleLoader__.load({
       const val = state.value || {}
       const visible = val.showInModelPicker !== false
       const reasoning = val.reasoning || 'medium'
+      const longDecode = val.longDecode !== false
       const maxTokens = val.maxTokens || 65536
       const contextWindow = val.contextWindow || 1048576
       const disabled = pending || state.status !== 'ready' || !state.writable
@@ -148,14 +157,18 @@ window.__ModuleLoader__.load({
         try {
           const ok1 = await form.set('showInModelPicker', true)
           const ok2 = await form.set('reasoning', 'medium')
-          const ok3 = await form.set('maxTokens', 65536)
-          const ok4 = await form.set('contextWindow', 1048576)
-          setNotice(ok1 && ok2 && ok3 && ok4 ? 'saved' : 'error')
+          const ok3 = await form.set('longDecode', true)
+          const ok4 = await form.set('maxTokens', 65536)
+          const ok5 = await form.set('contextWindow', 1048576)
+          setNotice(ok1 && ok2 && ok3 && ok4 && ok5 ? 'saved' : 'error')
         } catch { setNotice('error') }
         finally { setPending(false) }
       }
 
       const fmt = n => Number(n).toLocaleString()
+      const maxTokenCaps = longDecode
+        ? [8192, 16384, 32768, 65536, 131072, 262144, 524288]
+        : [8192, 16384, 32768, 65536]
 
       return h('section', { className: 'local-vertex-argon', 'aria-label': t('title') },
         h('style', null,
@@ -203,9 +216,19 @@ window.__ModuleLoader__.load({
         ),
         h('div', { className: 'card' },
           h('div', { className: 'row' },
+            h('strong', { id: 'vertex-argon-longdecode-label' }, t('longDecodeLabel')),
+            h('button', {
+              type: 'button', role: 'switch', 'aria-checked': longDecode,
+              'aria-labelledby': 'vertex-argon-longdecode-label',
+              'aria-describedby': 'vertex-argon-longdecode-hint',
+              disabled, onClick: () => updateField('longDecode', !longDecode),
+            }, t(pending ? 'saving' : longDecode ? 'longDecodeOn' : 'longDecodeOff')),
+          ),
+          h('p', { className: 'muted', id: 'vertex-argon-longdecode-hint' }, t('longDecodeHint')),
+          h('div', { className: 'row', style: { marginTop: '16px' } },
             h('strong', null, t('maxTokensLabel') + ' (' + fmt(maxTokens) + ')'),
             h('div', { className: 'group', role: 'group', 'aria-label': t('maxTokensLabel') },
-              ...[8192, 16384, 32768, 65536].map(cap =>
+              ...maxTokenCaps.map(cap =>
                 h('button', {
                   key: cap, type: 'button', 'aria-pressed': maxTokens === cap,
                   disabled, onClick: () => updateField('maxTokens', cap),

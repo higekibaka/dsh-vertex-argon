@@ -1,14 +1,25 @@
 import { shared } from './runtime.js'
 const { default: z } = await shared('@deepseek-ai/schemastery')
-import { createArgonAdapter, installGemini4PiAiPatch, resolveConfigValues, detectPiAiArgonRoutes, PROVIDER, NATIVE_PROVIDER, LEVELS } from './adapter.js'
+import {
+  createArgonAdapter,
+  installGemini4PiAiPatch,
+  resolveConfigValues,
+  detectPiAiArgonRoutes,
+  PROVIDER,
+  NATIVE_PROVIDER,
+  LEVELS,
+  MAX_SINGLE_CALL_TOKENS,
+  MAX_LONG_DECODE_TOKENS,
+} from './adapter.js'
 
 export const name = 'local-vertex-argon'
 export const inject = ['llm']
 export const Config = z.object({
   showInModelPicker: z.boolean().default(true).volatile(),
   reasoning: z.union(LEVELS).default('medium').volatile(),
+  longDecode: z.boolean().default(true).volatile(),
   contextWindow: z.number().step(1).min(1).max(1048576).default(1048576).volatile(),
-  maxTokens: z.number().step(1).min(1).max(65536).default(65536).volatile(),
+  maxTokens: z.number().step(1).min(1).max(MAX_LONG_DECODE_TOKENS).default(MAX_SINGLE_CALL_TOKENS).volatile(),
 })
 
 export function apply(ctx, config) {
