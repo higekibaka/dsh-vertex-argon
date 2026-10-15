@@ -15,6 +15,8 @@ import {
   computeReconnectDelayMs,
 } from '../adapter.js'
 import { Config, apply } from '../index.js'
+import { bodyBytes, fetchErrorCodes } from '../diagnostics.js'
+import { recordSchema, diagnosticWriter, createDiagnosticHub, diagnosticDomain } from '../diagnostic-store.js'
 import { shared } from '../runtime.js'
 const { PiAiAdapter } = await shared('@deepseek-ai/dsh-llm-pi-ai')
 const { resolveRetryPolicy } = await shared('@deepseek-ai/dsh-llm')
@@ -454,4 +456,134 @@ test('abort, config validation, legacy max listener migration and scoped registr
   assert.equal(malformed.at(-1).reason.kind, 'error')
   assert.equal(malformed.at(-1).reason.failure.code, 'SERVER')
   mode = 'tool'
+})
+
+test('bounded diagnostics record multi-hop continuation, checkpoint drop recovery, dual-track tokens, and storage retention without leaking secrets', async () => {
+  assert.equal(bodyBytes('中文'), 6)
+  assert.equal(bodyBytes(new Uint8Array(10).subarray(2, 7)), 5)
+  const nestedErr = new TypeError('fetch failed', { cause: Object.assign(new Error('socket reset'), { code: 'ECONNRESET' }) })
+  assert.deepEqual(fetchErrorCodes(nestedErr), ['ECONNRESET'])
+
+  const map = new Map()
+  let domainClosed = false
+  const mockDomain = {
+    table(name) {
+      assert.equal(name, 'requests')
+      return {
+        put: async (k, v) => map.set(k, v),
+        delete: async k => map.delete(k),
+        entries: () => map.entries(),
+      }
+    },
+    close: async () => { domainClosed = true },
+  }
+  const hub = createDiagnosticHub(3)
+  const writer = diagnosticWriter(mockDomain, () => {}, 3)
+  hub.attachWriter(writer)
+
+  const a = createArgonAdapter(ctx, { ...config, maxTokens: 262144 }, undefined, undefined, r => hub.record(r))
+  let step = 0
+  customResponder = () => {
+    step += 1
+    if (step === 1) {
+      return sseResponse([
+        {
+          candidates: [{
+            content: { role: 'model', parts: [{ text: 'SECRET_THOUGHT ', thought: true, thoughtSignature: 'c2lnLTE=' }] },
+            continuationToken: 'SECRET_CKPT_TOKEN_1',
+          }],
+          usageMetadata: { promptTokenCount: 100, cachedContentTokenCount: 60, candidatesTokenCount: 0, thoughtsTokenCount: 30, totalTokenCount: 130 },
+        },
+      ])
+    }
+    if (step === 2) {
+      throw new TypeError('fetch failed', { cause: Object.assign(new Error('conn reset'), { code: 'ECONNRESET' }) })
+    }
+    if (step === 3) {
+      return sseResponse([
+        {
+          candidates: [{
+            content: { role: 'model', parts: [{ text: 'SECRET_PART_A ' }] },
+            finishReason: 'CONTINUATION',
+            continuationToken: 'SECRET_CONT_TOKEN_2',
+          }],
+          usageMetadata: { promptTokenCount: 130, cachedContentTokenCount: 90, candidatesTokenCount: 25, thoughtsTokenCount: 5, totalTokenCount: 160 },
+        },
+      ])
+    }
+    return sseResponse([
+      {
+        candidates: [{
+          content: { role: 'model', parts: [{ text: 'SECRET_PART_B' }] },
+          finishReason: 'STOP',
+        }],
+        usageMetadata: { promptTokenCount: 160, cachedContentTokenCount: 120, candidatesTokenCount: 15, thoughtsTokenCount: 0, totalTokenCount: 175 },
+      },
+    ])
+  }
+
+  try {
+    const chunks = await collect(a.stream(req('high', MODEL, 262144)))
+    assert.deepEqual(chunks.at(-1).reason, { kind: 'stop' })
+    await writer.flush()
+
+    const recent = hub.listRecent(10)
+    assert.equal(recent.length, 1)
+    const rec = recent[0]
+    assert.ok(recordSchema.safeParse(rec).success)
+    assert.equal(rec.route, 'google-vertex')
+    assert.equal(rec.apiVersion, 'v1beta1')
+    assert.equal(rec.thinkingLevel, 'HIGH')
+    assert.equal(rec.longDecodeEnabled, true)
+    assert.equal(rec.hopCount, 4)
+    assert.equal(rec.continuationCount, 1)
+    assert.equal(rec.reconnectCount, 2)
+    assert.equal(rec.recoveredFromDrop, true)
+    assert.equal(rec.outcome, 'done')
+
+    // Verify hop triggers and error code extraction
+    assert.equal(rec.hops[0].trigger, 'initial')
+    assert.equal(rec.hops[0].outcome, 'dropped')
+    assert.equal(rec.hops[1].trigger, 'checkpoint-reconnect')
+    assert.equal(rec.hops[1].outcome, 'transport-error')
+    assert.deepEqual(rec.hops[1].errorCodes, ['ECONNRESET'])
+    assert.ok(rec.hops[1].backoffDelayMs >= 450)
+    assert.equal(rec.hops[2].trigger, 'retry-same-checkpoint')
+    assert.equal(rec.hops[2].outcome, 'continued')
+    assert.ok(rec.hops[2].backoffDelayMs >= 900)
+    assert.equal(rec.hops[3].trigger, 'continuation')
+    assert.equal(rec.hops[3].outcome, 'done')
+    assert.equal(rec.hops[3].backoffDelayMs, 0)
+
+    // Verify dual-track token accounting (first-hop reported vs cumulative billed)
+    assert.equal(rec.tokenUsage.reportedInputTokens, 100)
+    assert.equal(rec.tokenUsage.reportedCacheTokens, 60)
+    assert.equal(rec.tokenUsage.outputTokens, 40)
+    assert.equal(rec.tokenUsage.thoughtsTokens, 35)
+    assert.equal(rec.tokenUsage.billedPromptTokens, 390)
+    assert.equal(rec.tokenUsage.billedCachedTokens, 270)
+    assert.equal(rec.tokenUsage.billedTotalTokens, 465)
+
+    // Verify zero secret leakage (prompts, thoughts, continuation tokens, API keys)
+    const serialized = JSON.stringify(rec)
+    assert.equal(serialized.includes('SECRET_'), false)
+    assert.equal(serialized.includes('fixture-key'), false)
+
+    // Verify bounded retention (limit=3)
+    for (let i = 1; i <= 4; i++) {
+      hub.record({
+        ...rec,
+        id: '00000000-0000-4000-8000-00000000000' + i,
+        startedAt: '2026-10-16T00:00:0' + i + '.000Z',
+      })
+      await writer.flush()
+    }
+    assert.equal(map.size, 3)
+    assert.equal(hub.listRecent(10).length, 3)
+    assert.equal(diagnosticDomain.name, 'vertex_argon_diagnostics')
+    await writer.close()
+    assert.equal(domainClosed, true)
+  } finally {
+    customResponder = null
+  }
 })

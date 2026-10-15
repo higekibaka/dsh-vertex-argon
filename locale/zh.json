@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Vertex Argon",
-    "description": "原生 Low / Medium / High 三档思考、思考摘要、Long Decode 跨段自动续传与工具调用签名回传；含专属设置页。"
+    "description": "原生 Low / Medium / High 三档思考、思考摘要、Long Decode 跨段自动续传、断流检查点恢复与请求级诊断面板；含专属设置页。"
   }
 }

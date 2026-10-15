@@ -2,6 +2,7 @@ import { access } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
 import { shared } from './runtime.js'
+import { createArgonDiagnosticTracker } from './diagnostics.js'
 const { LlmAdapter, LlmError, resolveRetryPolicy, resolveImageAttachmentAccess } = await shared('@deepseek-ai/dsh-llm')
 const { PiAiAdapter } = await shared('@deepseek-ai/dsh-llm-pi-ai')
 const { launchEnvironmentOf } = await shared('@deepseek-ai/dsh-launch-environment')
@@ -142,6 +143,7 @@ function waitWithAbort(delayMs, signal) {
 async function continueArgonRequestStream(apiClient, origRequestStream, request, meta) {
   const { [ARGON_LONG_DECODE_SYMBOL]: _, ...restHttpOptions } = request?.httpOptions ?? {}
   const enableContinuation = meta?.enabled !== false
+  const tracker = meta?.tracker
   if (
     enableContinuation &&
     typeof apiClient?.isVertexAI === 'function' &&
@@ -151,10 +153,29 @@ async function continueArgonRequestStream(apiClient, origRequestStream, request,
   ) {
     restHttpOptions.apiVersion = 'v1beta1'
   }
+  const effectiveApiVersion =
+    restHttpOptions.apiVersion || apiClient?.clientOptions?.httpOptions?.apiVersion || 'v1beta1'
+  tracker?.setApiVersion(effectiveApiVersion)
   const hopHttpOptions = Object.keys(restHttpOptions).length > 0 ? restHttpOptions : undefined
   const firstReq = { ...request, httpOptions: hopHttpOptions }
-  const firstStream = await origRequestStream.call(apiClient, firstReq)
-  if (!enableContinuation) return firstStream
+  const hop1Tracker = tracker?.beginHop({
+    hopIndex: 1,
+    trigger: 'initial',
+    usedContinuationToken: false,
+    backoffDelayMs: 0,
+    body: firstReq.body,
+  })
+  let firstStream
+  try {
+    firstStream = await origRequestStream.call(apiClient, firstReq)
+  } catch (error) {
+    hop1Tracker?.finish({
+      error,
+      aborted: isAbortedError(error, request?.abortSignal),
+    })
+    throw error
+  }
+  if (!enableContinuation && !tracker) return firstStream
 
   return (async function* () {
     let baseBodyObj
@@ -163,6 +184,9 @@ async function continueArgonRequestStream(apiClient, origRequestStream, request,
     let consecutiveReconnectFailures = 0
     let lastError
     let hopCount = 0
+    let nextHopTrigger = 'initial'
+    let nextHopBackoffMs = 0
+    let nextHopBody = firstReq.body
     let initialPromptTokens
     let initialCachedTokens
     let completedCandidatesTokens = 0
@@ -176,6 +200,16 @@ async function continueArgonRequestStream(apiClient, origRequestStream, request,
     while (true) {
       hopCount += 1
       const hopStartToken = resumeToken
+      const hopTracker =
+        hopCount === 1
+          ? hop1Tracker
+          : tracker?.beginHop({
+              hopIndex: hopCount,
+              trigger: nextHopTrigger,
+              usedContinuationToken: Boolean(hopStartToken),
+              backoffDelayMs: nextHopBackoffMs,
+              body: nextHopBody,
+            })
       let hopToken
       let hopFinishReason
       let hopHasPromptFeedback = false
@@ -197,6 +231,13 @@ async function continueArgonRequestStream(apiClient, origRequestStream, request,
           }
           let outRaw = raw
           const candidate = Array.isArray(raw.candidates) ? raw.candidates[0] : undefined
+          hopTracker?.onChunk({
+            status: 200,
+            hasCheckpoint: Boolean(
+              candidate && typeof candidate.continuationToken === 'string' && candidate.continuationToken.length > 0,
+            ),
+            finishReason: candidate?.finishReason,
+          })
           if (candidate && typeof candidate === 'object') {
             if (typeof candidate.continuationToken === 'string' && candidate.continuationToken.length > 0) {
               hopToken = candidate.continuationToken
@@ -210,6 +251,7 @@ async function continueArgonRequestStream(apiClient, origRequestStream, request,
               hopHasYieldedContent = true
             }
             const canContinueHop =
+              enableContinuation &&
               !hopHasPromptFeedback &&
               Boolean(hopToken) &&
               hopToken !== hopStartToken &&
@@ -286,13 +328,29 @@ async function continueArgonRequestStream(apiClient, origRequestStream, request,
         completedBilledPromptTokens += hopUsage.prompt
         completedBilledCachedTokens += hopUsage.cached
         completedBilledTotalTokens += hopUsage.total
+        tracker?.recordTokenUsage({
+          reportedInputTokens: initialPromptTokens,
+          reportedCacheTokens: initialCachedTokens ?? 0,
+          outputTokens: completedCandidatesTokens,
+          thoughtsTokens: completedThoughtsTokens,
+          billedPromptTokens: completedBilledPromptTokens,
+          billedCachedTokens: completedBilledCachedTokens,
+          billedTotalTokens: completedBilledTotalTokens,
+        })
       }
 
+      const abortedHop = Boolean(hopError && isAbortedError(hopError.error, request?.abortSignal))
       if (
         hopError &&
-        (isAbortedError(hopError.error, request?.abortSignal) ||
+        (abortedHop ||
           isNonRetryableApiRejection(hopError.error, hopReceivedAnyChunk, hopCount, Boolean(hopToken || hopStartToken)))
       ) {
+        hopTracker?.finish({
+          error: hopError.error,
+          aborted: abortedHop,
+          finishReason: hopFinishReason,
+          continued: false,
+        })
         throw hopError.error
       }
 
@@ -301,13 +359,14 @@ async function continueArgonRequestStream(apiClient, origRequestStream, request,
       if (hopError) lastError = hopError
       else if (madeProgress) lastError = undefined
 
-      if (hopCount >= MAX_CONTINUATION_HOPS || hopHasPromptFeedback) {
+      if (!enableContinuation || hopCount >= MAX_CONTINUATION_HOPS || hopHasPromptFeedback) {
         resumeToken = undefined
       } else if (hopFinishReason !== undefined) {
         if (hopFinishReason === 'CONTINUATION' && hasNewToken) {
           resumeToken = hopToken
           reconnectsWithoutProgress = 0
           consecutiveReconnectFailures = hopError ? 1 : 0
+          nextHopTrigger = hopError ? 'checkpoint-reconnect' : 'continuation'
         } else {
           resumeToken = undefined
           reconnectsWithoutProgress = 0
@@ -317,28 +376,42 @@ async function continueArgonRequestStream(apiClient, origRequestStream, request,
         resumeToken = hopToken
         reconnectsWithoutProgress = 0
         consecutiveReconnectFailures = 1
+        nextHopTrigger = 'checkpoint-reconnect'
       } else if (!hopHasYieldedContent && hopStartToken && reconnectsWithoutProgress < MAX_STREAM_RECONNECTS_WITHOUT_PROGRESS) {
         resumeToken = hopStartToken
         reconnectsWithoutProgress += 1
         consecutiveReconnectFailures += 1
+        nextHopTrigger = 'retry-same-checkpoint'
       } else {
         resumeToken = undefined
       }
 
       const canResume =
+        enableContinuation &&
         Boolean(resumeToken) &&
         !hopHasPromptFeedback &&
         (hopFinishReason === 'CONTINUATION' || hopFinishReason === undefined)
 
+      hopTracker?.finish({
+        error: hopError?.error,
+        aborted: false,
+        finishReason: hopFinishReason,
+        continued: canResume && hopFinishReason === 'CONTINUATION' && !hopError,
+      })
+
       if (canResume) {
+        let delayMs = 0
         if (consecutiveReconnectFailures > 0) {
-          const delayMs = computeReconnectDelayMs(consecutiveReconnectFailures, meta?.reconnectBackoff)
+          delayMs = computeReconnectDelayMs(consecutiveReconnectFailures, meta?.reconnectBackoff)
           await waitWithAbort(delayMs, request?.abortSignal)
         }
         if (!baseBodyObj) baseBodyObj = JSON.parse(request.body)
+        const nextBody = JSON.stringify({ ...baseBodyObj, continuationToken: resumeToken })
+        nextHopBackoffMs = delayMs
+        nextHopBody = nextBody
         const nextReq = {
           ...request,
-          body: JSON.stringify({ ...baseBodyObj, continuationToken: resumeToken }),
+          body: nextBody,
           httpOptions: hopHttpOptions,
         }
         openHop = () => origRequestStream.call(apiClient, nextReq)
@@ -393,24 +466,49 @@ export function ensureGemini4ApiClientPatch() {
   }
 }
 
-function wrapGemini4Stream(rawStream) {
+function wrapGemini4Stream(rawStream, tracker, signal) {
   if (!rawStream || typeof rawStream[Symbol.asyncIterator] !== 'function') return rawStream
   return {
     [Symbol.asyncIterator]: async function* () {
-      for await (const event of rawStream) {
-        if (event?.type === 'error' && typeof event?.error?.errorMessage === 'string' && TRANSIENT_GEMINI_STOP_RE.test(event.error.errorMessage)) {
-          yield {
-            ...event,
-            error: {
-              ...event.error,
-              errorMessage: `${event.error.errorMessage} (502 upstream transient finishReason)`,
-            },
+      try {
+        for await (const event of rawStream) {
+          if (event?.type === 'done') {
+            const stop = event.message?.stopReason
+            const outcome = stop === 'toolUse' ? 'tool-calls' : stop === 'length' ? 'max-tokens' : 'done'
+            tracker?.finishStream({ outcome })
+          } else if (event?.type === 'error') {
+            const isTransient =
+              typeof event?.error?.errorMessage === 'string' &&
+              TRANSIENT_GEMINI_STOP_RE.test(event.error.errorMessage)
+            tracker?.finishStream({
+              outcome: signal?.aborted ? 'aborted' : 'error',
+              error: event.error,
+              transientFinishReason: isTransient,
+            })
+            if (isTransient) {
+              yield {
+                ...event,
+                error: {
+                  ...event.error,
+                  errorMessage: `${event.error.errorMessage} (502 upstream transient finishReason)`,
+                },
+              }
+              continue
+            }
           }
-          continue
+          yield event
         }
-        yield event
+      } catch (error) {
+        tracker?.finishStream({
+          outcome: signal?.aborted ? 'aborted' : 'error',
+          error,
+        })
+        throw error
+      } finally {
+        tracker?.finalize(Boolean(signal?.aborted))
       }
     },
+    ...(typeof rawStream.result === 'function' ? { result: rawStream.result.bind(rawStream) } : {}),
   }
 }
 
@@ -422,6 +520,7 @@ export function gemini4StreamSimple(
   defaultLevel = 'medium',
   upstreamModelId = requestModel.id,
   longDecode = true,
+  recordDiagnostic,
 ) {
   ensureGemini4ApiClientPatch()
   const fallback = defaultLevel ?? (/cyber-permissive/i.test(requestModel?.id ?? '') ? 'high' : 'medium')
@@ -435,41 +534,60 @@ export function gemini4StreamSimple(
     longDecode === false && typeof requestedMaxTokens === 'number' && requestedMaxTokens > MAX_SINGLE_CALL_TOKENS
       ? MAX_SINGLE_CALL_TOKENS
       : requestedMaxTokens
-  return wrapGemini4Stream(nativeStream(requestModel, context, {
-    ...rest,
-    maxTokens: effectiveMaxTokens,
-    async onPayload(payload, payloadModel) {
-      const replacement = await prior?.(payload, payloadModel)
-      const body = replacement === undefined ? payload : replacement
-      if (!body || typeof body !== 'object' || Array.isArray(body) || !Array.isArray(body.contents) || !body.config || typeof body.config !== 'object' || Array.isArray(body.config)) {
-        throw new LlmError('Gemini 4 Argon received an incompatible native payload.', 'INVALID_REQUEST')
-      }
-      if (body.model !== requestModel.id && body.model !== upstreamModelId) {
-        throw new LlmError('Gemini 4 Argon received an incompatible model payload.', 'INVALID_REQUEST')
-      }
-      const { temperature: _t, topP: _tp, topK: _tk, candidateCount: _cc, frequencyPenalty: _fp, presencePenalty: _pp, ...cleanConfig } = body.config
-      const prevHttpOptions =
-        cleanConfig.httpOptions && typeof cleanConfig.httpOptions === 'object' && !Array.isArray(cleanConfig.httpOptions)
-          ? cleanConfig.httpOptions
-          : {}
-      return {
-        ...body,
-        model: upstreamModelId,
-        config: {
-          ...cleanConfig,
-          automaticContinuation: false,
-          thinkingConfig: { thinkingLevel: level.toUpperCase(), includeThoughts: true },
-          httpOptions: {
-            ...prevHttpOptions,
-            [ARGON_LONG_DECODE_SYMBOL]: { enabled: longDecode !== false },
-          },
-        },
-      }
+  const tracker = createArgonDiagnosticTracker(
+    {
+      model: requestModel?.id,
+      route: requestModel?.api,
+      apiVersion: longDecode === false ? 'v1' : 'v1beta1',
+      thinkingLevel: level.toUpperCase(),
+      longDecode: longDecode !== false,
+      maxTokens: effectiveMaxTokens,
+      sessionId: options.sessionId,
     },
-  }))
+    recordDiagnostic,
+  )
+  return wrapGemini4Stream(
+    nativeStream(requestModel, context, {
+      ...rest,
+      maxTokens: effectiveMaxTokens,
+      async onPayload(payload, payloadModel) {
+        const replacement = await prior?.(payload, payloadModel)
+        const body = replacement === undefined ? payload : replacement
+        if (!body || typeof body !== 'object' || Array.isArray(body) || !Array.isArray(body.contents) || !body.config || typeof body.config !== 'object' || Array.isArray(body.config)) {
+          throw new LlmError('Gemini 4 Argon received an incompatible native payload.', 'INVALID_REQUEST')
+        }
+        if (body.model !== requestModel.id && body.model !== upstreamModelId) {
+          throw new LlmError('Gemini 4 Argon received an incompatible model payload.', 'INVALID_REQUEST')
+        }
+        const { temperature: _t, topP: _tp, topK: _tk, candidateCount: _cc, frequencyPenalty: _fp, presencePenalty: _pp, ...cleanConfig } = body.config
+        const prevHttpOptions =
+          cleanConfig.httpOptions && typeof cleanConfig.httpOptions === 'object' && !Array.isArray(cleanConfig.httpOptions)
+            ? cleanConfig.httpOptions
+            : {}
+        return {
+          ...body,
+          model: upstreamModelId,
+          config: {
+            ...cleanConfig,
+            automaticContinuation: false,
+            thinkingConfig: { thinkingLevel: level.toUpperCase(), includeThoughts: true },
+            httpOptions: {
+              ...prevHttpOptions,
+              [ARGON_LONG_DECODE_SYMBOL]: {
+                enabled: longDecode !== false,
+                tracker,
+              },
+            },
+          },
+        }
+      },
+    }),
+    tracker,
+    options.signal,
+  )
 }
 
-export function installGemini4PiAiPatch() {
+export function installGemini4PiAiPatch(recordDiagnostic) {
   const unpatchApiClient = ensureGemini4ApiClientPatch()
   const proto = PiAiAdapter?.prototype
   if (!proto || typeof proto.current !== 'function') return unpatchApiClient
@@ -494,7 +612,7 @@ export function installGemini4PiAiPatch() {
     patchedProviders.set(piProvider, origStreamSimple)
     piProvider.streamSimple = function (requestModel, context, options = {}) {
       if (isGemini4Model(requestModel)) {
-        return gemini4StreamSimple((m, c, o) => piProvider.stream(m, c, o), requestModel, context, options, defaultReasoning, requestModel.id, true)
+        return gemini4StreamSimple((m, c, o) => piProvider.stream(m, c, o), requestModel, context, options, defaultReasoning, requestModel.id, true, recordDiagnostic)
       }
       return origStreamSimple.call(this, requestModel, context, options)
     }
@@ -545,7 +663,7 @@ export function resolveConfigValues(raw = {}) {
 }
 
 /** Serve both Vertex AI Argon and Gemini API (google) Argon under the unified plugin group. */
-export function argonProvider(nativeVertex, models, defaultLevel = 'medium', nativeGoogle = googleProvider(), longDecode = true) {
+export function argonProvider(nativeVertex, models, defaultLevel = 'medium', nativeGoogle = googleProvider(), longDecode = true, recordDiagnostic) {
   const modelMap = new Map((Array.isArray(models) ? models : [models]).map(m => [m.id, m]))
   return {
     id: PROVIDER,
@@ -571,6 +689,7 @@ export function argonProvider(nativeVertex, models, defaultLevel = 'medium', nat
           defaultLevel,
           MODEL,
           longDecode,
+          recordDiagnostic,
         )
       }
       if (requestModel.api !== 'google-vertex') {
@@ -584,6 +703,7 @@ export function argonProvider(nativeVertex, models, defaultLevel = 'medium', nat
         defaultLevel,
         MODEL,
         longDecode,
+        recordDiagnostic,
       )
     },
   }
@@ -607,7 +727,7 @@ export class ArgonAdapter extends LlmAdapter {
   stream(options) { return this.inner.stream(options) }
 }
 
-export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertexProvider(), nativeGoogle = googleProvider()) {
+export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertexProvider(), nativeGoogle = googleProvider(), recordDiagnostic) {
   resolveConfigValues(configInput)
   const environment = launchEnvironmentOf(ctx)
   const resolveSecret = async name => {
@@ -698,7 +818,7 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
       })
     }
     const configuredMaxTokens = new Map(models.map(m => [m.id, cfg.maxTokens]))
-    const provider = argonProvider({ ...nativeVertex, auth }, models, cfg.reasoning, nativeGoogle, cfg.longDecode)
+    const provider = argonProvider({ ...nativeVertex, auth }, models, cfg.reasoning, nativeGoogle, cfg.longDecode, recordDiagnostic)
     cachedKey = key
     cachedProfiles = new Map([[PROVIDER, {
       provider: PROVIDER,

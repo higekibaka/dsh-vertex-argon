@@ -11,6 +11,13 @@ import {
   MAX_SINGLE_CALL_TOKENS,
   MAX_LONG_DECODE_TOKENS,
 } from './adapter.js'
+import {
+  diagnosticDomain,
+  diagnosticWriter,
+  createDiagnosticHub,
+  diagnosticsInvocation,
+  ArgonDiagnosticsService,
+} from './diagnostic-store.js'
 
 export const name = 'local-vertex-argon'
 export const inject = ['llm']
@@ -23,8 +30,44 @@ export const Config = z.object({
 })
 
 export function apply(ctx, config) {
-  const adapter = createArgonAdapter(ctx, () => config)
-  const unpatchPiAi = installGemini4PiAiPatch()
+  const hub = createDiagnosticHub()
+  ctx.inject?.(['storageDomain'], async storageCtx => {
+    let disposed = false
+    let writer
+    storageCtx.effect(() => async () => {
+      disposed = true
+      if (writer) hub.detachWriter(writer)
+      await writer?.close()
+    }, 'vertex-argon: bounded diagnostics')
+    let domain
+    try {
+      domain = await storageCtx.storageDomain.open(diagnosticDomain)
+      if (disposed) {
+        await domain.close()
+        return
+      }
+      writer = diagnosticWriter(domain, message => storageCtx.logger?.warn?.(message))
+      hub.attachWriter(writer)
+    } catch {
+      try { await domain?.close() } catch {}
+      storageCtx.logger?.warn?.('Vertex Argon diagnostic storage could not open; model requests remain available.')
+    }
+  })
+  ctx.inject?.(['typert'], tctx => {
+    tctx.effect(() => tctx.typert.register({
+      package: 'dsh-vertex-argon',
+      face: 'host',
+      schemas: [],
+      model: { services: [], events: [], objects: [] },
+      invocations: [diagnosticsInvocation()],
+    }), 'vertex-argon: diagnostics remote descriptor')
+  })
+  try {
+    if (ctx.root && ctx.events) new ArgonDiagnosticsService(ctx, hub)
+  } catch {}
+  const recordDiagnostic = record => hub.record(record)
+  const adapter = createArgonAdapter(ctx, () => config, undefined, undefined, recordDiagnostic)
+  const unpatchPiAi = installGemini4PiAiPatch(recordDiagnostic)
   const registration = ctx.llm.registerAdapter([PROVIDER], adapter)
   ctx.effect(() => () => {
     unpatchPiAi()

@@ -4,6 +4,52 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const h = React.createElement
     const ns = 'settings.localVertexArgon'
+
+    function parseListRecentRequest(value) {
+      if (value === undefined || value === null) return { limit: 20 }
+      if (typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid diagnostics request')
+      const limit = value.limit === undefined ? 20 : Number(value.limit)
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('Invalid diagnostics limit')
+      return { limit }
+    }
+
+    function parseListRecentResult(value) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid diagnostics response')
+      if (value.ok === false) {
+        if (typeof value.error !== 'string') throw new Error('Invalid diagnostics error response')
+        return value
+      }
+      if (value.ok !== true || !Array.isArray(value.records)) throw new Error('Invalid diagnostics records response')
+      return value
+    }
+
+    function diagnosticsCodec(direction) {
+      const schema = {
+        parse: value => (direction === 'request' ? parseListRecentRequest(value) : parseListRecentResult(value)),
+      }
+      return {
+        mode: 'strict',
+        typeSymbol: 'dsh-vertex-argon/listRecent' + (direction === 'request' ? 'Request' : 'Result'),
+        schema,
+        create: () => schema,
+      }
+    }
+
+    const DIAGNOSTICS_INVOCATION = {
+      id: 'dsh-vertex-argon#vertexArgonDiagnostics/listRecent',
+      service: 'vertexArgonDiagnostics',
+      namespace: 'vertexArgonDiagnostics',
+      method: 'listRecent',
+      invocation: { kind: 'direct' },
+      parameters: [{ name: 'request', wire: 'request', source: 'json', codec: diagnosticsCodec('request') }],
+      result: diagnosticsCodec('result'),
+    }
+
+    const DIAGNOSTICS_REMOTE = {
+      package: 'dsh-vertex-argon',
+      descriptors: [DIAGNOSTICS_INVOCATION],
+    }
+
     const dictionaries = {
       zh: {
         title: 'Vertex Argon',
@@ -18,7 +64,7 @@ window.__ModuleLoader__.load({
         level_medium: 'Medium（默认）',
         level_high: 'High（高）',
         longDecodeLabel: '长生成自动续传（Long Decode Continuation）',
-        longDecodeHint: '开启后自动走 v1beta1 端点并处理 CONTINUATION 令牌与断流检查点恢复；多段续传时按首跳输入上报上下文水位，避免误触发自动压缩。',
+        longDecodeHint: '开启后自动走 v1beta1 端点并处理 CONTINUATION 令牌与断流检查点指数退避恢复；多段续传时按首跳输入上报上下文水位，避免误触发自动压缩。',
         longDecodeOn: '已开启',
         longDecodeOff: '已关闭',
         maxTokensLabel: '最大输出预算（Max Output Tokens）',
@@ -38,6 +84,29 @@ window.__ModuleLoader__.load({
         scope: '通道特性与双保险',
         detail: '本插件不仅提供完整支持 thought: true 思考摘要、thoughtSignature 签名回传与 v1beta1 Long Decode 自动续传的模型入口，还同时为原生的 google 与 google-vertex 路由注入了 Gemini 4 兼容补丁。',
         route: '提供方路由：google-vertex-argon · 模型 ID：gemini-4-argon (Vertex AI) / gemini-4-argon-google (Gemini API)',
+        diagTitle: '最近请求诊断摘要',
+        diagSubtitle: '点击展开查看最近 20 次请求的通道版本、64K 续传跳数、断流检查点自愈与双轨 Token 计量',
+        diagRefresh: '刷新诊断',
+        diagLoading: '正在读取诊断记录…',
+        diagEmpty: '暂无请求诊断记录。使用 Gemini 4 Argon 发起一次对话后即可在此查看。',
+        diagError: '读取诊断记录失败，请确认已重启 DSH 加载最新版插件后重试。',
+        diagStorageHint: '诊断落盘目录：~/.dsh/storages/vertex_argon_diagnostics/requests/（最多保留最近 200 条，严格脱敏，不保存对话正文、图片或密钥）',
+        diagStatTotal: '最近记录',
+        diagStatOk: '成功完成',
+        diagStatCont: '64K 续传跳数',
+        diagStatRecovered: '断流自愈',
+        diagStatErr: '异常/失败',
+        diagOutcome_done: '完成',
+        diagOutcome_tool: '工具调用',
+        diagOutcome_max: '达到上限',
+        diagOutcome_error: '失败',
+        diagOutcome_aborted: '已取消',
+        diagOutcome_incomplete: '中断',
+        diagOutcome_recovered: '断流已自愈',
+        diagTrigger_initial: '首跳',
+        diagTrigger_continuation: '64K续传',
+        diagTrigger_reconnect: '检查点重连',
+        diagTrigger_retry: '同检查点重试',
       },
       en: {
         title: 'Vertex Argon',
@@ -52,7 +121,7 @@ window.__ModuleLoader__.load({
         level_medium: 'Medium (Default)',
         level_high: 'High',
         longDecodeLabel: 'Long Decode Automatic Continuation',
-        longDecodeHint: 'Routes Vertex AI via v1beta1 and automatically resumes CONTINUATION tokens and mid-stream checkpoints while preserving first-hop prompt token accounting for compaction.',
+        longDecodeHint: 'Routes Vertex AI via v1beta1 and automatically resumes CONTINUATION tokens and mid-stream checkpoints with exponential backoff while preserving first-hop prompt token accounting for compaction.',
         longDecodeOn: 'Enabled',
         longDecodeOff: 'Disabled',
         maxTokensLabel: 'Max Output Budget (Max Output Tokens)',
@@ -72,6 +141,29 @@ window.__ModuleLoader__.load({
         scope: 'Scope & fallback protection',
         detail: 'In addition to the dedicated Vertex Argon group with Long Decode continuation, this plugin patches native google and google-vertex Gemini 4 requests so selecting the original entries also sends thinkingLevel instead of thinkingBudget.',
         route: 'Provider route: google-vertex-argon · Models: gemini-4-argon (Vertex AI) / gemini-4-argon-google (Gemini API)',
+        diagTitle: 'Recent Request Diagnostics Summary',
+        diagSubtitle: 'Expand to inspect the latest 20 requests: route/API version, 64K continuation hops, checkpoint drop recovery, and dual-track token accounting',
+        diagRefresh: 'Refresh',
+        diagLoading: 'Loading diagnostics…',
+        diagEmpty: 'No request diagnostics recorded yet. Send a message with Gemini 4 Argon to populate this view.',
+        diagError: 'Could not load diagnostics. Restart DSH after upgrading the plugin and try again.',
+        diagStorageHint: 'Persisted under ~/.dsh/storages/vertex_argon_diagnostics/requests/ (retains latest 200 records; strictly scrubbed—no prompts, images, or credentials).',
+        diagStatTotal: 'Records',
+        diagStatOk: 'Succeeded',
+        diagStatCont: '64K Cont. Hops',
+        diagStatRecovered: 'Drop Recoveries',
+        diagStatErr: 'Errors',
+        diagOutcome_done: 'Done',
+        diagOutcome_tool: 'Tool Calls',
+        diagOutcome_max: 'Max Tokens',
+        diagOutcome_error: 'Error',
+        diagOutcome_aborted: 'Aborted',
+        diagOutcome_incomplete: 'Incomplete',
+        diagOutcome_recovered: 'Recovered',
+        diagTrigger_initial: 'Initial',
+        diagTrigger_continuation: '64K Cont.',
+        diagTrigger_reconnect: 'Ckpt Reconnect',
+        diagTrigger_retry: 'Ckpt Retry',
       },
     }
 
@@ -131,7 +223,163 @@ window.__ModuleLoader__.load({
       })
     }
 
-    function Settings({ form, t }) {
+    function formatTimeShort(iso) {
+      if (typeof iso !== 'string') return ''
+      const d = new Date(iso)
+      if (Number.isNaN(d.getTime())) return iso.slice(11, 19)
+      return d.toLocaleTimeString([], { hour12: false })
+    }
+
+    function formatDuration(ms) {
+      if (typeof ms !== 'number' || !Number.isFinite(ms)) return '0ms'
+      if (ms < 1000) return Math.round(ms) + 'ms'
+      return (ms / 1000).toFixed(2) + 's'
+    }
+
+    function DiagnosticsPanel({ loadDiagnostics, t }) {
+      const [open, setOpen] = React.useState(false)
+      const [loading, setLoading] = React.useState(false)
+      const [error, setError] = React.useState(false)
+      const [records, setRecords] = React.useState([])
+
+      const refresh = React.useCallback(async () => {
+        if (typeof loadDiagnostics !== 'function') {
+          setError(true)
+          return
+        }
+        setLoading(true)
+        setError(false)
+        try {
+          const res = await loadDiagnostics(20)
+          if (res && res.ok === true && Array.isArray(res.records)) {
+            setRecords(res.records)
+          } else {
+            setError(true)
+          }
+        } catch {
+          setError(true)
+        } finally {
+          setLoading(false)
+        }
+      }, [loadDiagnostics])
+
+      React.useEffect(() => {
+        if (open) void refresh()
+      }, [open, refresh])
+
+      const fmt = n => (typeof n === 'number' && Number.isFinite(n) ? Number(n).toLocaleString() : '-')
+      const total = records.length
+      const okCount = records.filter(r => r.outcome === 'done' || r.outcome === 'tool-calls' || r.outcome === 'max-tokens').length
+      const contHops = records.reduce((acc, r) => acc + (r.continuationCount || 0), 0)
+      const recoveredCount = records.filter(r => r.recoveredFromDrop).length
+      const errCount = records.filter(r => r.outcome === 'error').length
+
+      const outcomeBadge = r => {
+        if (r.recoveredFromDrop) return { text: t('diagOutcome_recovered'), cls: 'badge-recovered' }
+        switch (r.outcome) {
+          case 'done': return { text: t('diagOutcome_done'), cls: 'badge-ok' }
+          case 'tool-calls': return { text: t('diagOutcome_tool'), cls: 'badge-ok' }
+          case 'max-tokens': return { text: t('diagOutcome_max'), cls: 'badge-warn' }
+          case 'error': return { text: t('diagOutcome_error'), cls: 'badge-err' }
+          case 'aborted': return { text: t('diagOutcome_aborted'), cls: 'badge-muted' }
+          default: return { text: t('diagOutcome_incomplete'), cls: 'badge-muted' }
+        }
+      }
+
+      const triggerLabel = tr => {
+        switch (tr) {
+          case 'continuation': return t('diagTrigger_continuation')
+          case 'checkpoint-reconnect': return t('diagTrigger_reconnect')
+          case 'retry-same-checkpoint': return t('diagTrigger_retry')
+          default: return t('diagTrigger_initial')
+        }
+      }
+
+      return h('div', { className: 'card' },
+        h('div', { className: 'row', style: { marginBottom: '4px' } },
+          h('button', {
+            type: 'button',
+            className: 'diag-toggle',
+            'aria-expanded': open,
+            onClick: () => setOpen(!open),
+          },
+            h('span', { style: { marginRight: '6px', display: 'inline-block' } }, open ? '▾' : '▸'),
+            h('strong', null, t('diagTitle')),
+          ),
+          open
+            ? h('button', { type: 'button', disabled: loading, onClick: refresh }, loading ? t('diagLoading') : t('diagRefresh'))
+            : null,
+        ),
+        h('p', { className: 'muted', style: { marginBottom: open ? '12px' : '0' } }, t('diagSubtitle')),
+        open
+          ? h('div', { className: 'diag-body' },
+              error
+                ? h('p', { className: 'status error', role: 'alert' }, t('diagError'))
+                : records.length === 0 && !loading
+                  ? h('p', { className: 'muted' }, t('diagEmpty'))
+                  : h(React.Fragment, null,
+                      h('div', { className: 'diag-stats' },
+                        h('span', { className: 'diag-stat' }, t('diagStatTotal') + ': ' + total),
+                        h('span', { className: 'diag-stat' }, t('diagStatOk') + ': ' + okCount),
+                        h('span', { className: 'diag-stat' }, t('diagStatCont') + ': ' + contHops),
+                        h('span', { className: 'diag-stat' }, t('diagStatRecovered') + ': ' + recoveredCount),
+                        h('span', { className: 'diag-stat' }, t('diagStatErr') + ': ' + errCount),
+                      ),
+                      h('div', { className: 'diag-list' },
+                        ...records.map(r => {
+                          const badge = outcomeBadge(r)
+                          const u = r.tokenUsage || {}
+                          const hops = Array.isArray(r.hops) ? r.hops : []
+                          const showHops = hops.length > 1 || r.reconnectCount > 0 || r.outcome === 'error'
+                          const routeLabel = r.route === 'google-generative-ai' ? 'Gemini API' : 'Vertex AI'
+                          return h('div', { key: r.id, className: 'diag-item' },
+                            h('div', { className: 'diag-item-head' },
+                              h('span', { className: 'diag-mono' }, formatTimeShort(r.startedAt)),
+                              h('span', { className: 'diag-chip' }, routeLabel + ' · ' + r.apiVersion),
+                              h('span', { className: 'diag-chip' }, r.thinkingLevel),
+                              h('span', { className: 'diag-badge ' + badge.cls }, badge.text),
+                              r.failureCategory ? h('span', { className: 'diag-chip badge-err' }, r.failureCategory) : null,
+                              h('span', { className: 'diag-mono', style: { marginLeft: 'auto' } },
+                                (r.hopCount || 1) + ' hop' + ((r.hopCount || 1) > 1 ? 's' : '') + ' · ' + formatDuration(r.durationMs)
+                              ),
+                            ),
+                            u.reportedInputTokens !== null || u.outputTokens !== null
+                              ? h('div', { className: 'diag-tokens muted' },
+                                  'Tokens — In: ' + fmt(u.reportedInputTokens) +
+                                  (u.reportedCacheTokens ? ' (Cache: ' + fmt(u.reportedCacheTokens) + ')' : '') +
+                                  ' · Out: ' + fmt(u.outputTokens) +
+                                  (u.thoughtsTokens ? ' · Think: ' + fmt(u.thoughtsTokens) : '') +
+                                  ((r.hopCount || 1) > 1 && u.billedTotalTokens !== null
+                                    ? ' | Billed In: ' + fmt(u.billedPromptTokens) + ' · Billed Total: ' + fmt(u.billedTotalTokens)
+                                    : '')
+                                )
+                              : null,
+                            showHops
+                              ? h('div', { className: 'diag-hops' },
+                                  ...hops.map(hp =>
+                                    h('div', { key: hp.hopIndex, className: 'diag-hop-row' },
+                                      '#' + hp.hopIndex + ' [' + triggerLabel(hp.trigger) + ']' +
+                                      (hp.backoffDelayMs > 0 ? ' (backoff ' + hp.backoffDelayMs + 'ms)' : '') +
+                                      ' · HTTP ' + (hp.status ?? '-') +
+                                      ' · ' + hp.chunkCount + ' chunks' +
+                                      (hp.finishReason ? ' · ' + hp.finishReason : '') +
+                                      (Array.isArray(hp.errorCodes) && hp.errorCodes.length > 0 ? ' · ' + hp.errorCodes.join(',') : '') +
+                                      ' · ' + formatDuration(hp.durationMs)
+                                    )
+                                  ),
+                                )
+                              : null,
+                          )
+                        }),
+                      ),
+                    ),
+              h('p', { className: 'muted', style: { marginTop: '10px', fontSize: '12px' } }, t('diagStorageHint')),
+            )
+          : null,
+      )
+    }
+
+    function Settings({ form, loadDiagnostics, t }) {
       const state = React.useSyncExternalStore(listener => form.subscribe(listener), () => form.getSnapshot(), () => form.getSnapshot())
       const [pending, setPending] = React.useState(false)
       const [notice, setNotice] = React.useState('')
@@ -186,7 +434,24 @@ window.__ModuleLoader__.load({
           '.local-vertex-argon button:disabled{opacity:.55;cursor:default}' +
           '.local-vertex-argon .status{min-height:22px;font-size:13px;color:var(--dsw-alias-label-secondary);margin-top:6px}' +
           '.local-vertex-argon .status.error{color:var(--dsw-alias-state-error-primary)}' +
-          '.local-vertex-argon ol{padding-left:22px;margin:8px 0}.local-vertex-argon li{margin:8px 0}'
+          '.local-vertex-argon ol{padding-left:22px;margin:8px 0}.local-vertex-argon li{margin:8px 0}' +
+          '.local-vertex-argon .diag-toggle{border:none;background:transparent;padding:4px 0;min-width:0;text-align:left}' +
+          '.local-vertex-argon .diag-toggle:hover:not(:disabled){background:transparent;opacity:.85}' +
+          '.local-vertex-argon .diag-stats{display:flex;gap:12px;flex-wrap:wrap;padding:8px 12px;border-radius:8px;background:var(--dsw-alias-bg-layer-2);margin-bottom:10px;font-size:12px}' +
+          '.local-vertex-argon .diag-stat{font-weight:500}' +
+          '.local-vertex-argon .diag-list{display:flex;flex-direction:column;gap:8px;max-height:360px;overflow-y:auto;padding-right:2px}' +
+          '.local-vertex-argon .diag-item{padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);font-size:12.5px}' +
+          '.local-vertex-argon .diag-item-head{display:flex;gap:8px;align-items:center;flex-wrap:wrap}' +
+          '.local-vertex-argon .diag-mono{font-family:ui-monospace,monospace;font-size:12px}' +
+          '.local-vertex-argon .diag-chip{padding:1px 7px;border-radius:6px;background:var(--dsw-alias-bg-layer-2);font-size:11.5px}' +
+          '.local-vertex-argon .diag-badge{padding:1px 8px;border-radius:999px;font-weight:600;font-size:11.5px}' +
+          '.local-vertex-argon .badge-ok{color:var(--dsw-alias-state-success-primary);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 12%,transparent)}' +
+          '.local-vertex-argon .badge-recovered{color:var(--dsw-alias-brand-primary);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 14%,transparent)}' +
+          '.local-vertex-argon .badge-warn{color:var(--dsw-alias-state-warn-primary);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 14%,transparent)}' +
+          '.local-vertex-argon .badge-err{color:var(--dsw-alias-state-error-primary);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 12%,transparent)}' +
+          '.local-vertex-argon .badge-muted{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-2)}' +
+          '.local-vertex-argon .diag-tokens{margin-top:6px;font-size:12px;font-family:ui-monospace,monospace}' +
+          '.local-vertex-argon .diag-hops{margin-top:6px;padding-top:6px;border-top:1px dashed var(--dsw-alias-border-l2);display:flex;flex-direction:column;gap:3px;font-family:ui-monospace,monospace;font-size:11.5px;color:var(--dsw-alias-label-secondary)}'
         ),
         h('h2', null, t('title')),
         h('p', { className: 'muted' }, t('subtitle')),
@@ -266,6 +531,7 @@ window.__ModuleLoader__.load({
           h('p', null, t('detail')),
           h('p', { className: 'muted' }, t('route')),
         ),
+        h(DiagnosticsPanel, { loadDiagnostics, t }),
       )
     }
 
@@ -275,10 +541,77 @@ window.__ModuleLoader__.load({
         ctx.effect(() => ctx.locale.register(ns, dictionaries), 'vertex-argon: locale')
         const form = ctx.configForms.get('local-vertex-argon')
         ctx.effect(() => installAdjacentPicker(ctx), 'vertex-argon: adjacent model picker')
+
+        let active = true
+        let mountedOn
+        let pendingMount
+        let disposeMount
+        const getRemote = () => {
+          try { return ctx.get('remote') } catch { return undefined }
+        }
+        const identity = remote => remote?.[Symbol.for('cordis.original')] ?? remote
+        async function ensureRemoteReady() {
+          if (!active) throw new Error('Vertex Argon client disposed')
+          if (pendingMount) return pendingMount
+          const remote = getRemote()
+          if (mountedOn && mountedOn === identity(remote)) return
+          pendingMount = (async () => {
+            const release = disposeMount
+            disposeMount = undefined
+            mountedOn = undefined
+            await release?.()
+            if (!remote || typeof remote.$mount !== 'function') throw new Error('Remote connection not ready')
+            const dispose = await remote.$mount(DIAGNOSTICS_REMOTE)
+            if (!active) {
+              await dispose?.()
+              throw new Error('Vertex Argon client disposed')
+            }
+            disposeMount = dispose
+            mountedOn = identity(remote)
+          })()
+          try {
+            await pendingMount
+          } finally {
+            pendingMount = undefined
+          }
+        }
+
+        async function loadDiagnostics(limit = 20) {
+          try {
+            await ensureRemoteReady()
+            const api = ctx.get('remote.vertexArgonDiagnostics')
+            if (typeof api?.listRecent !== 'function') return { ok: false, error: 'Diagnostics service unavailable' }
+            const response = await api.listRecent({ limit })
+            if (response?.ok === false && typeof response.error === 'object') {
+              return { ok: false, error: String(response.error?.message || 'Read failed') }
+            }
+            const result = response?.ok === true && Object.hasOwn(response, 'value') ? response.value : response
+            return parseListRecentResult(result)
+          } catch (err) {
+            return { ok: false, error: err instanceof Error ? err.message : 'Read failed' }
+          }
+        }
+
+        ctx.effect(() => {
+          void ensureRemoteReady().catch(() => {})
+          return async () => {
+            active = false
+            await pendingMount?.catch(() => {})
+            const dispose = disposeMount
+            disposeMount = undefined
+            mountedOn = undefined
+            await dispose?.()
+          }
+        }, 'vertex-argon: diagnostics remote lifetime')
+
+        ctx.on?.('connection/reset', () => {
+          void ensureRemoteReady().catch(() => {})
+        })
+
         ctx.effect(() => ctx.configForms.whileServed(['local-vertex-argon'], () =>
           ctx.slots.inject('settings.section', () => ctx.slots.register({
             name: 'settings.section', id: 'local-vertex-argon', order: 36,
-            label: () => ctx.locale.bind(ns)('title'), locale: ns, inject: () => ({ form }),
+            label: () => ctx.locale.bind(ns)('title'), locale: ns, inject: () => ({ form, loadDiagnostics }),
           }, Settings)),
         ), 'vertex-argon: settings section')
       },

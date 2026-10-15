@@ -14,7 +14,7 @@
 
 `dsh-vertex-argon` 为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) 提供完整的 **Gemini 4 Argon** 接入支持，自动聚合 **Google Vertex AI**（服务账号 / ADC）与 **Google Gemini Developer API**（AI Studio API Key）双通道，修复内置 `pi-ai` 适配器误传 `thinkingBudget` 导致的 `HTTP 400` 报错，完整打通原生三档思考、思维链（Thought Summaries）、`v1beta1` **Long Decode 跨段长生成自动续传**与带签名的多轮工具调用。
 
-Current release: **[1.2.1](https://github.com/higekibaka/dsh-vertex-argon)** · [npm](https://www.npmjs.com/package/dsh-vertex-argon)
+Current release: **[1.3.0](https://github.com/higekibaka/dsh-vertex-argon)** · [npm](https://www.npmjs.com/package/dsh-vertex-argon)
 
 ---
 
@@ -27,7 +27,7 @@ Current release: **[1.2.1](https://github.com/higekibaka/dsh-vertex-argon)** · 
 | **多轮工具调用回传** | 路由切换或签名不对齐时易丢失上下文 | 保持 `provider` / `model` 与 `thoughtSignature` 签名全链路一致 |
 | **Long Decode 长生成** | Vertex 硬编码 `v1` 且锁死 64K，遇 `CONTINUATION` 直接抛错断流 | 自动切换 `v1beta1` 跨 64K 分段零延迟续传（最高 512K）、断流检查点指数退避恢复，按首跳输入上报水位防误压缩 |
 | **采样参数净化** | 可能携带被 Argon 拒绝或忽略的采样字段 | 自动剥离 `temperature`、`topP`、`topK` 等无效采样参数 |
-| **通道管理与设置** | 需手改 `cordis.patch.yml` 并反复排查校验报错 | 自动检测双通道 + 内置 **设置 → Vertex Argon** 图形化实时调节页面 |
+| **通道管理与设置** | 需手改 `cordis.patch.yml` 并反复排查校验报错 | 自动检测双通道 + 内置 **设置 → Vertex Argon** 实时调节与「最近请求诊断摘要」折叠面板 |
 
 ---
 
@@ -107,6 +107,12 @@ dsh plugin --profile web add dsh-vertex-argon
 | `longDecode` | `true` | `true` / `false` | 是否启用 `v1beta1` Long Decode 跨段自动续传（含断流检查点恢复与首跳输入防误压缩） |
 | `maxTokens` | `65536` | `1` – `524288` | 最大输出预算（默认 `65,536`；开启 `longDecode` 后最高可设为 `524,288` 跨 64K 分段续传） |
 | `contextWindow` | `1048576` | `1` – `1048576` | 输入、思考与输出共享的总上下文窗口（官方上限为 `1,048,576`） |
+
+### 🩺 结构化请求诊断与「最近请求诊断摘要」面板（v1.3.0+）
+
+- **有界持久化存储（`vertex_argon_diagnostics`）**：通过宿主 `storageDomain` 自动在 `~/.dsh/storages/vertex_argon_diagnostics/requests/` 下记录最近 **200 条**请求元数据（单请求最多记录 16 跳，异步队列上限 32 条，严格脱敏，绝不保存对话正文、图片、`continuationToken` 明文或密钥）。
+- **逐跳与双轨 Token 追踪**：完整记录每次请求的通道（`google-vertex` / `google-generative-ai`）、API 版本（`v1beta1` / `v1`）、思考档位、每一跳的触发原因（`initial` / `continuation` / `checkpoint-reconnect` / `retry-same-checkpoint`）、退避等待耗时（`backoffDelayMs`）、底层传输错误码白名单（如 `ECONNRESET`、`ETIMEDOUT`）以及上报水位（首跳输入）与多跳累计计费 Token 对比。
+- **图形化折叠面板**：在 **设置 → Vertex Argon** 页面底部点击展开 **「最近请求诊断摘要」**，即可直接查看最近 20 次请求的耗时、跳数、断流自愈状态与逐跳明细。
 
 ---
 
