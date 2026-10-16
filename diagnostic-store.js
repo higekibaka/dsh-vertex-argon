@@ -100,7 +100,8 @@ export function diagnosticWriter(domain, warn = () => {}, limit = 200) {
       tail = tail
         .then(async () => {
           if (failed) return
-          const oldest = [...table.entries()].sort((a, b) => a[1].startedAt.localeCompare(b[1].startedAt))
+          // Bolt ⚡: Optimized ISO 8601 date string sorting by replacing slow localeCompare with operators
+          const oldest = [...table.entries()].sort((a, b) => a[1].startedAt < b[1].startedAt ? -1 : (a[1].startedAt > b[1].startedAt ? 1 : 0))
           for (const [id] of oldest.slice(0, Math.max(0, oldest.length - limit + 1))) {
             if (!(await table.delete(id))) throw new Error('diagnostic retention failed')
           }
@@ -119,7 +120,8 @@ export function diagnosticWriter(domain, warn = () => {}, limit = 200) {
         const cap = Math.min(Math.max(1, Number(max) || 20), limit)
         return [...table.entries()]
           .map(([, v]) => v)
-          .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+          // Bolt ⚡: Optimized ISO 8601 date string sorting by replacing slow localeCompare with operators
+          .sort((a, b) => b.startedAt < a.startedAt ? -1 : (b.startedAt > a.startedAt ? 1 : 0))
           .slice(0, cap)
       } catch {
         return []
@@ -141,7 +143,8 @@ export function createDiagnosticHub(limit = 200) {
   let activeWriter = null
   const trimMemory = () => {
     if (memory.size <= limit) return
-    const sorted = [...memory.entries()].sort((a, b) => a[1].startedAt.localeCompare(b[1].startedAt))
+    // Bolt ⚡: Optimized ISO 8601 date string sorting by replacing slow localeCompare with operators
+    const sorted = [...memory.entries()].sort((a, b) => a[1].startedAt < b[1].startedAt ? -1 : (a[1].startedAt > b[1].startedAt ? 1 : 0))
     for (const [id] of sorted.slice(0, memory.size - limit)) {
       memory.delete(id)
     }
@@ -175,7 +178,8 @@ export function createDiagnosticHub(limit = 200) {
         }
       }
       return [...merged.values()]
-        .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+        // Bolt ⚡: Optimized ISO 8601 date string sorting by replacing slow localeCompare with operators
+        .sort((a, b) => b.startedAt < a.startedAt ? -1 : (b.startedAt > a.startedAt ? 1 : 0))
         .slice(0, cap)
     },
   }
