@@ -223,11 +223,14 @@ window.__ModuleLoader__.load({
       })
     }
 
+    // Bolt ⚡: Cache Intl.DateTimeFormat instance to avoid expensive object creation in tight render loops
+    const timeFormatter = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: false })
+
     function formatTimeShort(iso) {
       if (typeof iso !== 'string') return ''
       const d = new Date(iso)
       if (Number.isNaN(d.getTime())) return iso.slice(11, 19)
-      return d.toLocaleTimeString([], { hour12: false })
+      return timeFormatter.format(d)
     }
 
     function formatDuration(ms) {
@@ -235,6 +238,9 @@ window.__ModuleLoader__.load({
       if (ms < 1000) return Math.round(ms) + 'ms'
       return (ms / 1000).toFixed(2) + 's'
     }
+
+    // Bolt ⚡: Cache Intl.NumberFormat instance outside component to avoid expensive object creation on every render
+    const numberFormatter = new Intl.NumberFormat()
 
     function DiagnosticsPanel({ loadDiagnostics, t }) {
       const [open, setOpen] = React.useState(false)
@@ -267,7 +273,7 @@ window.__ModuleLoader__.load({
         if (open) void refresh()
       }, [open, refresh])
 
-      const fmt = n => (typeof n === 'number' && Number.isFinite(n) ? Number(n).toLocaleString() : '-')
+      const fmt = n => (typeof n === 'number' && Number.isFinite(n) ? numberFormatter.format(n) : '-')
       const total = records.length
       const okCount = records.filter(r => r.outcome === 'done' || r.outcome === 'tool-calls' || r.outcome === 'max-tokens').length
       const contHops = records.reduce((acc, r) => acc + (r.continuationCount || 0), 0)
@@ -413,7 +419,7 @@ window.__ModuleLoader__.load({
         finally { setPending(false) }
       }
 
-      const fmt = n => Number(n).toLocaleString()
+      const fmt = n => numberFormatter.format(Number(n))
       const maxTokenCaps = longDecode
         ? [8192, 16384, 32768, 65536, 131072, 262144, 524288]
         : [8192, 16384, 32768, 65536]
