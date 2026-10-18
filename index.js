@@ -1,7 +1,14 @@
 import { shared } from './runtime.js'
+import { createInteractionStateHub, interactionStateDomain } from './interaction-state.js'
+import { SERVICE_TIERS } from './service-level.js'
+import { createResponseHub, responseDomain } from './response-store.js'
+import { inspectorInvocations } from './inspector-service.js'
+import { createInspectorTool } from './inspector-tool.js'
+import { createRequestAssociationHub } from './request-association.js'
 const { default: z } = await shared('@deepseek-ai/schemastery')
 import {
   createArgonAdapter,
+  createConfiguredInteractionQuery,
   installGemini4PiAiPatch,
   resolveConfigValues,
   detectPiAiArgonRoutes,
@@ -16,6 +23,7 @@ import {
   diagnosticWriter,
   createDiagnosticHub,
   diagnosticsInvocation,
+  recoveryInvocations,
   ArgonDiagnosticsService,
 } from './diagnostic-store.js'
 
@@ -25,12 +33,51 @@ export const Config = z.object({
   showInModelPicker: z.boolean().default(true).volatile(),
   reasoning: z.union(LEVELS).default('medium').volatile(),
   longDecode: z.boolean().default(true).volatile(),
+  googleProtocol: z.union(['generate-content', 'interactions']).default('generate-content').volatile(),
+  vertexProtocol: z.union(['generate-content', 'interactions']).default('generate-content').volatile(),
+  googleServiceTier: z.union(SERVICE_TIERS).default('standard').volatile(),
+  vertexServiceTier: z.union(SERVICE_TIERS).default('standard').volatile(),
+  vertexPaygoOnly: z.boolean().default(false).volatile(),
+  retainRawResponses: z.boolean().default(false).volatile(),
+  interactionsBackground: z.boolean().default(false).volatile(),
+  allowInteractionStorage: z.boolean().default(false).volatile(),
   contextWindow: z.number().step(1).min(1).max(1048576).default(1048576).volatile(),
   maxTokens: z.number().step(1).min(1).max(MAX_LONG_DECODE_TOKENS).default(MAX_SINGLE_CALL_TOKENS).volatile(),
 })
 
 export function apply(ctx, config) {
   const hub = createDiagnosticHub()
+  const associations = createRequestAssociationHub((id, locator) => hub.link(id, locator))
+  ctx.effect(() => () => associations.close(), 'vertex-argon: request association lifetime')
+  const taskHub = createInteractionStateHub()
+  const responseHub = createResponseHub()
+  const query = createConfiguredInteractionQuery(ctx, () => config)
+  ctx.effect(() => () => query.close(), 'vertex-argon: read-only query lifetime')
+  ctx.effect(() => () => responseHub.close(), 'vertex-argon: raw response memory lifetime')
+  ctx.inject?.(['storageDomain'], async storageCtx => {
+    let disposed = false, domain
+    storageCtx.effect(() => async () => { disposed = true; await responseHub.detach(domain) }, 'vertex-argon: opt-in raw response retention')
+    try {
+      domain = await storageCtx.storageDomain.open(responseDomain)
+      if (disposed) { await domain.close(); return }
+      responseHub.attach(domain)
+    } catch {
+      try { await domain?.close() } catch {}
+      storageCtx.logger?.warn?.('Vertex Argon raw response storage unavailable; enabled captures are memory-only.')
+    }
+  })
+  ctx.inject?.(['storageDomain'], async storageCtx => {
+    let disposed = false
+    storageCtx.effect(() => async () => { disposed = true; await taskHub.close() }, 'vertex-argon: background interaction recovery')
+    try {
+      const domain = await storageCtx.storageDomain.open(interactionStateDomain)
+      if (disposed) { await domain.close(); return }
+      taskHub.attach(domain)
+    } catch {
+      taskHub.fail()
+      storageCtx.logger?.warn?.('Vertex Argon background recovery storage unavailable; background creation is disabled.')
+    }
+  })
   ctx.inject?.(['storageDomain'], async storageCtx => {
     let disposed = false
     let writer
@@ -59,14 +106,17 @@ export function apply(ctx, config) {
       face: 'host',
       schemas: [],
       model: { services: [], events: [], objects: [] },
-      invocations: [diagnosticsInvocation()],
+      invocations: [diagnosticsInvocation(), ...recoveryInvocations(), ...inspectorInvocations()],
     }), 'vertex-argon: diagnostics remote descriptor')
   })
   try {
-    if (ctx.root && ctx.events) new ArgonDiagnosticsService(ctx, hub)
+    if (ctx.root && ctx.events) new ArgonDiagnosticsService(ctx, hub, taskHub, {responseHub, query, readEvent: request => ctx.get?.('sessionQuery')?.readEvent(request)})
   } catch {}
+  ctx.inject?.(['tools', 'vertexArgonDiagnostics'], toolCtx => {
+    toolCtx.effect(() => toolCtx.tools.register(createInspectorTool(toolCtx.vertexArgonDiagnostics)), 'vertex-argon: read-only inspection tool')
+  })
   const recordDiagnostic = record => hub.record(record)
-  const adapter = createArgonAdapter(ctx, () => config, undefined, undefined, recordDiagnostic)
+  const adapter = createArgonAdapter(ctx, () => config, undefined, undefined, recordDiagnostic, taskHub, responseHub)
   const unpatchPiAi = installGemini4PiAiPatch(recordDiagnostic)
   const registration = ctx.llm.registerAdapter([PROVIDER], adapter)
   ctx.effect(() => () => {
@@ -74,6 +124,10 @@ export function apply(ctx, config) {
     registration?.()
   })
   if (typeof ctx.on === 'function') {
+    ctx.on('llm/stream', (options, next) => associations.stream(options, next))
+    ctx.on('agent/assistant-stream', payload => associations.frame(payload))
+    ctx.on('session/event', (session, event) => associations.event(session, event))
+    ctx.on('agent/disposed', ({agent}) => associations.dispose(agent))
     ctx.on('agent/request', async (_payload, next) => {
       const proposed = await next()
       if (

@@ -3,6 +3,15 @@ import { homedir } from 'node:os'
 import { resolve } from 'node:path'
 import { shared } from './runtime.js'
 import { createArgonDiagnosticTracker } from './diagnostics.js'
+import { createInteractionsHandler } from './interaction-adapter.js'
+import { interactionImageRequestTarget } from './interaction-image.js'
+import { SERVICE_TIERS, resolveServicePolicy, mergeServiceHeaders } from './service-level.js'
+import { generateContentHistory } from './interactions-input.js'
+import { createGoogleSignatureBridge } from './google-signatures.js'
+import { createInteractionQuery } from './interaction-query.js'
+import { assertPreparedStructuredOutput } from './structured-output.js'
+import { continueArgonRequestStream, STREAM_READ_TIMEOUT_MS, LONG_DECODE_SYMBOL as ARGON_LONG_DECODE_SYMBOL } from './generate-content.js'
+export { MAX_CONTINUATION_HOPS, RECONNECT_INITIAL_DELAY_MS, RECONNECT_MAX_DELAY_MS, RECONNECT_JITTER_RATIO, computeReconnectDelayMs } from './generate-content.js'
 const { LlmAdapter, LlmError, resolveRetryPolicy, resolveImageAttachmentAccess } = await shared('@deepseek-ai/dsh-llm')
 const { PiAiAdapter } = await shared('@deepseek-ai/dsh-llm-pi-ai')
 const { launchEnvironmentOf } = await shared('@deepseek-ai/dsh-launch-environment')
@@ -16,16 +25,10 @@ export const MODEL = 'gemini-4-argon'
 export const GOOGLE_API_MODEL = 'gemini-4-argon-google'
 export const LEVELS = ['low', 'medium', 'high']
 export const MAX_SINGLE_CALL_TOKENS = 65536
-export const MAX_LONG_DECODE_TOKENS = 524288
-export const MAX_CONTINUATION_HOPS = 32
-export const RECONNECT_INITIAL_DELAY_MS = 500
-export const RECONNECT_MAX_DELAY_MS = 10000
-export const RECONNECT_JITTER_RATIO = 0.1
-const MAX_STREAM_RECONNECTS_WITHOUT_PROGRESS = 3
+export const MAX_LONG_DECODE_TOKENS = 1048576
 const COMPACTION_HEADROOM_FLOOR = 131072
 const ENV_KEYS = ['GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_CLOUD_PROJECT', 'GCLOUD_PROJECT', 'GOOGLE_CLOUD_LOCATION', 'GOOGLE_CLOUD_API_KEY']
 const DEFAULT_THINKING_MAP = { off: null, minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: null, max: null }
-const ARGON_LONG_DECODE_SYMBOL = Symbol.for('dsh.vertexArgon.longDecode')
 
 const readVal = v => (v && typeof v === 'object' && typeof v.get === 'function') ? v.get() : v
 
@@ -71,359 +74,6 @@ export function detectPiAiArgonRoutes(ctx, explicitRoutes) {
 }
 
 const TRANSIENT_GEMINI_STOP_RE = /(?:Unhandled stop reason:\s*(?:MALFORMED_RESPONSE|MALFORMED_FUNCTION_CALL|UNEXPECTED_TOOL_CALL|TOO_MANY_TOOL_CALLS)|Provider stopped with:\s*(?:MALFORMED_RESPONSE|MALFORMED_FUNCTION_CALL|UNEXPECTED_TOOL_CALL|OTHER|FINISH_REASON_UNSPECIFIED))/i
-
-function isEmptyPlaceholderPart(part) {
-  return Boolean(
-    part &&
-    typeof part === 'object' &&
-    part.text === '' &&
-    !part.thought &&
-    !part.thoughtSignature &&
-    !part.functionCall,
-  )
-}
-
-function hasMeaningfulPart(parts) {
-  return Array.isArray(parts) && parts.some(p =>
-    p &&
-    typeof p === 'object' &&
-    (p.thought || p.thoughtSignature || p.functionCall || (typeof p.text === 'string' && p.text.length > 0)),
-  )
-}
-
-function isAbortedError(err, signal) {
-  return Boolean(signal?.aborted) || (err instanceof Error && err.name === 'AbortError')
-}
-
-function isNonRetryableApiRejection(err, receivedAnyChunk, hopCount, hasCheckpointToken) {
-  if (receivedAnyChunk) return false
-  if (!(err instanceof Error && (err.name === 'ApiError' || ('status' in err && typeof err.status === 'number')))) {
-    return false
-  }
-  if (!hasCheckpointToken || hopCount <= 1) return true
-  const status = typeof err.status === 'number' ? err.status : 0
-  if (status === 408 || status === 429 || (status >= 500 && status < 600)) return false
-  return true
-}
-
-export function computeReconnectDelayMs(attempt, options = {}) {
-  const initialDelayMs = options?.initialDelayMs ?? RECONNECT_INITIAL_DELAY_MS
-  if (!(initialDelayMs > 0)) return 0
-  const maxDelayMs = options?.maxDelayMs ?? RECONNECT_MAX_DELAY_MS
-  const jitterRatio = options?.jitterRatio ?? RECONNECT_JITTER_RATIO
-  const random = options?.random ?? Math.random
-  const exponent = Math.min(Math.max(0, attempt - 1), 10)
-  const exponential = Math.min(initialDelayMs * (2 ** exponent), maxDelayMs)
-  const jitter = 1 - jitterRatio + 2 * jitterRatio * random()
-  return Math.round(Math.min(exponential * jitter, maxDelayMs))
-}
-
-function waitWithAbort(delayMs, signal) {
-  if (!(delayMs > 0)) return Promise.resolve()
-  if (signal?.aborted) {
-    const err = new Error('The operation was aborted')
-    err.name = 'AbortError'
-    return Promise.reject(err)
-  }
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      signal?.removeEventListener?.('abort', onAbort)
-      resolve()
-    }, delayMs)
-    function onAbort() {
-      clearTimeout(timer)
-      const err = new Error('The operation was aborted')
-      err.name = 'AbortError'
-      reject(err)
-    }
-    signal?.addEventListener?.('abort', onAbort, { once: true })
-  })
-}
-
-async function continueArgonRequestStream(apiClient, origRequestStream, request, meta) {
-  const { [ARGON_LONG_DECODE_SYMBOL]: _, ...restHttpOptions } = request?.httpOptions ?? {}
-  const enableContinuation = meta?.enabled !== false
-  const tracker = meta?.tracker
-  if (
-    enableContinuation &&
-    typeof apiClient?.isVertexAI === 'function' &&
-    apiClient.isVertexAI() &&
-    !restHttpOptions.apiVersion &&
-    apiClient?.clientOptions?.httpOptions?.apiVersion === 'v1'
-  ) {
-    restHttpOptions.apiVersion = 'v1beta1'
-  }
-  const effectiveApiVersion =
-    restHttpOptions.apiVersion || apiClient?.clientOptions?.httpOptions?.apiVersion || 'v1beta1'
-  tracker?.setApiVersion(effectiveApiVersion)
-  const hopHttpOptions = Object.keys(restHttpOptions).length > 0 ? restHttpOptions : undefined
-  const firstReq = { ...request, httpOptions: hopHttpOptions }
-  const hop1Tracker = tracker?.beginHop({
-    hopIndex: 1,
-    trigger: 'initial',
-    usedContinuationToken: false,
-    backoffDelayMs: 0,
-    body: firstReq.body,
-  })
-  let firstStream
-  try {
-    firstStream = await origRequestStream.call(apiClient, firstReq)
-  } catch (error) {
-    hop1Tracker?.finish({
-      error,
-      aborted: isAbortedError(error, request?.abortSignal),
-    })
-    throw error
-  }
-  if (!enableContinuation && !tracker) return firstStream
-
-  return (async function* () {
-    let baseBodyObj
-    let resumeToken
-    let reconnectsWithoutProgress = 0
-    let consecutiveReconnectFailures = 0
-    let lastError
-    let hopCount = 0
-    let nextHopTrigger = 'initial'
-    let nextHopBackoffMs = 0
-    let nextHopBody = firstReq.body
-    let initialPromptTokens
-    let initialCachedTokens
-    let completedCandidatesTokens = 0
-    let completedThoughtsTokens = 0
-    let completedToolUsePromptTokens = 0
-    let completedBilledPromptTokens = 0
-    let completedBilledCachedTokens = 0
-    let completedBilledTotalTokens = 0
-    let openHop = async () => firstStream
-
-    while (true) {
-      hopCount += 1
-      const hopStartToken = resumeToken
-      const hopTracker =
-        hopCount === 1
-          ? hop1Tracker
-          : tracker?.beginHop({
-              hopIndex: hopCount,
-              trigger: nextHopTrigger,
-              usedContinuationToken: Boolean(hopStartToken),
-              backoffDelayMs: nextHopBackoffMs,
-              body: nextHopBody,
-            })
-      let hopToken
-      let hopFinishReason
-      let hopHasPromptFeedback = false
-      let hopHasYieldedContent = false
-      let hopReceivedAnyChunk = false
-      let hopUsage
-      let hopError
-
-      try {
-        for await (const httpChunk of await openHop()) {
-          const raw = await httpChunk.json()
-          if (!raw || typeof raw !== 'object') {
-            yield { headers: httpChunk.headers, json: async () => raw }
-            continue
-          }
-          hopReceivedAnyChunk = true
-          if (raw.promptFeedback !== undefined && raw.promptFeedback !== null) {
-            hopHasPromptFeedback = true
-          }
-          let outRaw = raw
-          const candidate = Array.isArray(raw.candidates) ? raw.candidates[0] : undefined
-          hopTracker?.onChunk({
-            status: 200,
-            hasCheckpoint: Boolean(
-              candidate && typeof candidate.continuationToken === 'string' && candidate.continuationToken.length > 0,
-            ),
-            finishReason: candidate?.finishReason,
-          })
-          if (candidate && typeof candidate === 'object') {
-            if (typeof candidate.continuationToken === 'string' && candidate.continuationToken.length > 0) {
-              hopToken = candidate.continuationToken
-            } else if (candidate.finishReason !== undefined && candidate.finishReason !== 'CONTINUATION') {
-              hopToken = undefined
-            }
-            if (candidate.finishReason !== undefined) {
-              hopFinishReason = candidate.finishReason
-            }
-            if (hasMeaningfulPart(candidate.content?.parts)) {
-              hopHasYieldedContent = true
-            }
-            const canContinueHop =
-              enableContinuation &&
-              !hopHasPromptFeedback &&
-              Boolean(hopToken) &&
-              hopToken !== hopStartToken &&
-              hopCount < MAX_CONTINUATION_HOPS
-            if (candidate.finishReason === 'CONTINUATION' && canContinueHop) {
-              const nextCandidate = { ...candidate }
-              delete nextCandidate.finishReason
-              if (Array.isArray(nextCandidate.content?.parts)) {
-                const filteredParts = nextCandidate.content.parts.filter(p => !isEmptyPlaceholderPart(p))
-                nextCandidate.content = { ...nextCandidate.content, parts: filteredParts }
-              }
-              const nextCandidates = [...raw.candidates]
-              nextCandidates[0] = nextCandidate
-              outRaw = { ...outRaw, candidates: nextCandidates }
-            }
-          }
-          if (raw.usageMetadata && typeof raw.usageMetadata === 'object') {
-            const prompt = raw.usageMetadata.promptTokenCount ?? 0
-            const cached = raw.usageMetadata.cachedContentTokenCount ?? 0
-            const candidates = raw.usageMetadata.candidatesTokenCount ?? 0
-            const thoughts = raw.usageMetadata.thoughtsTokenCount ?? 0
-            const toolUsePrompt = raw.usageMetadata.toolUsePromptTokenCount ?? 0
-            const total = raw.usageMetadata.totalTokenCount ?? (prompt + candidates + thoughts + toolUsePrompt)
-            if (initialPromptTokens === undefined) initialPromptTokens = prompt
-            if (initialCachedTokens === undefined) initialCachedTokens = cached
-            hopUsage = { prompt, cached, candidates, thoughts, toolUsePrompt, total }
-            if (hopCount === 1) {
-              outRaw = {
-                ...outRaw,
-                usageMetadata: {
-                  ...raw.usageMetadata,
-                  initialPromptTokenCount: initialPromptTokens,
-                },
-              }
-            } else {
-              const mergedCandidates = completedCandidatesTokens + candidates
-              const mergedThoughts = completedThoughtsTokens + thoughts
-              const mergedToolUsePrompt = completedToolUsePromptTokens + toolUsePrompt
-              const mergedTotal = initialPromptTokens + mergedCandidates + mergedThoughts + mergedToolUsePrompt
-              outRaw = {
-                ...outRaw,
-                usageMetadata: {
-                  ...raw.usageMetadata,
-                  promptTokenCount: initialPromptTokens,
-                  ...(initialCachedTokens > 0 || raw.usageMetadata.cachedContentTokenCount !== undefined
-                    ? { cachedContentTokenCount: initialCachedTokens }
-                    : {}),
-                  candidatesTokenCount: mergedCandidates,
-                  ...(mergedThoughts > 0 || raw.usageMetadata.thoughtsTokenCount !== undefined
-                    ? { thoughtsTokenCount: mergedThoughts }
-                    : {}),
-                  ...(mergedToolUsePrompt > 0 || raw.usageMetadata.toolUsePromptTokenCount !== undefined
-                    ? { toolUsePromptTokenCount: mergedToolUsePrompt }
-                    : {}),
-                  totalTokenCount: mergedTotal,
-                  initialPromptTokenCount: initialPromptTokens,
-                  billedPromptTokenCount: completedBilledPromptTokens + prompt,
-                  billedCachedContentTokenCount: completedBilledCachedTokens + cached,
-                  billedTotalTokenCount: completedBilledTotalTokens + total,
-                },
-              }
-            }
-          }
-          yield { headers: httpChunk.headers, json: async () => outRaw }
-        }
-      } catch (error) {
-        hopError = { error }
-      }
-
-      if (hopUsage) {
-        completedCandidatesTokens += hopUsage.candidates
-        completedThoughtsTokens += hopUsage.thoughts
-        completedToolUsePromptTokens += hopUsage.toolUsePrompt
-        completedBilledPromptTokens += hopUsage.prompt
-        completedBilledCachedTokens += hopUsage.cached
-        completedBilledTotalTokens += hopUsage.total
-        tracker?.recordTokenUsage({
-          reportedInputTokens: initialPromptTokens,
-          reportedCacheTokens: initialCachedTokens ?? 0,
-          outputTokens: completedCandidatesTokens,
-          thoughtsTokens: completedThoughtsTokens,
-          billedPromptTokens: completedBilledPromptTokens,
-          billedCachedTokens: completedBilledCachedTokens,
-          billedTotalTokens: completedBilledTotalTokens,
-        })
-      }
-
-      const abortedHop = Boolean(hopError && isAbortedError(hopError.error, request?.abortSignal))
-      if (
-        hopError &&
-        (abortedHop ||
-          isNonRetryableApiRejection(hopError.error, hopReceivedAnyChunk, hopCount, Boolean(hopToken || hopStartToken)))
-      ) {
-        hopTracker?.finish({
-          error: hopError.error,
-          aborted: abortedHop,
-          finishReason: hopFinishReason,
-          continued: false,
-        })
-        throw hopError.error
-      }
-
-      const hasNewToken = Boolean(hopToken) && hopToken !== hopStartToken
-      const madeProgress = hopHasYieldedContent || hasNewToken
-      if (hopError) lastError = hopError
-      else if (madeProgress) lastError = undefined
-
-      if (!enableContinuation || hopCount >= MAX_CONTINUATION_HOPS || hopHasPromptFeedback) {
-        resumeToken = undefined
-      } else if (hopFinishReason !== undefined) {
-        if (hopFinishReason === 'CONTINUATION' && hasNewToken) {
-          resumeToken = hopToken
-          reconnectsWithoutProgress = 0
-          consecutiveReconnectFailures = hopError ? 1 : 0
-          nextHopTrigger = hopError ? 'checkpoint-reconnect' : 'continuation'
-        } else {
-          resumeToken = undefined
-          reconnectsWithoutProgress = 0
-          consecutiveReconnectFailures = 0
-        }
-      } else if (hasNewToken) {
-        resumeToken = hopToken
-        reconnectsWithoutProgress = 0
-        consecutiveReconnectFailures = 1
-        nextHopTrigger = 'checkpoint-reconnect'
-      } else if (!hopHasYieldedContent && hopStartToken && reconnectsWithoutProgress < MAX_STREAM_RECONNECTS_WITHOUT_PROGRESS) {
-        resumeToken = hopStartToken
-        reconnectsWithoutProgress += 1
-        consecutiveReconnectFailures += 1
-        nextHopTrigger = 'retry-same-checkpoint'
-      } else {
-        resumeToken = undefined
-      }
-
-      const canResume =
-        enableContinuation &&
-        Boolean(resumeToken) &&
-        !hopHasPromptFeedback &&
-        (hopFinishReason === 'CONTINUATION' || hopFinishReason === undefined)
-
-      hopTracker?.finish({
-        error: hopError?.error,
-        aborted: false,
-        finishReason: hopFinishReason,
-        continued: canResume && hopFinishReason === 'CONTINUATION' && !hopError,
-      })
-
-      if (canResume) {
-        let delayMs = 0
-        if (consecutiveReconnectFailures > 0) {
-          delayMs = computeReconnectDelayMs(consecutiveReconnectFailures, meta?.reconnectBackoff)
-          await waitWithAbort(delayMs, request?.abortSignal)
-        }
-        if (!baseBodyObj) baseBodyObj = JSON.parse(request.body)
-        const nextBody = JSON.stringify({ ...baseBodyObj, continuationToken: resumeToken })
-        nextHopBackoffMs = delayMs
-        nextHopBody = nextBody
-        const nextReq = {
-          ...request,
-          body: nextBody,
-          httpOptions: hopHttpOptions,
-        }
-        openHop = () => origRequestStream.call(apiClient, nextReq)
-        continue
-      }
-
-      if (hopError) throw hopError.error
-      if (hopFinishReason === undefined && !hopHasPromptFeedback && lastError) throw lastError.error
-      return
-    }
-  })()
-}
 
 let apiClientProtoRef = null
 let origApiClientRequestStream = null
@@ -521,14 +171,18 @@ export function gemini4StreamSimple(
   upstreamModelId = requestModel.id,
   longDecode = true,
   recordDiagnostic,
+  servicePolicy = { tier: 'standard', headers: {} },
+  captureOptions = {},
+  structuredOutput,
 ) {
+  assertPreparedStructuredOutput(structuredOutput)
   ensureGemini4ApiClientPatch()
   const fallback = defaultLevel ?? (/cyber-permissive/i.test(requestModel?.id ?? '') ? 'high' : 'medium')
   const rawLevel = options.reasoning ?? fallback
   const mapped = requestModel?.thinkingLevelMap?.[rawLevel] ?? rawLevel
   const level = typeof mapped === 'string' ? mapped.toLowerCase() : fallback
   if (!LEVELS.includes(level)) throw new LlmError('Gemini 4 Argon requires low, medium or high.', 'UNSUPPORTED_REASONING_EFFORT')
-  const { reasoning, thinking, thinkingBudgets, temperature, onPayload: prior, ...rest } = options
+  const { reasoning, thinking, thinkingBudgets, temperature, onPayload: prior, onProviderStreamEvent: priorEvent, ...rest } = options
   const requestedMaxTokens = options.maxTokens ?? requestModel.maxTokens
   const effectiveMaxTokens =
     longDecode === false && typeof requestedMaxTokens === 'number' && requestedMaxTokens > MAX_SINGLE_CALL_TOKENS
@@ -543,22 +197,28 @@ export function gemini4StreamSimple(
       longDecode: longDecode !== false,
       maxTokens: effectiveMaxTokens,
       sessionId: options.sessionId,
+      requestedServiceTier: servicePolicy.tier,
     },
     recordDiagnostic,
+    captureOptions,
   )
+  const signatures = createGoogleSignatureBridge(context, requestModel)
   return wrapGemini4Stream(
-    nativeStream(requestModel, context, {
+    signatures.stream(nativeStream(requestModel, signatures.context, {
       ...rest,
       maxTokens: effectiveMaxTokens,
+      async onProviderStreamEvent(chunk, model) { signatures.observe(chunk); await priorEvent?.(chunk, model) },
       async onPayload(payload, payloadModel) {
         const replacement = await prior?.(payload, payloadModel)
-        const body = replacement === undefined ? payload : replacement
+        let body = replacement === undefined ? payload : replacement
         if (!body || typeof body !== 'object' || Array.isArray(body) || !Array.isArray(body.contents) || !body.config || typeof body.config !== 'object' || Array.isArray(body.config)) {
           throw new LlmError('Gemini 4 Argon received an incompatible native payload.', 'INVALID_REQUEST')
         }
         if (body.model !== requestModel.id && body.model !== upstreamModelId) {
           throw new LlmError('Gemini 4 Argon received an incompatible model payload.', 'INVALID_REQUEST')
         }
+        body = signatures.restorePayload(body)
+        if (structuredOutput) body = structuredOutput.generateContent(body)
         const { temperature: _t, topP: _tp, topK: _tk, candidateCount: _cc, frequencyPenalty: _fp, presencePenalty: _pp, ...cleanConfig } = body.config
         const prevHttpOptions =
           cleanConfig.httpOptions && typeof cleanConfig.httpOptions === 'object' && !Array.isArray(cleanConfig.httpOptions)
@@ -569,19 +229,27 @@ export function gemini4StreamSimple(
           model: upstreamModelId,
           config: {
             ...cleanConfig,
+            ...(cleanConfig.tools?.some(tool => tool.functionDeclarations?.length) ? {
+              toolConfig: {
+                ...cleanConfig.toolConfig,
+                functionCallingConfig: { ...cleanConfig.toolConfig?.functionCallingConfig, mode: 'VALIDATED' },
+              },
+            } : {}),
             automaticContinuation: false,
             thinkingConfig: { thinkingLevel: level.toUpperCase(), includeThoughts: true },
             httpOptions: {
               ...prevHttpOptions,
+              ...(Object.keys(servicePolicy.headers).length ? { headers: mergeServiceHeaders(prevHttpOptions.headers, servicePolicy) } : {}),
               [ARGON_LONG_DECODE_SYMBOL]: {
                 enabled: longDecode !== false,
+                serviceTier: requestModel.api === 'google-generative-ai' ? servicePolicy.tier : undefined,
                 tracker,
               },
             },
           },
         }
       },
-    }),
+    })),
     tracker,
     options.signal,
   )
@@ -644,9 +312,24 @@ export function resolveConfigValues(raw = {}) {
   const longDecode = readVal(source?.longDecode) ?? true
   const contextWindow = readVal(source?.contextWindow) ?? 1048576
   const rawMaxTokens = readVal(source?.maxTokens) ?? MAX_SINGLE_CALL_TOKENS
+  const googleProtocol = readVal(source?.googleProtocol) ?? 'generate-content'
+  const vertexProtocol = readVal(source?.vertexProtocol) ?? 'generate-content'
+  const googleServiceTier = readVal(source?.googleServiceTier) ?? 'standard'
+  const vertexServiceTier = readVal(source?.vertexServiceTier) ?? 'standard'
+  const vertexPaygoOnly = readVal(source?.vertexPaygoOnly) ?? false
+  const retainRawResponses = readVal(source?.retainRawResponses) ?? false
+  if (typeof retainRawResponses !== 'boolean') throw new LlmError('Raw response retention consent must be an explicit boolean.', 'INVALID_CONFIG')
+  if (![googleServiceTier, vertexServiceTier].every(tier => SERVICE_TIERS.includes(tier))) throw new LlmError('Invalid Argon service tier.', 'INVALID_CONFIG')
+  if (typeof vertexPaygoOnly !== 'boolean') throw new LlmError('Vertex PayGo-only selection must be a boolean.', 'INVALID_CONFIG')
+  const interactionsBackground = readVal(source?.interactionsBackground) ?? false
+  const allowInteractionStorage = readVal(source?.allowInteractionStorage) ?? false
+  if (typeof interactionsBackground !== 'boolean' || typeof allowInteractionStorage !== 'boolean') throw new LlmError('Interactions background/storage consent must be explicit booleans.', 'INVALID_CONFIG')
+  for (const protocol of [googleProtocol, vertexProtocol]) {
+    if (!['generate-content', 'interactions'].includes(protocol)) throw new LlmError('Invalid Argon protocol.', 'INVALID_CONFIG')
+  }
   if (!LEVELS.includes(reasoning)) throw new LlmError('Invalid default Argon effort.', 'INVALID_CONFIG')
   for (const [key, val] of [['contextWindow', contextWindow], ['maxTokens', rawMaxTokens]]) {
-    if (!Number.isSafeInteger(val) || val <= 0) throw new LlmError('Invalid Argon ' + key, 'INVALID_CONFIG')
+    if (!Number.isSafeInteger(val) || val <= 0 || val > MAX_LONG_DECODE_TOKENS) throw new LlmError('Invalid Argon ' + key, 'INVALID_CONFIG')
   }
   const enabledLongDecode = Boolean(longDecode)
   const capByMode = enabledLongDecode ? Math.min(rawMaxTokens, MAX_LONG_DECODE_TOKENS) : Math.min(rawMaxTokens, MAX_SINGLE_CALL_TOKENS)
@@ -658,12 +341,20 @@ export function resolveConfigValues(raw = {}) {
     longDecode: enabledLongDecode,
     contextWindow,
     maxTokens,
+    googleProtocol,
+    vertexProtocol,
+    googleServiceTier,
+    vertexServiceTier,
+    vertexPaygoOnly,
+    retainRawResponses,
+    interactionsBackground,
+    allowInteractionStorage,
     routes: source?.routes,
   }
 }
 
 /** Serve both Vertex AI Argon and Gemini API (google) Argon under the unified plugin group. */
-export function argonProvider(nativeVertex, models, defaultLevel = 'medium', nativeGoogle = googleProvider(), longDecode = true, recordDiagnostic) {
+export function argonProvider(nativeVertex, models, defaultLevel = 'medium', nativeGoogle = googleProvider(), longDecode = true, recordDiagnostic, serviceConfig = {}, responseHub, structuredOutput) {
   const modelMap = new Map((Array.isArray(models) ? models : [models]).map(m => [m.id, m]))
   return {
     id: PROVIDER,
@@ -690,6 +381,8 @@ export function argonProvider(nativeVertex, models, defaultLevel = 'medium', nat
           MODEL,
           longDecode,
           recordDiagnostic,
+          resolveServicePolicy(serviceConfig, 'google-generative-ai', 'generate-content'),
+          { responseHub, retainRawResponses: serviceConfig.retainRawResponses }, structuredOutput,
         )
       }
       if (requestModel.api !== 'google-vertex') {
@@ -704,37 +397,79 @@ export function argonProvider(nativeVertex, models, defaultLevel = 'medium', nat
         MODEL,
         longDecode,
         recordDiagnostic,
+        resolveServicePolicy(serviceConfig, 'google-vertex', 'generate-content'),
+        { responseHub, retainRawResponses: serviceConfig.retainRawResponses }, structuredOutput,
       )
     },
   }
 }
 
 export class ArgonAdapter extends LlmAdapter {
-  constructor(inner, isVisible = () => true) {
+  constructor(inner, isVisible = () => true, interactionHandler, configSnapshot) {
     super()
     this.inner = inner
     this.isVisible = isVisible
+    this.interactionHandler = interactionHandler
+    this.configSnapshot = configSnapshot
   }
   providerInfo(provider) { return this.inner.providerInfo(provider) }
   providerRetryPolicy(provider) { return this.inner.providerRetryPolicy(provider) }
-  imageRequestPricing(provider, model) { return this.inner.imageRequestPricing(provider, model) }
+  imageRequestPricing(provider, model) { return this.inner.imageRequestPricing?.(provider, model) }
+  imageRequestTarget(provider, model, image) {
+    const cfg = this.configSnapshot?.()
+    const protocol = model === GOOGLE_API_MODEL ? cfg?.googleProtocol : cfg?.vertexProtocol
+    if (provider === PROVIDER && protocol === 'interactions' && this.interactionHandler) return interactionImageRequestTarget(image)
+    return this.inner.imageRequestTarget(provider, model, image)
+  }
   async listModels(provider) {
     if (!this.isVisible()) return []
     return this.inner.listModels(provider)
   }
   resolveModel(provider, model, signal) { return this.inner.resolveModel(provider, model, signal) }
-  prepareCall(provider, model, signal) { return this.inner.prepareCall(provider, model, signal) }
-  stream(options) { return this.inner.stream(options) }
+  async prepareCall(provider, model, signal) {
+    const cfg = this.configSnapshot?.()
+    if (provider === PROVIDER && cfg) resolveServicePolicy(cfg, model === GOOGLE_API_MODEL ? 'google-generative-ai' : 'google-vertex', model === GOOGLE_API_MODEL ? cfg.googleProtocol : cfg.vertexProtocol)
+    const prepared = await this.inner.prepareCall(provider, model, signal)
+    const protocol = model === GOOGLE_API_MODEL ? cfg?.googleProtocol : cfg?.vertexProtocol
+    if (provider === PROVIDER && protocol === 'interactions' && this.interactionHandler) {
+      return { model: prepared.model, stream: options => this.interactionHandler(options, cfg) }
+    }
+    return { ...prepared, stream: options => prepared.stream(generateContentHistory(options)) }
+  }
+  async *stream(options) {
+    const prepared = await this.prepareCall(options.provider, options.model, options.signal)
+    yield* prepared.stream(options)
+  }
 }
 
-export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertexProvider(), nativeGoogle = googleProvider(), recordDiagnostic) {
+export function createConfiguredInteractionQuery(ctx, configInput) {
+  const environment = launchEnvironmentOf(ctx)
+  return createInteractionQuery({
+    GoogleGenAI,
+    getRoutes: () => {
+      const source = typeof configInput === 'function' ? configInput() : configInput
+      return detectPiAiArgonRoutes(ctx, readVal(source?.routes))
+    },
+    // Same credential precedence as generation, but a store failure must not
+    // silently select a different ambient account for an arbitrary-ID lookup.
+    resolveSecret: async name => (await ctx?.get?.('credentials')?.resolve?.(name))?.value || environment.get(name)?.value,
+  })
+}
+
+// Optional constructor-owned format is for an explicit auxiliary result request;
+// it is not a user default or a hidden extension of Host GenerateOptions.
+export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertexProvider(), nativeGoogle = googleProvider(), recordDiagnostic, taskHub, responseHub, structuredOutput) {
+  assertPreparedStructuredOutput(structuredOutput)
   resolveConfigValues(configInput)
   const environment = launchEnvironmentOf(ctx)
   const resolveSecret = async name => {
     try {
       const cred = await ctx?.get?.('credentials')?.resolve?.(name)
       if (cred?.value) return cred.value
-    } catch {}
+    } catch (error) {
+      // Explicit billed auxiliary requests must not switch accounts on store failure.
+      if (structuredOutput) throw error
+    }
     return environment.get(name)?.value
   }
   const authContext = {
@@ -754,6 +489,10 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
       ld: cfg.longDecode,
       cw: cfg.contextWindow,
       mt: cfg.maxTokens,
+      gt: cfg.googleServiceTier,
+      vt: cfg.vertexServiceTier,
+      paygo: cfg.vertexPaygoOnly,
+      raw: cfg.retainRawResponses,
       v: detected.hasVertex,
       g: detected.hasGoogle,
       ge: detected.googleApiKeyEnv,
@@ -818,14 +557,14 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
       })
     }
     const configuredMaxTokens = new Map(models.map(m => [m.id, cfg.maxTokens]))
-    const provider = argonProvider({ ...nativeVertex, auth }, models, cfg.reasoning, nativeGoogle, cfg.longDecode, recordDiagnostic)
+    const provider = argonProvider({ ...nativeVertex, auth }, models, cfg.reasoning, nativeGoogle, cfg.longDecode, recordDiagnostic, cfg, responseHub, structuredOutput)
     cachedKey = key
     cachedProfiles = new Map([[PROVIDER, {
       provider: PROVIDER,
       displayName: 'Vertex Argon',
       piProvider: provider,
       reasoning: cfg.reasoning,
-      streamIdleTimeoutMs: cfg.longDecode ? 600000 : 300000,
+      streamIdleTimeoutMs: cfg.longDecode ? STREAM_READ_TIMEOUT_MS + 60000 : 300000,
       maxRequestImageBytes: 20 * 1024 * 1024,
       requestImagePixelBudget: 2048 * 2048,
       requestImageMaxBytes: 1024 * 1024,
@@ -842,5 +581,10 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
     resolveAttachments: () => ctx.get('attachments'),
     resolveImageAccess: (attachments, ref) => resolveImageAttachmentAccess(attachments, path => ctx.get('fs')?.processPathFromHostPath(path), ref),
   })
-  return new ArgonAdapter(inner, () => resolveConfigValues(configInput).showInModelPicker)
+  const configSnapshot = () => {
+    const cfg = resolveConfigValues(configInput)
+    return { ...cfg, routes: detectPiAiArgonRoutes(ctx, cfg.routes) }
+  }
+  const interactionHandler = createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, getRoutes: cfg => cfg.routes, taskHub, recordDiagnostic, responseHub, structuredOutput })
+  return new ArgonAdapter(inner, () => configSnapshot().showInModelPicker, interactionHandler, configSnapshot)
 }

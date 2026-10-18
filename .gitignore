@@ -1,5 +1,7 @@
 node_modules/
 dev/
+releases/
+/.dsh-ops/
 *.tgz
 .DS_Store
 .env

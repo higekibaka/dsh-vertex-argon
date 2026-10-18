@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Vertex Argon",
-    "description": "Native Low / Medium / High thinking levels, thought summaries, Long Decode continuation, checkpoint recovery, bounded diagnostics, and dedicated settings page."
+    "description": "Gemini API and Vertex AI long decode, explicit protocol and service-tier settings, and response/usage/cost-estimate inspection."
   }
 }

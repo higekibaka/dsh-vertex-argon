@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Vertex Argon",
-    "description": "原生 Low / Medium / High 三档思考、思考摘要、Long Decode 跨段自动续传、断流检查点恢复与请求级诊断面板；含专属设置页。"
+    "description": "Gemini API 与 Vertex AI 长解码、显式协议与服务等级设置、响应/用量/费用估算检查器。"
   }
 }
