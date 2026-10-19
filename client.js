@@ -980,7 +980,7 @@ window.__ModuleLoader__.load({
         }
       }
       const blocked = disabled || !formWritable(form) || loading || releasing
-      const sorted = [...records].sort((a, b) => Number(released(a)) - Number(released(b)) || b.updatedAt.localeCompare(a.updatedAt)).slice(0, 20)
+      const sorted = [...records].sort((a, b) => Number(released(a)) - Number(released(b)) || (b.updatedAt < a.updatedAt ? -1 : (b.updatedAt > a.updatedAt ? 1 : 0))).slice(0, 20)
       return h('div', { className: 'card', 'aria-label': t('recoveryTitle') },
         h('div', { className: 'row' },
           h('h3', null, t('recoveryTitle')),
@@ -1174,7 +1174,7 @@ window.__ModuleLoader__.load({
       const sumParts = segments.every(s => s.count !== null) ? segments.reduce((sum, s) => sum + s.count, 0) : null
       // A missing field remains unknown. Only chart recorded parts when they
       // account for the reported total, both per hop and after aggregation.
-      const recordedSum = segments.filter(s => s.count !== null).reduce((sum, s) => sum + s.count, 0)
+      const recordedSum = sumParts !== null ? sumParts : segments.filter(s => s.count !== null).reduce((sum, s) => sum + s.count, 0)
       const chartReady = complete && cacheValid && sourceTotalsValid && knownTokens(recordedSum) && total !== null && total > 0 && recordedSum === total
       if (chartReady) for (const s of segments) if (s.count !== null) s.pct = s.count / total * 100
       return { segments, total, sumParts, complete, chartReady, hasData: total !== null || segments.some(s => s.count !== null), cacheHitPct: cacheValid && input > 0 ? cached / input * 100 : null }

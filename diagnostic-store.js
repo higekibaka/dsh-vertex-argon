@@ -215,7 +215,7 @@ export function createDiagnosticHub(limit = 200) {
         }
       }
       return [...merged.values()]
-        .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+        .sort((a, b) => b.startedAt < a.startedAt ? -1 : (b.startedAt > a.startedAt ? 1 : 0))
         .slice(0, cap)
     },
   }
@@ -324,7 +324,7 @@ export class ArgonDiagnosticsService extends TypertRemoteService {
   async listRecovery(request) {
     try {
       const { limit } = parseListRecentRequest(request)
-      const records = this.taskHub.entries().sort((a, b) => Number(Boolean(a.releasedAt)) - Number(Boolean(b.releasedAt)) || b.updatedAt.localeCompare(a.updatedAt)).slice(0, limit).map(row => ({
+      const records = this.taskHub.entries().sort((a, b) => Number(Boolean(a.releasedAt)) - Number(Boolean(b.releasedAt)) || (b.updatedAt < a.updatedAt ? -1 : (b.updatedAt > a.updatedAt ? 1 : 0))).slice(0, limit).map(row => ({
         key: row.key, sessionHash: row.sessionHash.slice(0, 12), stage: row.stage, updatedAt: row.updatedAt,
         releasedAt: row.releasedAt ?? null, uncertainAt: row.uncertainAt ?? null, hasRemoteId: Boolean(row.interactionId), active: this.taskHub.isActive(row.key),
       }))

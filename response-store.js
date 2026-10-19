@@ -19,7 +19,7 @@ export function createResponseHub(options = {}) {
  let domain, table, detachPromise, closed=false, storageFailed=false, tail=Promise.resolve(), scheduled=false
  const trim = () => {
   let bytes=[...records.values()].reduce((n,r)=>n+r.bytes,0)
-  for (const [id,row] of [...records].sort((a,b)=>a[1].startedAt.localeCompare(b[1].startedAt))) {
+  for (const [id,row] of [...records].sort((a,b)=>a[1].startedAt < b[1].startedAt ? -1 : (a[1].startedAt > b[1].startedAt ? 1 : 0))) {
    if (records.size <= limits.maxRecords && bytes <= limits.maxBytes) break
    records.delete(id);persisted.delete(id);bytes-=row.bytes
   }

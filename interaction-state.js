@@ -50,7 +50,7 @@ export function createInteractionStateHub({ closeTimeoutMs = BACKGROUND_CREATE_T
       this.requireReady()
       if (!table.get(identity.key) && table.size >= 200) {
         // Bound local audit history, but never evict an unresolved cloud attempt.
-        const oldestReleased = [...table.entries()].map(([, row]) => row).filter(row => row.releasedAt).sort((a, b) => a.releasedAt.localeCompare(b.releasedAt))[0]
+        const oldestReleased = [...table.entries()].map(([, row]) => row).filter(row => row.releasedAt).sort((a, b) => a.releasedAt < b.releasedAt ? -1 : (a.releasedAt > b.releasedAt ? 1 : 0))[0]
         if (!oldestReleased) throw new Error('Background recovery storage is full; resolve outstanding remote tasks before starting another.')
         await table.delete(oldestReleased.key)
       }
