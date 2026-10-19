@@ -2,6 +2,13 @@
 
 All notable changes to `dsh-vertex-argon` are documented in this file.
 
+## [1.5.1] - 2026-10-19
+
+### Changed
+- **Performance Optimization (`client.js`, `diagnostic-store.js`, `interaction-state.js`, `response-store.js`)**:
+  - Replaced the remaining 5 ISO 8601 timestamp `String.prototype.localeCompare()` sorts with direct lexicographical relational operators (`<` / `>`) across recovery lists, recent diagnostics, background task eviction, and raw response retention trimming.
+  - Reused precomputed `sumParts` when available in `extractTokenMix` (`client.js`) to avoid redundant segment filtering and reduction.
+
 ## [1.5.0] - 2026-10-18
 
 ### Added

@@ -1,6 +1,6 @@
-# dsh-vertex-argon 核心技术决定与协议合同 (v1.5.0)
+# dsh-vertex-argon 核心技术决定与协议合同 (v1.5.1)
 
-本文档汇总 `dsh-vertex-argon` v1.5.0 当前生效的架构决定与已明确淘汰的历史方案。
+本文档汇总 `dsh-vertex-argon` v1.5.1 当前生效的架构决定与已明确淘汰的历史方案。
 
 ---
 
