@@ -177,6 +177,34 @@ test('overview dates are selected request starts and window includes only the de
  assert.deepEqual(r.window,{limit:2,retainedWindowLimit:200,limited:true,oldestAt:early.startedAt,newestAt:late.startedAt})
 })
 
+test('non-string starts never enter the date window and never coerce into one',()=>{
+ for(const startedAt of [undefined,null,0,1700000000000,{iso:'2026-10-18T00:00:00.000Z'},['2026-10-18T00:00:00.000Z'],true]){
+  const r=overview([record({startedAt})])
+  assert.deepEqual(r.window,{limit:20,retainedWindowLimit:200,limited:false,oldestAt:null,newestAt:null},String(startedAt))
+  assert.equal(r.requestCount,1)
+ }
+ const mixed=overview([record({startedAt:undefined}),record({startedAt:'2026-10-18T03:00:00.000Z'})])
+ assert.equal(mixed.window.oldestAt,'2026-10-18T03:00:00.000Z')
+ assert.equal(mixed.window.newestAt,'2026-10-18T03:00:00.000Z')
+})
+
+test('one retained request resolves both date bounds to its own start',()=>{
+ const only=record({startedAt:'2026-10-18T07:30:00.000Z'}),r=overview([only])
+ assert.equal(r.window.oldestAt,only.startedAt)
+ assert.equal(r.window.newestAt,r.window.oldestAt)
+})
+
+test('duplicate, out-of-order and empty start values keep their exact lexical extremes',()=>{
+ const early='2026-10-18T00:00:00.000Z',middle='2026-10-18T02:00:00.000Z',late='2026-10-18T04:00:00.000Z'
+ const shuffled=overview([record({startedAt:late}),record({startedAt:middle}),record({startedAt:early}),record({startedAt:late}),record({startedAt:early})])
+ assert.equal(shuffled.window.oldestAt,early)
+ assert.equal(shuffled.window.newestAt,late)
+ // An empty string orders before every timestamp, exactly as the previous sort copy did.
+ const blank=overview([record({startedAt:late}),record({startedAt:''})])
+ assert.equal(blank.window.oldestAt,'')
+ assert.equal(blank.window.newestAt,late)
+})
+
 test('getOverview is session isolated, metadata only, with no raw capture or cloud query reads',async()=>{
  const hub=createDiagnosticHub(),a=record(),b=record({},'two');hub.record(a);hub.record(b)
  let rawReads=0,cloudReads=0

@@ -713,11 +713,16 @@ window.__ModuleLoader__.load({
       })
     }
 
+    // toLocaleTimeString rebuilt a formatter for every rendered row. The cached
+    // one is byte-identical: hour/minute/second numeric with hour12:false keeps
+    // zh-CN and en-GB zero-padded hours and never rewrites a ko-KR pattern.
+    const timeFormatter = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: false })
+
     function formatTimeShort(iso) {
       if (typeof iso !== 'string') return ''
       const d = new Date(iso)
       if (Number.isNaN(d.getTime())) return iso.slice(11, 19)
-      return d.toLocaleTimeString([], { hour12: false })
+      return timeFormatter.format(d)
     }
 
     function formatDuration(ms) {
@@ -725,6 +730,10 @@ window.__ModuleLoader__.load({
       if (ms < 1000) return Math.round(ms) + 'ms'
       return (ms / 1000).toFixed(2) + 's'
     }
+
+    // Number#toLocaleString allocated a formatter per rendered value; the
+    // cached formatter prints identically, including 786432 -> "786,432".
+    const numberFormatter = new Intl.NumberFormat()
 
     function DiagnosticsPanel({ loadDiagnostics, t }) {
       const [open, setOpen] = React.useState(false)
@@ -757,7 +766,7 @@ window.__ModuleLoader__.load({
         if (open) void refresh()
       }, [open, refresh])
 
-      const fmt = n => (typeof n === 'number' && Number.isFinite(n) ? Number(n).toLocaleString() : '-')
+      const fmt = n => (typeof n === 'number' && Number.isFinite(n) ? numberFormatter.format(n) : '-')
       const total = records.length
       const okCount = records.filter(r => r.outcome === 'done' || r.outcome === 'tool-calls' || r.outcome === 'max-tokens').length
       const contHops = records.reduce((acc, r) => acc + (r.continuationCount || 0), 0)
@@ -1137,7 +1146,7 @@ window.__ModuleLoader__.load({
     }
 
     const knownTokens = value => Number.isSafeInteger(value) && value >= 0
-    const tokenText = value => knownTokens(value) ? value.toLocaleString() : '—'
+    const tokenText = value => knownTokens(value) ? numberFormatter.format(value) : '—'
     function extractTokenMix(record) {
       const details = record?.usageDetails
       const keys = ['inputTokens', 'cachedTokens', 'outputTokens', 'thoughtTokens', 'toolTokens', 'totalTokens']
@@ -1596,7 +1605,7 @@ window.__ModuleLoader__.load({
         finally { writing.current = false; setPending(false) }
       }
 
-      const fmt = n => Number(n).toLocaleString()
+      const fmt = n => numberFormatter.format(n)
       const allTokenPresets = [8192, 16384, 32768, 65536, 131072, 262144, 524288, 786432, 1048576]
       const maxTokenCaps = longDecode ? allTokenPresets : [8192, 16384, 32768, 65536]
       const contextWindowPresets = [262144, 524288, 1048576]

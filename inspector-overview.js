@@ -61,13 +61,13 @@ export function summarizeRequestOverview(records,window={limit:20,limited:false}
  const invalidCost=requests.some(request=>request.cost?.knownSubtotalUsd!=null&&!knownMoney(request.cost.knownSubtotalUsd))
  const knownSubtotalUsd=invalidCost||costSum===null?null:Math.round(costSum*1e9)/1e9
  const completeRequests=requests.filter(request=>request.costComplete).length
- // Bolt ⚡: Optimized O(N) min/max string scan without expensive O(N log N) sorting
- let oldestAt=null, newestAt=null
- for (const record of records) {
-  const t = record.startedAt
-  if (typeof t === 'string') {
-   if (oldestAt === null || t < oldestAt) oldestAt = t
-   if (newestAt === null || t > newestAt) newestAt = t
+ // One pass over the retained snapshot replaces a full copy plus sort.
+ let oldestAt=null,newestAt=null
+ for(const record of records){
+  const startedAt=record.startedAt
+  if(typeof startedAt==='string'){
+   if(oldestAt===null||startedAt<oldestAt)oldestAt=startedAt
+   if(newestAt===null||startedAt>newestAt)newestAt=startedAt
   }
  }
  return {

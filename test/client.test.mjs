@@ -6,13 +6,14 @@ import { pathToFileURL } from 'node:url'
 import { SERVICE_TIERS, SERVICE_TIER_CAPABILITIES, resolveServicePolicy } from '../service-level.js'
 import { Config } from '../index.js'
 const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
-function render(value = {}, writable = true, { status = 'ready', language = 'zh', remote, api, globalAccess = true, formController } = {}) {
+function render(value = {}, writable = true, { status = 'ready', language = 'zh', remote, api, globalAccess = true, formController, intl } = {}) {
   let declaration, settings, inspector, dictionary, dictionaries
   const writes = [], disposers = []
   let snapshot = {status,writable,value}
   const form = formController ?? { subscribe:()=>()=>{}, getSnapshot:()=>snapshot, set:async(key,next)=>{writes.push([key,next]);return true} }
   const React = { createElement:(type,props,...children)=>({type,props:props??{},children:children.flat(Infinity)}), useState:initial=>[initial,()=>{}], useRef:initial=>({current:initial}), useCallback:fn=>fn, useEffect:()=>{}, useSyncExternalStore:(_sub,get)=>get(), Fragment:'fragment' }
-  vm.runInNewContext(source, { window:{__ModuleLoader__:{load:x=>declaration=x}}, console, Date, Symbol, Object, Map, WeakMap, AbortController })
+  // A test may observe or replace the module's Intl surface without touching production code.
+  vm.runInNewContext(source, { window:{__ModuleLoader__:{load:x=>declaration=x}}, console, Date, Symbol, Object, Map, WeakMap, AbortController, Intl: intl ?? Intl })
   const plugin=declaration.factory(name=>{assert.equal(name,'react');return React})
   const ctx={
     get:key=>key==='remote'?remote:key==='remote.vertexArgonDiagnostics'?api:undefined,
@@ -677,4 +678,55 @@ test('typed recovery descriptors mount once, validate contracts, unwrap envelope
     assert.equal(calls.mounts.length,1)
   }finally{await f.close()}
   assert.equal(calls.unmounts,1)
+})
+
+test('one cached Intl formatter per module replaces per-value formatter construction',async()=>{
+  const calls={date:[],number:[]}
+  const spy=Object.create(Intl)
+  spy.DateTimeFormat=function(...args){calls.date.push(args);return new Intl.DateTimeFormat(...args)}
+  spy.NumberFormat=function(...args){calls.number.push(args);return new Intl.NumberFormat(...args)}
+  const r=render({maxTokens:1048576},true,{intl:spy})
+  const panel=r.settingsPanel()
+  try{
+    assert.equal(calls.date.length,1,'the module builds exactly one DateTimeFormat')
+    assert.equal(calls.number.length,1,'the module builds exactly one NumberFormat')
+    const view=await panel.mount()
+    panel.draw();panel.draw()
+    assert.equal(calls.date.length,1,'a rerender must reuse the cached time formatter')
+    assert.equal(calls.number.length,1,'a rerender must reuse the cached number formatter')
+    for(const text of ['786,432','1,048,576','917,504'])assert.ok(view.text.includes(text),text)
+  }finally{panel.close();await r.close()}
+})
+
+test('the cached time formatter keeps the previous toLocaleTimeString output in every locale',async()=>{
+  const calls=[]
+  const spy=Object.create(Intl)
+  spy.DateTimeFormat=function(...args){calls.push(args);return new Intl.DateTimeFormat(...args)}
+  const r=render({},true,{intl:spy})
+  try{
+    assert.equal(calls.length,1)
+    const [locale,options]=calls[0]
+    assert.equal(locale,undefined)
+    assert.deepEqual({...options},{hour:'numeric',minute:'numeric',second:'numeric',hour12:false})
+    const cached=new Intl.DateTimeFormat(locale,options)
+    for(const iso of ['2026-10-18T00:15:05.000Z','2026-10-18T09:07:05.000Z','2026-10-18T23:59:59.000Z']){
+      const d=new Date(iso)
+      assert.equal(cached.format(d),d.toLocaleTimeString([], {hour12:false}),iso)
+    }
+    // numeric hour/minute/second with hour12:false never rewrites a locale's own pattern.
+    for(const tag of ['en-US','en-GB','zh-CN','ja-JP','ko-KR','de-DE','ar-EG','ru-RU']){
+      const localized=new Intl.DateTimeFormat(tag,options)
+      for(const iso of ['2026-10-18T00:15:05.000Z','2026-10-18T09:07:05.000Z','2026-10-18T12:00:00.000Z']){
+        const d=new Date(iso)
+        assert.equal(localized.format(d),d.toLocaleTimeString(tag,{hour12:false}),tag+' '+iso)
+      }
+    }
+  }finally{await r.close()}
+})
+
+test('client formatting never falls back to a per-call locale constructor',async()=>{
+  assert.equal(source.includes('.toLocaleTimeString('),false,'formatTimeShort must use the cached formatter')
+  assert.equal(source.match(/\.toLocaleString\(\)/g)?.length,3,'only the three Date#toLocaleString recovery timestamps remain')
+  assert.equal(source.match(/timeFormatter\.format\(/g)?.length,1)
+  assert.equal(source.match(/numberFormatter\.format\(/g)?.length,3,'diagnostics items, token text and the budget formatter share one formatter')
 })
