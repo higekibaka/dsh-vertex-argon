@@ -61,10 +61,18 @@ export function summarizeRequestOverview(records,window={limit:20,limited:false}
  const invalidCost=requests.some(request=>request.cost?.knownSubtotalUsd!=null&&!knownMoney(request.cost.knownSubtotalUsd))
  const knownSubtotalUsd=invalidCost||costSum===null?null:Math.round(costSum*1e9)/1e9
  const completeRequests=requests.filter(request=>request.costComplete).length
- const starts=records.map(record=>record.startedAt).filter(value=>typeof value==='string').sort()
+ // Bolt ⚡: Optimized O(N) min/max string scan without expensive O(N log N) sorting
+ let oldestAt=null, newestAt=null
+ for (const record of records) {
+  const t = record.startedAt
+  if (typeof t === 'string') {
+   if (oldestAt === null || t < oldestAt) oldestAt = t
+   if (newestAt === null || t > newestAt) newestAt = t
+  }
+ }
  return {
   requestCount,
-  window:{limit:window.limit??20,retainedWindowLimit:200,limited:window.limited===true,oldestAt:starts[0]??null,newestAt:starts.at(-1)??null},
+  window:{limit:window.limit??20,retainedWindowLimit:200,limited:window.limited===true,oldestAt,newestAt},
   tokens,
   cache:{percent,completeRequests:cacheCompleteRequests},
   cost:{knownSubtotalUsd,estimatedUsd:requestCount>0&&completeRequests===requestCount?knownSubtotalUsd:null,reportedRequests:reportedCosts.length,completeRequests,billingVerified:false},
