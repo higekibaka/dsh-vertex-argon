@@ -26,13 +26,13 @@
 
 `dsh-vertex-argon` 为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) 提供生产级的 **Gemini 4 Argon** 双通道接入支持。插件同时打通 **Google Vertex AI**（ADC 服务账号 / Express API Key）与 **Google Gemini Developer API**（AI Studio API Key），完整支持 **`GenerateContent` (`v1beta1` / `v1`) 多跳长解码续传**与 **`Interactions` (`v1beta`) 持久化后台恢复**双协议，配备显式服务层级路由（`Standard` / `Flex` / `Priority`）、仅签名空 `Part` 无损回放、模态级 Token 账本、公开价格成本估算、**Argon Inspector 全景检视台**以及只读 Agent 诊断工具 `argon_inspect`。
 
-Current release: **[1.5.1](https://github.com/higekibaka/dsh-vertex-argon)** · [npm](https://www.npmjs.com/package/dsh-vertex-argon) · [CHANGELOG](./CHANGELOG.md)
+Current release: **[1.5.2](https://github.com/higekibaka/dsh-vertex-argon)** · [npm](https://www.npmjs.com/package/dsh-vertex-argon) · [CHANGELOG](./CHANGELOG.md)
 
 ---
 
 ## ✨ 为什么需要这个插件？
 
-| 能力维度 | DSH 内置 `google` / `google-vertex` 默认适配器 | `dsh-vertex-argon` (v1.5.1) |
+| 能力维度 | DSH 内置 `google` / `google-vertex` 默认适配器 | `dsh-vertex-argon` (v1.5.2) |
 |---|---|---|
 | **思考控制参数** | 误传 `thinkingBudget: -1` 触发云端 `HTTP 400`，或传入超限档位 `max` 报错 | 原生映射 `thinkingLevel: "LOW" \| "MEDIUM" \| "HIGH"`，自动将 `max` 收敛为 `high`，剔除无效采样参数 |
 | **思维链与空块签名回放** | 容易丢失不带文本的独立 `thoughtSignature` `Part`，影响长链路多轮推理与工具续答 | 固定开启 `includeThoughts: true`，通过 `google-signatures.js` 无损编码并原样回放仅含签名的空 `Part` |

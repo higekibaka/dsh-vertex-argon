@@ -2,6 +2,21 @@
 
 All notable changes to `dsh-vertex-argon` are documented in this file.
 
+## [1.5.2] - 2026-10-22
+
+### Fixed
+- **Usage Counter Normalization & Cost Estimation (`usage-details.js`, `pricing.js`, `inspector-overview.js`, `diagnostic-store.js`)**:
+  - Resolved omitted optional zero usage counters (`cachedTokens`, `toolTokens`, `thoughtTokens`, and conserved zero `outputTokens` on tool-only `GenerateContent` turns) via `resolveUsageCounts` so completed turns with omitted zero counters no longer drop USD cost estimates to `null` or under-report `allComplete` scope totals, while preserving durable `invalidCounts` markers for malformed wire values.
+- **Native Patch & Request Association Lifecycle (`adapter.js`, `index.js`, `generate-content.js`)**:
+  - Updated `installGemini4PiAiPatch` and `ensureGemini4ApiClientPatch` to follow live `longDecode`, service-tier, and `retainRawResponses` settings on patched native providers and cleanly deactivate upon disposal without overwriting downstream wrappers.
+  - Cleared `request-association` tracking state on plugin unload and guarded `continueArgonRequestStream` when `signal` is already aborted before the first stream attempt.
+- **Offline Test Guard & Host Module Loader (`package.json`, `test/offline-guard.mjs`, `test/host-loader.mjs`, `test/host-internals.mjs`)**:
+  - Enforced `--import ./test/offline-guard.mjs` in `npm test`, added IPv6 loopback bracket handling, and decoupled offline UI/SSR tests from checkout-only internals via verified read-only host bundle loading.
+
+### Changed
+- **Inspector & Client Rendering Performance (`inspector-overview.js`, `client.js`)**:
+  - Computed `oldestAt` / `newestAt` overview bounds in a single pass and cached module-level `Intl.DateTimeFormat` / `Intl.NumberFormat` instances.
+
 ## [1.5.1] - 2026-10-19
 
 ### Changed
