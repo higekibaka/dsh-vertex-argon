@@ -1,5 +1,5 @@
 import {estimateDiagnosticCost} from './pricing.js'
-import {USAGE_COUNT_KEYS} from './usage-details.js'
+import {USAGE_COUNT_KEYS,resolveUsageCounts} from './usage-details.js'
 
 const knownCount=value=>Number.isSafeInteger(value)&&value>=0
 const knownMoney=value=>typeof value==='number'&&Number.isFinite(value)&&value>=0&&value<=Number.MAX_SAFE_INTEGER
@@ -29,13 +29,14 @@ function requestSources(record) {
 
 function requestSummary(record) {
  const {rows,complete}=requestSources(record)
+ const usages=rows.map(row=>resolveUsageCounts(row.usage,record.protocol))
  const tokens=Object.fromEntries(USAGE_COUNT_KEYS.map(key=>{
-  const known=rows.map(row=>row.usage?.[key]).filter(knownCount)
+  const known=usages.map(usage=>usage?.[key]).filter(knownCount)
   const subtotal=sumKnown(known,knownCount)
   return [key,{subtotal,reported:known.length>0,complete:complete&&known.length===rows.length&&subtotal!==null}]
  }))
  const cacheComplete=tokens.inputTokens.complete&&tokens.cachedTokens.complete
-  &&rows.every(row=>row.usage.cachedTokens<=row.usage.inputTokens)
+  &&usages.every(usage=>usage.cachedTokens<=usage.inputTokens)
  // Keep pricing in one place; a duplicate/invalid hop ledger still cannot be
  // promoted to a complete estimate even if its individual rows are priced.
  const cost=['generate-content','interactions'].includes(record.protocol)?estimateDiagnosticCost(record):null

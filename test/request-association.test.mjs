@@ -122,8 +122,8 @@ test('real LlmRuntime clone and Session append settle the exact original marked 
  const {Context}=await shared('@deepseek-ai/cordis')
  const {default:LlmRuntime,LlmAdapter,isAgentLoopRequest,createAssistantMessage,createUserMessage}=await shared('@deepseek-ai/dsh-llm')
  const {default:SessionStore}=await shared('@deepseek-ai/dsh-session')
- const {pathToFileURL}=await import('node:url')
- const {AssistantStreamAttempt}=await import(pathToFileURL(process.env.DSH_TEST_HOST_ROOT+'/packages/core/agent-loop/src/assistant-stream.ts').href)
+ const {hostAssistantStream}=await import('./host-internals.mjs')
+ const {AssistantStreamAttempt}=await hostAssistantStream()
  const ctx=new Context(),records=createDiagnosticHub(),hub=createRequestAssociationHub((id,locator)=>records.link(id,locator))
  let request,seen,revision=0
  class Adapter extends LlmAdapter {

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import { pathToFileURL } from 'node:url'
+import { hostClientModule, hostReactRuntime } from './host-internals.mjs'
 import vm from 'node:vm'
-import { createRequire, registerHooks } from 'node:module'
+import { registerHooks } from 'node:module'
 
 // Imported UI barrels carry CSS. Strip only inert styles, never controller/store behavior.
 registerHooks({
@@ -17,16 +17,14 @@ registerHooks({
 import { Context } from '@deepseek-ai/cordis'
 import { summarizeRequestOverview } from '../inspector-overview.js'
 
-const root = process.env.DSH_TEST_HOST_ROOT
+const root = process.env.DSH_TEST_HOST_ROOT || import.meta.resolve('@deepseek-ai/dsh-client-ui-sidebar-right/package.json')
 assert.ok(root, 'Matching DSH source is required; never replace the sidebar controller with a spy')
-const host = suffix => import(pathToFileURL(root + '/packages/client/ui-sidebar-right/src/client/' + suffix).href)
+const host = suffix => hostClientModule('@deepseek-ai/dsh-client-ui-sidebar-right', 'packages/client/ui-sidebar-right/src/client/' + suffix)
 const { createSidebarRightController } = await host('service.ts')
 const { SidebarRightTabRegistry } = await host('tab-registry.ts')
 const { createSidebarRightStore } = await host('stores.ts')
-const hostRequire = createRequire(root + '/apps/web/package.json')
-const nativeReact = hostRequire('react')
-const { renderToStaticMarkup } = hostRequire('react-dom/server')
-const { DefaultConversationViews } = await import(pathToFileURL(root + '/packages/client/ui-conversation/lib/types/client/skeleton/DefaultConversationViews.js').href)
+const { React: nativeReact, renderToStaticMarkup } = hostReactRuntime()
+const { DefaultConversationViews } = await hostClientModule('@deepseek-ai/dsh-client-ui-conversation', 'packages/client/ui-conversation/lib/types/client/skeleton/DefaultConversationViews.js')
 const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
 export const plain = value => JSON.parse(JSON.stringify(value))
 export const tick = () => new Promise(setImmediate)

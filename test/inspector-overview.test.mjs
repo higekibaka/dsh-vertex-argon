@@ -304,3 +304,26 @@ test('getOverview has an independent session-scoped remote descriptor and surviv
   }finally{await service.inspector.close();await ctx.fiber.dispose()}
  }
 })
+
+test('overview shares historical optional defaults with pricing without inventing totals',()=>{
+ const usage={inputTokens:100,outputTokens:20,cachedTokens:null,thoughtTokens:null,toolTokens:null,totalTokens:null}
+ for(const record of [gc([hop(usage)]),ia(usage)]){
+  const before=structuredClone(record),r=overview([record])
+  for(const key of ['cachedTokens','thoughtTokens','toolTokens'])assert.deepEqual(r.tokens[key],metric(0,1,1,true))
+  assert.deepEqual(r.tokens.totalTokens,metric(null,0,0,false))
+  assert.deepEqual(r.cache,{percent:0,completeRequests:1})
+  assert.equal(r.cost.estimatedUsd,0.0004);assert.deepEqual(record,before)
+ }
+})
+test('overview keeps empty and invalid usage unknown while honoring proven GC zero output',()=>{
+ for(const usage of [null,{}, {cachedTokens:null,thoughtTokens:null,toolTokens:null}]){
+  const r=overview([gc([hop(usage)]),ia(usage)])
+  for(const key of USAGE_COUNT_KEYS)assert.deepEqual(r.tokens[key],metric(null,0,0,false))
+  assert.equal(r.cost.knownSubtotalUsd,null);assert.equal(r.cost.estimatedUsd,null)
+ }
+ const zero={inputTokens:100,totalTokens:100,outputTokens:null,cachedTokens:null,thoughtTokens:null,toolTokens:null}
+ const r=overview([gc([hop(zero)])])
+ assert.deepEqual(r.tokens.outputTokens,metric(0,1,1,true));assert.equal(r.cost.estimatedUsd,0.0002)
+ const invalid=overview([gc([hop({...zero,outputTokens:0,invalidCounts:['toolTokens']})])])
+ assert.deepEqual(invalid.tokens.toolTokens,metric(null,0,0,false));assert.equal(invalid.cost.estimatedUsd,null)
+})

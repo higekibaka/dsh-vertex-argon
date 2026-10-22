@@ -76,7 +76,7 @@ export function detectPiAiArgonRoutes(ctx, explicitRoutes) {
 const TRANSIENT_GEMINI_STOP_RE = /(?:Unhandled stop reason:\s*(?:MALFORMED_RESPONSE|MALFORMED_FUNCTION_CALL|UNEXPECTED_TOOL_CALL|TOO_MANY_TOOL_CALLS)|Provider stopped with:\s*(?:MALFORMED_RESPONSE|MALFORMED_FUNCTION_CALL|UNEXPECTED_TOOL_CALL|OTHER|FINISH_REASON_UNSPECIFIED))/i
 
 let apiClientProtoRef = null
-let origApiClientRequestStream = null
+let apiClientPatch = null
 
 function getApiClientPrototype() {
   if (apiClientProtoRef) return apiClientProtoRef
@@ -92,28 +92,26 @@ function getApiClientPrototype() {
 export function ensureGemini4ApiClientPatch() {
   const proto = getApiClientPrototype()
   if (!proto || typeof proto.requestStream !== 'function') return () => {}
-  if (origApiClientRequestStream) {
-    return () => {
-      if (proto.requestStream !== origApiClientRequestStream && origApiClientRequestStream) {
-        proto.requestStream = origApiClientRequestStream
-        origApiClientRequestStream = null
-      }
-    }
-  }
+  if (apiClientPatch) return apiClientPatch.dispose
   const orig = proto.requestStream
-  origApiClientRequestStream = orig
+  let active = true
   function patchedRequestStream(request) {
     const meta = request?.httpOptions?.[ARGON_LONG_DECODE_SYMBOL]
-    if (!meta) return orig.call(this, request)
+    if (!active || !meta) return orig.call(this, request)
     return continueArgonRequestStream(this, orig, request, meta)
   }
-  proto.requestStream = patchedRequestStream
-  return () => {
-    if (proto.requestStream === patchedRequestStream) {
-      proto.requestStream = orig
-    }
-    origApiClientRequestStream = null
+  const patch = {
+    dispose() {
+      if (!active) return
+      active = false
+      // A later wrapper belongs to its installer, even when it delegates to us.
+      if (proto.requestStream === patchedRequestStream) proto.requestStream = orig
+      if (apiClientPatch === patch) apiClientPatch = null
+    },
   }
+  proto.requestStream = patchedRequestStream
+  apiClientPatch = patch
+  return patch.dispose
 }
 
 function wrapGemini4Stream(rawStream, tracker, signal) {
@@ -255,12 +253,13 @@ export function gemini4StreamSimple(
   )
 }
 
-export function installGemini4PiAiPatch(recordDiagnostic) {
+export function installGemini4PiAiPatch(recordDiagnostic, configInput = {}, responseHub) {
   const unpatchApiClient = ensureGemini4ApiClientPatch()
   const proto = PiAiAdapter?.prototype
   if (!proto || typeof proto.current !== 'function') return unpatchApiClient
   const origCurrent = proto.current
   const patchedProviders = new Map()
+  let active = true
   const ensureGemini4Capabilities = piProvider => {
     if (typeof piProvider?.getModels !== 'function') return
     try {
@@ -277,17 +276,24 @@ export function installGemini4PiAiPatch(recordDiagnostic) {
     ensureGemini4Capabilities(piProvider)
     if (piProvider.id === PROVIDER || patchedProviders.has(piProvider)) return
     const origStreamSimple = piProvider.streamSimple
-    patchedProviders.set(piProvider, origStreamSimple)
-    piProvider.streamSimple = function (requestModel, context, options = {}) {
-      if (isGemini4Model(requestModel)) {
-        return gemini4StreamSimple((m, c, o) => piProvider.stream(m, c, o), requestModel, context, options, defaultReasoning, requestModel.id, true, recordDiagnostic)
+    function patchedStreamSimple(requestModel, context, options = {}) {
+      if (active && isGemini4Model(requestModel)) {
+        const cfg = resolveConfigValues(configInput)
+        return gemini4StreamSimple(
+          (m, c, o) => piProvider.stream(m, c, o), requestModel, context, options,
+          defaultReasoning, requestModel.id, cfg.longDecode, recordDiagnostic,
+          resolveServicePolicy(cfg, requestModel.api, 'generate-content'),
+          { responseHub, retainRawResponses: cfg.retainRawResponses },
+        )
       }
       return origStreamSimple.call(this, requestModel, context, options)
     }
+    patchedProviders.set(piProvider, { origStreamSimple, patchedStreamSimple })
+    piProvider.streamSimple = patchedStreamSimple
   }
   function patchedCurrent() {
     const snapshot = origCurrent.call(this)
-    if (snapshot?.profiles instanceof Map) {
+    if (active && snapshot?.profiles instanceof Map) {
       for (const profile of snapshot.profiles.values()) {
         if (profile?.piProvider) wrapProvider(profile.piProvider, profile.reasoning)
       }
@@ -296,10 +302,12 @@ export function installGemini4PiAiPatch(recordDiagnostic) {
   }
   proto.current = patchedCurrent
   return () => {
+    if (!active) return
+    active = false
     unpatchApiClient()
     if (proto.current === patchedCurrent) proto.current = origCurrent
-    for (const [piProvider, origStreamSimple] of patchedProviders.entries()) {
-      piProvider.streamSimple = origStreamSimple
+    for (const [piProvider, { origStreamSimple, patchedStreamSimple }] of patchedProviders) {
+      if (piProvider.streamSimple === patchedStreamSimple) piProvider.streamSimple = origStreamSimple
     }
     patchedProviders.clear()
   }
@@ -463,13 +471,9 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
   resolveConfigValues(configInput)
   const environment = launchEnvironmentOf(ctx)
   const resolveSecret = async name => {
-    try {
-      const cred = await ctx?.get?.('credentials')?.resolve?.(name)
-      if (cred?.value) return cred.value
-    } catch (error) {
-      // Explicit billed auxiliary requests must not switch accounts on store failure.
-      if (structuredOutput) throw error
-    }
+    // A failed credential store must never silently select an ambient account.
+    const cred = await ctx?.get?.('credentials')?.resolve?.(name)
+    if (cred?.value) return cred.value
     return environment.get(name)?.value
   }
   const authContext = {

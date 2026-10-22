@@ -1,3 +1,5 @@
+import { resolveUsageCounts } from './usage-details.js'
+
 // Public price snapshots, not account billing data. All amounts are USD per 1M tokens.
 export const PRICE_SNAPSHOT = Object.freeze({
   version: 'argon-public-2026-10-18', verifiedAt: '2026-10-18',
@@ -35,7 +37,8 @@ export function resolvePublicPrice({ route, tier, regionClass, at, model = 'gemi
     basis: vertex && promotional ? 'published-after-promotional-credits' : 'published-token-prices' }
 }
 
-export function estimateUsageCost({ usage, complete = false, ...selection }) {
+export function estimateUsageCost({ usage, protocol, complete = false, ...selection }) {
+  usage = resolveUsageCounts(usage, protocol)
   const price = resolvePublicPrice(selection)
   const missing = [], components = { inputUsd: null, cachedUsd: null, outputUsd: null }
   if (complete !== true) missing.push('usage-not-final')
@@ -61,7 +64,7 @@ export function estimateUsageCost({ usage, complete = false, ...selection }) {
 export function estimateDiagnosticCost(record) {
  const details=record.usageDetails, gc=record.protocol==='generate-content'
  const missing=[], rows=[]
- const selection={route:record.route,model:record.model,regionClass:record.regionClass,at:record.startedAt}
+ const selection={route:record.route,model:record.model,regionClass:record.regionClass,at:record.startedAt,protocol:record.protocol}
  const estimate=(usage,complete,observed,index) => {
   const receipt=observed ?? (gc ? null : record.serviceTier?.observed)
   const tier=receipt ?? record.serviceTier?.requested

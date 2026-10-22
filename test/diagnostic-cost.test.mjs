@@ -31,3 +31,24 @@ test('an unobserved GC hop uses requested scenario, never borrows another hop re
 test('old records, provisioned traffic and mixed aggregate tier are unknown, not zero or requested fallback',()=>{
  for(const r of [{...record,usageDetails:undefined},{...record,serviceTier:{requested:'priority',observed:'provisioned'}},{...record,serviceTier:{requested:'priority',observed:'mixed'}}])assert.equal(estimateDiagnosticCost(r).estimatedUsd,null)
 })
+
+test('historical GC null counters reprice without mutating stored rows',()=>{
+ for(const [sample,components,total] of [
+  [{inputTokens:646649,cachedTokens:640135,outputTokens:1398,thoughtTokens:75,toolTokens:null,totalTokens:648122},{inputUsd:0.013028,cachedUsd:0.0640135,outputUsd:0.01473},0.0917715],
+  [{inputTokens:4895,cachedTokens:null,outputTokens:1256,thoughtTokens:null,toolTokens:null,totalTokens:6151},{inputUsd:0.00979,cachedUsd:0,outputUsd:0.01256},0.02235],
+ ]){
+  const r={...record,route:'google-vertex',regionClass:'global',protocol:'generate-content',hopCount:1,usageDetails:{aggregate:null,aggregateComplete:false,omittedRows:0,rows:[{kind:'gc-hop',index:1,usage:sample,complete:true,observedServiceTier:'standard'}]}}
+  const before=structuredClone(r),cost=estimateDiagnosticCost(r)
+  assert.deepEqual(cost.rows[0].components,components);assert.equal(cost.estimatedUsd,total);assert.equal(cost.knownSubtotalUsd,total);assert.deepEqual(cost.missing,[]);assert.deepEqual(r,before)
+  const partial=estimateDiagnosticCost({...r,outcome:'aborted'})
+  assert.equal(partial.estimatedUsd,null);assert.equal(partial.knownSubtotalUsd,total)
+ }
+})
+test('historical missing bases and empty usage stay incomplete in both protocols',()=>{
+ for(const usage of [null,{}, {inputTokens:1000}, {outputTokens:1000}]){
+  for(const r of [
+   {...record,usageDetails:{...record.usageDetails,aggregate:usage}},
+   {...record,protocol:'generate-content',hopCount:1,usageDetails:{omittedRows:0,rows:[{kind:'gc-hop',index:1,usage,complete:true}]}},
+  ])assert.equal(estimateDiagnosticCost(r).estimatedUsd,null)
+ }
+})

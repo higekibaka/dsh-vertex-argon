@@ -65,7 +65,9 @@ const fields = ['promptTokenCount', 'cachedContentTokenCount', 'candidatesTokenC
 function readUsage(raw, previous) {
   const result = { ...previous }
   for (const key of fields) {
-    if (Number.isSafeInteger(raw[key]) && raw[key] >= 0) result[key] = raw[key]
+    // Keep an explicit invalid count distinguishable from an omitted zero.
+    // The ledger records only its invalid marker, never the upstream bad value.
+    if (raw[key] !== undefined) result[key] = Number.isSafeInteger(raw[key]) && raw[key] >= 0 ? raw[key] : null
   }
   for (const key of ['promptTokensDetails', 'cacheTokensDetails', 'candidatesTokensDetails', 'toolUsePromptTokensDetails', 'trafficType']) {
     if (Object.hasOwn(raw, key)) result[key] = raw[key]
@@ -161,7 +163,7 @@ export async function continueArgonRequestStream(apiClient, original, request, m
       }
 
       const refreshOriginalUsage = () => {
-        if ((initialPrompt === undefined || !startToken) && latestUsage?.promptTokenCount !== undefined) initialPrompt = latestUsage.promptTokenCount
+        if ((initialPrompt === undefined || !startToken) && Number.isSafeInteger(latestUsage?.promptTokenCount)) initialPrompt = latestUsage.promptTokenCount
         if ((initialCached === undefined || !startToken) && initialPrompt !== undefined) initialCached = value(latestUsage, 'cachedContentTokenCount')
       }
       const accountCommitted = () => {

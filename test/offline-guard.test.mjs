@@ -17,7 +17,12 @@ test('offline guard permits only its own ephemeral loopback and revokes on close
   const server = createServer((_request, response) => response.end('owned-fixture'))
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   const url = 'http://127.0.0.1:' + server.address().port
-  try { assert.equal(await (await fetch(url)).text(), 'owned-fixture') }
+  let customDispatches = 0
+  const dispatcher = { dispatch() { customDispatches++; throw new Error('must-not-use-ambient-or-supplied-proxy') } }
+  try {
+    assert.equal(await (await fetch(url, { dispatcher })).text(), 'owned-fixture')
+    assert.equal(customDispatches, 0)
+  }
   finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)) }
   await assert.rejects(fetch(url), /ARGON_OFFLINE_NETWORK_DENIED/)
 })

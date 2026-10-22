@@ -98,3 +98,18 @@ for(const tier of ['standard','flex','priority'])test('SDK extraBody cannot over
  }finally{globalThis.fetch=old}
 })
 
+test('GC wire omissions price normally while explicit invalid counts survive streaming normalization',async()=>{
+ for(const [field,bad]of [[null,undefined],['toolUsePromptTokenCount',-1],['cachedContentTokenCount','bad'],['thoughtsTokenCount',null],['thoughtsTokenCount',-1],['candidatesTokenCount',-1],['promptTokenCount',-1]]){
+  let diagnostic
+  const tracker=createArgonDiagnosticTracker({route:'google-generative-ai',model:'gemini-4-argon',protocol:'generate-content',requestedServiceTier:'standard'},r=>diagnostic=r)
+  const metadata={promptTokenCount:100,candidatesTokenCount:10,totalTokenCount:field==='candidatesTokenCount'?100:110,...(field?{[field]:bad}:{})}
+  const original=async()=> (async function*(){yield {json:async()=>({...row('STOP'),usageMetadata:metadata})}})()
+  const stream=await continueArgonRequestStream({isVertexAI:()=>false},original,{body:JSON.stringify({contents:[],generationConfig:{maxOutputTokens:65536}})},{enabled:false,tracker})
+  for await(const _ of stream){}
+  tracker.finishStream({outcome:'done'})
+  diagnostic.startedAt='2026-10-18T00:00:00.000Z'
+  const cost=estimateDiagnosticCost(diagnostic)
+  assert.equal(cost.estimatedUsd,field?null:0.0003)
+  if(field)assert.ok(diagnostic.usageDetails.rows[0].usage.invalidCounts.length>0)
+ }
+})

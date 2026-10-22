@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
-import { pathToFileURL } from 'node:url'
+import { hostClientModule } from './host-internals.mjs'
 import { SERVICE_TIERS, SERVICE_TIER_CAPABILITIES, resolveServicePolicy } from '../service-level.js'
 import { Config } from '../index.js'
 const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
@@ -278,7 +278,7 @@ test('retained tier callbacks recheck live readiness, permission and protocol co
 })
 
 test('tier writes use the real revision-fenced ConfigFormController and Host schema',async()=>{
-  const {ConfigFormController}=await import(pathToFileURL(process.env.DSH_TEST_HOST_ROOT+'/packages/client/ui-settings/src/client/config-form.ts').href)
+  const {ConfigFormController}=await hostClientModule('@deepseek-ai/dsh-client-ui-settings','packages/client/ui-settings/src/client/config-form.ts')
   const resolve=value=>Object.fromEntries(Object.entries(Config(value)).map(([key,item])=>[key,item.get()]))
   let namespace={ns:'local-vertex-argon',revision:7,value:resolve({googleProtocol:'generate-content'})}
   const listeners=new Set(),calls=[]

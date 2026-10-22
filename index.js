@@ -117,7 +117,7 @@ export function apply(ctx, config) {
   })
   const recordDiagnostic = record => hub.record(record)
   const adapter = createArgonAdapter(ctx, () => config, undefined, undefined, recordDiagnostic, taskHub, responseHub)
-  const unpatchPiAi = installGemini4PiAiPatch(recordDiagnostic)
+  const unpatchPiAi = installGemini4PiAiPatch(recordDiagnostic, () => config, responseHub)
   const registration = ctx.llm.registerAdapter([PROVIDER], adapter)
   ctx.effect(() => () => {
     unpatchPiAi()

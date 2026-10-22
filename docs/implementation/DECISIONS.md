@@ -29,8 +29,8 @@
 3. **仅含签名的空 `Part` 无损回放（`google-signatures.js`）**
    - 上游在思维链或工具调用前后可能返回仅含 `thoughtSignature` / `thought_signature` 而无文本的 `Part`。插件将其编码为稳定载体并在后续多轮回放时原样还原，避免多轮签名校验失败。
 4. **水位线与累计计费 Token 双轨分离（`diagnostics.js`）**
-   - 向宿主会话上报的 `usage.input` 采用最后一跳的 `promptTokenCount`（代表当前上下文窗口真实水位线，避免触发虚假自动压缩）。
-   - 诊断记录额外保留 `billedPromptTokens` 与 `billedTotalTokens`（累加每一跳的 `promptTokenCount`），供成本估算与审计使用。
+   - 向宿主会话上报的输入水位固定采用第一跳的 `promptTokenCount`，不使用续写跳增长后的 prompt 水位或跨跳计费总量，避免重复计算已生成内容并触发虚假自动压缩。
+   - 诊断记录额外保留 `billedPromptTokens` 与 `billedTotalTokens`，分别累加各跳的 `promptTokenCount` 与 `totalTokenCount`，供成本估算与审计使用。
 
 ---
 
@@ -48,7 +48,10 @@
 1. **请求到消息的精确关联（`request-association.js`）**
    - 通过 WeakMap 跨 `LlmRuntime` 克隆传递请求标记，结合 `agent/assistant-stream` 的 `attemptId` 与 `session/event` 的落盘序号，将每条诊断记录精确关联至最终 `messageId` 与 `settlementSeq`；超过容量上限（256 个活跃 Agent / 64 个待决诊断）时宁可放弃关联（Fail-Closed）也绝不串绑到错误消息。
 2. **公开价格快照与非账单声明（`pricing.js`）**
-   - 价格快照 `argon-public-2026-10-18` 明确标示 `billingVerified: false`，区分促销期（2026-12-01 UTC 前）与常规定价，以及 Vertex `global` 与非 `global` 区域（`1.1x`）系数；缺失任何模态分项或未完成请求时，`estimatedUsd` 返回 `null` 并仅展示 `knownSubtotalUsd`。
+   - 价格快照 `argon-public-2026-10-18` 明确标示 `billingVerified: false`，区分促销期（2026-12-01 UTC 前）与常规定价，以及 Vertex `global` 与非 `global` 区域（`1.1x`）系数；估算不是账单，不要求模态明细完整。
+   - 缓存、工具的缺省计数在输入基础计数有效时按 `0` 处理；思考的缺省计数在输出基础计数有效时按 `0` 处理。兼容旧记录中的 `null`，但不改写历史文件。
+   - GenerateContent 候选输出计数缺省时，仅在有效的输入、总量与思考、工具计数的加总关系严格证明输出为 `0` 时补零；不得把未知的基础用量直接当作零。
+   - 基础计数或价格依据缺失、计价所需计数非法、请求未完成时，`estimatedUsd` 仍返回 `null`，仅展示 `knownSubtotalUsd`。可选的 `invalidCounts` 标记保留非法来源，防止负数或错误类型被归一化为 `null` 后再误补为零。
 3. **只读 Agent 工具 `argon_inspect`（`inspector-tool.js`）**
    - 默认 `deferLoading: true`，仅允许读取当前执行会话的诊断、原始响应分片或执行单次只读 Cloud Interaction `GET` 查询；不包含任何配置修改、后台锁释放或云端工具执行能力。
 

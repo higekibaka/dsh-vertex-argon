@@ -27,12 +27,16 @@ net.Socket.prototype.connect = function (...args) {
   if (options.host !== '127.0.0.1' || !ports.has(Number(options.port))) return deny()
   return connect.apply(this, args)
 }
-const nativeFetch = globalThis.fetch
+let directClient
+// Node may initialize its environment proxy before preloaders clear process.env.
+// Only allowed fixture fetches load a direct agent; socket guards still apply.
+const fixtureClient = () => directClient ??= import('undici').then(({ Agent, fetch }) => ({ fetch, dispatcher: new Agent() }))
 // Reject before DNS or socket creation; redirects cannot escape an owned fixture.
 globalThis.fetch = async (input, init) => {
   const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url)
   if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || !ports.has(Number(url.port)) || url.username || url.password) return deny()
-  return nativeFetch(input, { ...init, redirect: 'error' })
+  const client = await fixtureClient()
+  return client.fetch(input, { ...init, dispatcher: client.dispatcher, redirect: 'error' })
 }
 tls.connect = deny
 http.request = deny; http.get = deny; https.request = deny; https.get = deny

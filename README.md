@@ -36,7 +36,7 @@ Current release: **[1.5.1](https://github.com/higekibaka/dsh-vertex-argon)** · 
 |---|---|---|
 | **思考控制参数** | 误传 `thinkingBudget: -1` 触发云端 `HTTP 400`，或传入超限档位 `max` 报错 | 原生映射 `thinkingLevel: "LOW" \| "MEDIUM" \| "HIGH"`，自动将 `max` 收敛为 `high`，剔除无效采样参数 |
 | **思维链与空块签名回放** | 容易丢失不带文本的独立 `thoughtSignature` `Part`，影响长链路多轮推理与工具续答 | 固定开启 `includeThoughts: true`，通过 `google-signatures.js` 无损编码并原样回放仅含签名的空 `Part` |
-| **GenerateContent 超长解码** | 单次锁死 64K，遇 `CONTINUATION` 直接截断结束；无流内错误帧识别 | 自动切换 `v1beta1` 执行 `continuationToken` 多跳续写（最高 `1,048,576`预算 / 最多 32 跳）、检查点指数退避重连与 HTTP 200 SSE 内联 `{ error }` 拦截 |
+| **GenerateContent 超长解码** | 单次锁死 64K，遇 `CONTINUATION` 直接截断结束；无流内错误帧识别 | 自动切换 `v1beta1` 执行 `continuationToken` 多跳续写（最高 `1,048,576` 输出 token 预算 / 最多 32 跳）、同一检查点无进展最多 3 次指数退避重连与 HTTP 200 SSE 内联 `{ error }` 拦截 |
 | **Interactions 协议与后台恢复** | 不支持 `Interactions` 协议及后台持久化执行 | 原生支持 `Interactions` (`v1beta`)、`creating` 预写防重发锁、以及基于 `last_event_id` 游标的流式断点续读 |
 | **服务层级与 PayGo 控制** | 仅默认标准队列，无层级路由与响应账单核验 | 支持按通道显式指定 `standard` / `flex` / `priority` 及 Vertex `PayGo-Only` 共享池请求头，未验证组合发包前 Fail-Closed 拦截 |
 | **可观测性、用量与成本估算** | 仅展示粗粒度总 Token，多跳长解码易虚报上下文水位触发误压缩 | **水位线 Token 与累计计费 Token 双轨分离** + 模态级（文本/图像/音频/视频/文档）拆解 + 公开价格非账单 USD 估算 + **Argon Inspector** 检视台与 `argon_inspect` 工具 |
@@ -90,7 +90,7 @@ flowchart TD
     P -->|"generate-content (默认)"| GC["GenerateContent 引擎 (v1beta1 / v1)<br/>• continuationToken 多跳续传 (最高 32 跳)<br/>• 检查点指数退避重连 & 内联 { error } 拦截<br/>• google-signatures.js 空块签名无损回放"]
     P -->|"interactions"| IA["Interactions 引擎 (v1beta)<br/>• 前台 SSE 流式 或 后台持久化执行<br/>• creating 预写锁防止断网重复创建计费<br/>• last_event_id 游标流式断点续读"]
 
-    GC --> D["诊断、关联与公开价格估算中心<br/>• request-association.js 绑定精确 messageId<br/>• usage-details.js 模态拆解 & 水位/计费双轨计量<br/>• pricing.js 公开价格表非账单 USD 估算<br/>• response-store.js 可选脱敏原始响应帧"]
+    GC --> D["诊断、关联与公开价格估算中心<br/>• request-association.js 绑定精确 messageId<br/>• usage-details.js 模态拆解 & 水位/计费双轨计量<br/>• pricing.js 公开价格表非账单 USD 估算<br/>• response-store.js 可选上游 JSON 响应帧"]
     IA --> D
 
     D --> UI["Argon Inspector 检视台 & argon_inspect 工具<br/>右侧栏 · 对话主视图 · 单条回复图标 · 只读云端 ID 查询"]
@@ -114,7 +114,7 @@ v1.5.0 内置完整的 **Argon Inspector** 可观测套件，前后端共享同�
   - **Overview**：通道、模型、协议、API 版本、区域分类（`global` / `non-global`）、请求与实测服务层级、关联 `messageId`。
   - **Hops & Usage**：逐跳耗时、HTTP 状态、触发原因（`initial` / `continuation` / `checkpoint-reconnect`）、水位线 Token 与分模态（`TEXT` / `IMAGE` / `AUDIO` / `VIDEO` / `DOCUMENT`）账本。
   - **Cost Estimate**：基于公开价格快照 `argon-public-2026-10-18` 的逐跳与汇总 USD 估算（明确标注非账单发票，区分促销期与 Vertex 非 `global` `1.1x` 系数）。
-  - **Raw Response**：当开启 `retainRawResponses` 时，支持按帧、按字符偏移分页查阅已脱敏的原始响应内容。
+  - **Raw Response**：当开启 `retainRawResponses` 时，支持按帧、按字符偏移分页查阅解析后的上游 JSON 响应；可能包含正文、签名以及尚未提交或重放的帧，并非已脱敏正文或可恢复检查点。
 - **Operations 运维标签页**：
   - **Cloud Interaction ID 只读查询**：输入任意已知的云端 Interaction ID 与通道，执行单次只读 `interactions.get(id)` 查询并分页检视返回内容（绝不恢复生成、不取消云端任务、不执行返回的工具调用）。
   - **Background Recovery 锁管理**：查看当前持久化后台任务状态，并在出现未知创建中断（`creating`）时由用户确认后手动释放锁。
@@ -127,7 +127,7 @@ v1.5.0 内置完整的 **Argon Inspector** 可观测套件，前后端共享同�
 | `overview` | 聚合当前会话（或指定 `messageId`）在保留窗口内的用量、成本与覆盖率概览 | `messageId?`, `limit?` (1–100) |
 | `list` | 列出当前会话（或指定 `messageId`）的本地诊断请求摘要与 `requestId` | `messageId?`, `limit?` (1–50) |
 | `detail` | 分页读取指定 `requestId` 的完整诊断记录、逐跳账本、模态用量与成本明细 | `requestId`, `offset?`, `limit?` (1–10) |
-| `response` | 按字符偏移分页读取指定 `requestId` 已捕获的脱敏原始响应帧 | `requestId`, `index?`, `offset?`, `length?` |
+| `response` | 按字符偏移分页读取指定 `requestId` 已捕获的上游 JSON 响应帧 | `requestId`, `index?`, `offset?`, `length?` |
 | `query` | 使用当前配置凭据对已知 Cloud Interaction ID 执行单次只读 `GET` 查询 | `route`, `id` |
 | `query-response` | 分页读取 `query` 返回的临时云端 Interaction 响应内容 | `queryId`, `offset?`, `length?` |
 
@@ -211,7 +211,7 @@ dsh plugin --profile web add dsh-vertex-argon
 | | `vertexPaygoOnly` | `false` | `boolean` | Vertex `generate-content` 请求固定附带 `X-Vertex-AI-LLM-Request-Type: shared` |
 | **Interactions 后台模式** | `interactionsBackground` | `false` | `boolean` | 在 `interactions` 协议下启用云端持久化后台执行（须同时开启 `allowInteractionStorage`） |
 | | `allowInteractionStorage` | `false` | `boolean` | 允许向 `interactions` 请求发送 `store: true` 以支持断线恢复与 ID 查询 |
-| **诊断与高级** | `retainRawResponses` | `false` | `boolean` | 显式开启后，在本地 `vertex_argon_responses` 存储域保留最近 50 条脱敏原始响应帧（关闭时立即清空） |
+| **诊断与高级** | `retainRawResponses` | `false` | `boolean` | 显式开启后，在本地 `vertex_argon_responses` 存储域保留最多 20 条响应记录，总量 64 MiB、单条 16 MiB；关闭仅停止新请求捕获，不清空已有记录 |
 
 ---
 
@@ -230,22 +230,24 @@ dsh plugin --profile web add dsh-vertex-argon
 
 ### 本地持久化存储域（Storage Domains）
 - `vertex_argon_diagnostics`：保存最近 **200 条**结构化请求诊断记录（自动脱敏，不含正文或密钥）。
-- `vertex_argon_responses`：仅当 `retainRawResponses: true` 时保存最近 **50 条**脱敏原始响应帧（单帧上限 256 KB，关闭开关即刻清空）。
+- `vertex_argon_responses`：仅当 `retainRawResponses: true` 时捕获上游 JSON 响应，最多保留 **20 条响应记录**、**64 MiB 总量**、**16 MiB 单条**；按最旧记录淘汰，超出单条限制的后续帧记为省略。关闭开关仅停止新请求捕获，**不会清空已有记录**。响应可能包含正文、签名及未提交或重放的帧；不保存 HTTP 头、请求体或凭据。
 - `vertex_argon_interactions`：保存后台 `Interactions` 任务的创建锁与 `last_event_id` 恢复游标。
 
 ---
 
 ## 🧪 离线零网络测试套件
 
-仓库内置 **36 个自动化测试文件**（`test/*.test.mjs`），全部在 `test/offline-guard.mjs` 零外网守卫下运行（拦截一切非回环 `fetch` / `http` / `https` / `http2` / `net` / `tls` / `dns` 调用，确保测试零网络、零产生云端费用）：
+仓库内置 **37 个自动化测试文件**（`test/*.test.mjs`）。`npm test` 会先加载 [offline-guard.mjs](<test/offline-guard.mjs>) 零外网守卫，再加载 [host-loader.mjs](<test/host-loader.mjs>) 复用本机已有依赖；仅允许测试进程自行创建的临时 IPv4 回环服务，不访问外网或产生云端费用：
 
 ```bash
-DSH_TEST_HOST_ROOT=/path/to/deepseek-harness \
-  node --experimental-transform-types \
-  --import ./test/offline-guard.mjs \
-  --import ./test/host-loader.mjs \
-  --test test/*.test.mjs
+npm test
+# 需要指定已有宿主依赖时：
+DSH_TEST_HOST_ROOT=/path/to/deepseek-harness npm test
 ```
+
+默认模块解析失败后，测试加载器依次尝试显式 `DSH_TEST_HOST_ROOT`、相对仓库根的 `../../deepseek-harness`（也兼容 `../deepseek-harness` 相邻布局）、本机 `~/.dsh/profiles/desktop/node_modules`，以及 Windows 上的 `O:/DeepSeekHarness/resources/app.asar.unpacked/dsh/node_modules`；只使用存在的路径。可显式指定源码根、已解包宿主根或其 `node_modules`，并沿真实包路径解析 pnpm 嵌套依赖。加载器不下载依赖、不修改宿主或桌面 profile。若仍缺少依赖，最后尝试本机 `O:/DeepSeekHarness/resources/app.asar`：Electron 可直接读取时复用归档；普通 Node 则只读解出实际请求的包及其包内文件，缓存到仓库 `.tmp/test-host/<归档指纹>/node_modules`。缓存校验路径、链接、文件偏移及归档提供的完整性摘要，写完后原子发布以供并行测试复用；宿主归档变化会使用新缓存。
+
+客户端回归通过 [host-internals.mjs](<test/host-internals.mjs>) 加载真实宿主控制器：有源码时直接导入，否则读取发行工厂并仅附加内部符号导出，不替换实现或行为断言。服务端渲染需要版本完全匹配的真实 `react` / `react-dom`，优先复用显式源码树及本地依赖；本机也可只读复用 `O:/AI/kt/outdoor-gear-landing/node_modules` 中的 19.2.8。缺少真实依赖时明确失败，不联网下载或改用模拟控制器。
 
 ---
 

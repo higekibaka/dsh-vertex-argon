@@ -18,9 +18,11 @@ import { Config, apply } from '../index.js'
 import { bodyBytes, fetchErrorCodes } from '../diagnostics.js'
 import { recordSchema, diagnosticWriter, createDiagnosticHub, diagnosticDomain } from '../diagnostic-store.js'
 import { shared } from '../runtime.js'
+import { createResponseHub } from '../response-store.js'
 const { PiAiAdapter } = await shared('@deepseek-ai/dsh-llm-pi-ai')
 const { resolveRetryPolicy } = await shared('@deepseek-ai/dsh-llm')
 const { googleProvider } = await shared('@earendil-works/pi-ai/providers/google')
+const { googleVertexProvider } = await shared('@earendil-works/pi-ai/providers/google-vertex')
 
 const config = { showInModelPicker: true, longDecode: true, contextWindow: 1048576, maxTokens: 65536, reasoning: 'medium' }
 const ctx = {
@@ -58,6 +60,7 @@ globalThis.fetch = async (input, init) => {
   const entry = {
     url: typeof input === 'string' ? input : input.url,
     body: JSON.parse(init?.body ?? await input.text()),
+    headers: new Headers(init?.headers ?? input.headers),
   }
   wire.push(entry)
   if (typeof customResponder === 'function') {
@@ -585,5 +588,92 @@ test('bounded diagnostics record multi-hop continuation, checkpoint drop recover
     assert.equal(domainClosed, true)
   } finally {
     customResponder = null
+  }
+})
+
+for (const model of [MODEL, GOOGLE_API_MODEL]) for (const protocol of ['generate-content', 'interactions']) {
+  for (const synchronous of [false, true]) test(model + '/' + protocol + ': ordinary credential failure is fail-closed (' + (synchronous ? 'throw' : 'reject') + ')', async () => {
+    const before = wire.length
+    let lookups = 0, ambientReads = 0
+    const failure = new Error('credential store unavailable')
+    const strictCtx = { get: key => {
+      if (key === 'credentials') return { resolve() { lookups++; if (synchronous) throw failure; return Promise.reject(failure) } }
+      if (key === 'launchEnvironment') return { get() { ambientReads++; return { value: 'must-not-use-ambient-key' } } }
+    } }
+    const adapter = createArgonAdapter(strictCtx, { ...config, googleProtocol: protocol, vertexProtocol: protocol, routes: { hasGoogle: true, hasVertex: true } })
+    const chunks = await collect(adapter.stream(req('medium', model)))
+    assert.equal(chunks.at(-1).reason.kind, 'error')
+    assert.ok(lookups > 0)
+    assert.equal(ambientReads, 0)
+    assert.equal(wire.length, before)
+  })
+}
+
+test('a successful empty credential lookup still permits the configured environment fallback', async () => {
+  const before = wire.length
+  const emptyCtx = { get: key => key === 'credentials' ? { resolve: async () => undefined } : ctx.get(key) }
+  mode = 'text'
+  const chunks = await collect(createArgonAdapter(emptyCtx, config).stream(req('medium')))
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+  assert.equal(wire.length, before + 1)
+})
+
+function nativeFixture(route) {
+  const provider = route === 'google-vertex' ? 'google-vertex' : 'google'
+  const base = route === 'google-vertex' ? googleVertexProvider() : googleProvider()
+  const model = {
+    id: MODEL, name: MODEL, provider, api: route,
+    baseUrl: route === 'google-vertex' ? 'https://{location}-aiplatform.googleapis.com' : 'https://generativelanguage.googleapis.com/v1beta',
+    reasoning: false, input: ['text', 'image'], contextWindow: 1048576, maxTokens: 131072,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  }
+  const piProvider = { ...base, id: provider, getModels: () => [model] }
+  const profiles = new Map([[provider, {
+    provider, displayName: provider, piProvider, reasoning: 'medium', streamIdleTimeoutMs: 300000,
+    maxRequestImageBytes: 20971520, requestImagePixelBudget: 4194304, requestImageMaxBytes: 1048576,
+    retryPolicy: resolveRetryPolicy(undefined, 'test'), modelErrors: new Map(), configuredMaxTokens: new Map([[MODEL, 131072]]),
+  }]])
+  const adapter = new PiAiAdapter({ profiles: () => profiles, resolveApiKey: async () => 'fixture-key', auth: { authContext: { env: async key => key === 'GOOGLE_CLOUD_API_KEY' ? 'fixture-key' : undefined, fileExists: async () => false } } })
+  return { adapter, provider, piProvider }
+}
+
+for (const route of ['google-generative-ai', 'google-vertex']) test(route + ': native patch follows live decoding, tier and raw capture settings', async () => {
+  let settings = { ...config, longDecode: false, googleServiceTier: 'priority', vertexServiceTier: 'priority', vertexPaygoOnly: true, retainRawResponses: false }
+  const records = [], responseHub = createResponseHub()
+  const unpatch = installGemini4PiAiPatch(record => records.push(record), () => settings, responseHub)
+  const { adapter, provider, piProvider } = nativeFixture(route)
+  const original = piProvider.streamSimple
+  try {
+    mode = 'text'
+    for (const stage of [0, 1, 2]) {
+      if (stage === 1) settings = { ...settings, longDecode: true, googleServiceTier: 'flex', vertexServiceTier: 'standard', vertexPaygoOnly: false, retainRawResponses: true }
+      if (stage === 2) settings = { ...settings, longDecode: false, googleServiceTier: 'standard', retainRawResponses: false }
+      const out = await collect(adapter.stream({ ...req('low', MODEL, 131072), provider }))
+      assert.equal(out.at(-1).reason.kind, 'stop')
+      const sent = wire.at(-1), diagnostic = records.at(-1)
+      const tier = route === 'google-vertex' ? settings.vertexServiceTier : settings.googleServiceTier
+      assert.equal(sent.body.service_tier, route === 'google-generative-ai' && tier !== 'standard' ? tier : undefined)
+      assert.equal(sent.headers.get('X-Vertex-AI-LLM-Shared-Request-Type'), route === 'google-vertex' && tier === 'priority' ? 'priority' : null)
+      assert.equal(sent.headers.get('X-Vertex-AI-LLM-Request-Type'), route === 'google-vertex' && settings.vertexPaygoOnly ? 'shared' : null)
+      if (route === 'google-vertex') assert.ok(sent.url.includes(settings.longDecode ? '/v1beta1/' : '/v1/'))
+      assert.equal(diagnostic.longDecodeEnabled, settings.longDecode)
+      assert.equal(diagnostic.configuredMaxTokens, settings.longDecode ? 131072 : 65536)
+      assert.equal(diagnostic.serviceTier.requested, tier)
+      assert.equal(diagnostic.responseCapture.status, settings.retainRawResponses ? 'captured' : 'disabled')
+      const page = responseHub.read({ id: diagnostic.id, sessionHash: diagnostic.sessionHash })
+      assert.equal(page.status, settings.retainRawResponses ? 'available' : 'not-retained')
+      if (settings.retainRawResponses) assert.equal(JSON.parse(page.frame.text).candidates[0].content.parts[0].text, '42')
+    }
+    if (route === 'google-vertex') {
+      settings = { ...settings, vertexServiceTier: 'flex' }
+      const before = wire.length
+      const refused = await collect(adapter.stream({ ...req('low'), provider }))
+      assert.equal(refused.at(-1).reason.kind, 'error')
+      assert.equal(wire.length, before)
+    }
+  } finally {
+    unpatch()
+    assert.equal(piProvider.streamSimple, original)
+    await responseHub.close()
   }
 })

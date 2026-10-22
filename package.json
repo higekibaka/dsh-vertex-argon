@@ -129,6 +129,6 @@
     "registry": "https://registry.npmjs.org/"
   },
   "scripts": {
-    "test": "node --experimental-transform-types --import ./test/host-loader.mjs --test test/*.test.mjs"
+    "test": "node --experimental-transform-types --import ./test/offline-guard.mjs --import ./test/host-loader.mjs --test test/*.test.mjs"
   }
 }

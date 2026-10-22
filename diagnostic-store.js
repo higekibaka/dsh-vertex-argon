@@ -40,6 +40,7 @@ const tokenUsageSchema = z.object({
 }).strict()
 
 const normalizedUsageSchema = z.object({
+  invalidCounts: z.array(z.enum(USAGE_COUNT_KEYS)).max(USAGE_COUNT_KEYS.length).optional(),
   ...Object.fromEntries(USAGE_COUNT_KEYS.map(key => [key, count.nullable()])),
   ...Object.fromEntries(USAGE_DETAIL_KEYS.map(key => [key, z.array(z.object({ modality: z.enum(USAGE_MODALITIES), tokens: count }).strict()).max(USAGE_MODALITIES.length).nullable()])),
 }).strict()

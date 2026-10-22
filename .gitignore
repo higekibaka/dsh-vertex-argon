@@ -3,6 +3,7 @@ pnpm-lock.yaml
 dev/
 releases/
 /.dsh-ops/
+/.tmp/
 *.tgz
 .DS_Store
 .env
