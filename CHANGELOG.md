@@ -2,6 +2,25 @@
 
 All notable changes to `dsh-vertex-argon` are documented in this file.
 
+## [1.6.0] - 2026-10-25
+
+### Added
+- **Antigravity Reverse Proxy 3rd Route & Direct Settings Configuration (`adapter.js`, `index.js`, `google-connection.js`, `interaction-adapter.js`, `client.js`)**:
+  - Added independent `PROXY_MODEL = 'gemini-4-argon-proxy'` (`Gemini 4 Argon (Antigravity)`) under `google-vertex-argon` so local/remote Antigravity proxy endpoints can be used alongside official `providers.google` (`GOOGLE_API_KEY`) and `google-vertex` without credential collision.
+  - Added `proxyEnabled`, `proxyBaseUrl` (default `http://127.0.0.1:8045/v1beta` with `normalizeProxyBaseUrl` root `/v1beta` completion and trailing-slash normalization), and `proxyApiKey` settings with a dedicated **Antigravity Proxy** settings card in `client.js` and strict credential isolation (`proxyApiKey` → `ANTIGRAVITY_API_KEY`).
+- **Four-Stage Stream Resilience & Auto-Heal Inspired by Antigravity-Manager (`generate-content.js`)**:
+  - **Structured Retry-Delay Parsing (`parseUpstreamRetryDelayMs`, `computeReconnectDelayMs`)**: Parsed `Retry-After` headers, Google error `details[].retryDelay` / `quotaResetDelay`, and natural-language retry hints with a `+200ms` safety buffer; failed fast when required cooldown exceeds `MAX_SERVER_RETRY_DELAY_MS` (`60s`).
+  - **Phase-Aware Stream Watchdog**: Replaced flat 20-minute per-request waits with per-hop phase timeouts (`initial-ttft` `180s`, `thinking` `180s`, `transition` `180s` for large tool-call JSON buffering after thoughts, and `streaming` `120s` sliding timeout).
+  - **Pre-Commit Initial Retry (`retry-initial`)**: Permitted bounded internal retries (`MAX_SAME_TOKEN_RETRIES = 3`) on Hop 1 before a 32K `continuationToken` is acquired whenever zero chunks have been yielded to the caller (`hopChunks === 0`).
+  - **Thinking-Only Dropout Auto-Heal (`thinking-dropout-heal`)**: Detected turns that emit `thought: true` parts and terminate with `finishReason === 'STOP'` but zero visible text or tool calls, automatically triggering up to `MAX_THINKING_DROPOUT_HEALS = 1` continuation hop preserving signed thoughts.
+
+### Changed & Removed
+- **Streamlined Debug Inspector & Removal of Cost/Modality/Overview Aggregations (`diagnostics.js`, `diagnostic-store.js`, `inspector-service.js`, `inspector-tool.js`, `client.js`)**:
+  - Removed `pricing.js`, `usage-details.js`, and `inspector-overview.js` along with the `getOverview` RPC and `argon_inspect` `overview` action.
+  - Focused `Argon Inspector` (`Debug` & `Operations`) on per-request summary, basic token watermarks, 11-column step/hop trajectory table, paginated raw JSON response evidence, Cloud Interaction ID lookup, and global background recovery lock management while preserving backwards-compatible diagnostic storage reads.
+- **Host Compatibility**:
+  - Declared compatibility with `dsh` `0.2.1-rc.2 || 0.2.1-rc.3`.
+
 ## [1.5.3] - 2026-10-24
 
 ### Fixed
