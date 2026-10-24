@@ -42,3 +42,13 @@
   - **Hop 1**：HTTP `200`，耗时 `961,781 ms`，接收 `1,291` 个流式块，输入 `52,737` tokens，输出达单跳满额 **`65,536` tokens**，返回 `finishReason: "CONTINUATION"` 并产出有效 `continuationToken`。
   - **Hop 2**：HTTP `200`，自动携带 `continuationToken` 续写，耗时 `476,132 ms`，输入 `118,274` tokens，输出 **`33,449` tokens**，返回 `finishReason: "STOP"`。
   - **单回合总输出**：**`98,985` tokens**（总耗时 `1,437,917 ms` ≈ 23 分 58 秒，`reconnectCount: 0`），完整输出 `[DAY 001 | 2186-01-01]` 至 `[DAY 365 | 2186-12-31]` 全年 365 天舰长日志及状态台账。
+
+## 4. npm 发布去重规则
+
+- `.github/workflows/publish.yml` 仅由 `v*` 标签推送触发，标签必须与 `package.json` 的版本一致；main 推送、Release 发布及手动 dispatch 不再触发上传。
+- 所有版本共用一个 concurrency 锁，`cancel-in-progress: false`；保留 OIDC Trusted Publishing、provenance 和现有最小权限，不新增 token。
+- `.github/scripts/publish.mjs` 直接查询官方注册表。只有明确的 HTTP 404 才允许一次上传，网络、权限、服务端错误或异常响应均阻断上传；已公开版本须与当前提交的 `gitHead` 一致才跳过。
+- 上传成功后继续持锁查询公开状态，最多 21 次、间隔 15 秒、每次请求超时 10 秒。暂存 E409 只进入同一只读查询流程，不重传，也不直接当作成功。
+- 查询超时或来源不一致会明确失败；其他上传错误也不自动重试。先核查注册表、压缩包及来源证明，再决定是否需要人工处理；不要通过重传或删除版本来消除错误。已发布的 1.5.2、1.5.3 保持不变。
+- 离线回归：`node --import ./test/offline-guard.mjs --test test/publish-workflow.test.mjs`。测试注入模拟注册表、上传与等待操作，不执行真实 npm 上传，也不访问外网；同时纳入现有 `npm test`。
+- 此修复不改写旧标签中的历史工作流；不要重跑旧发布任务。只有包含修复的新提交及其后续版本标签使用新逻辑。
