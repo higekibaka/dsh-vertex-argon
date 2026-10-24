@@ -27,12 +27,12 @@ test('sidebar type and session/global permission hooks match authoritative endpo
     assert.equal(f.types[0].id, 'dsh-vertex-argon/inspector')
     assert.equal(f.slots.get('sidebar.right.pane.tab').options.key, f.types[0].id)
     await f.draw()
-    assert.deepEqual([...new Set(f.permissions)].sort(), ['getRequest', 'listRequests', 'getOverview', 'readResponse'].map(x => 'vertexArgonDiagnostics/' + x).sort())
+    assert.deepEqual([...new Set(f.permissions)].sort(), ['getRequest', 'listRequests', 'readResponse'].map(x => 'vertexArgonDiagnostics/' + x).sort())
     assert.deepEqual([...new Set(f.globalPermissions)].sort(), ['queryInteraction', 'readQueryResponse', 'listRecovery', 'releaseUnknown'].map(x => 'vertexArgonDiagnostics/' + x).sort())
   } finally { await f.close() }
 })
 
-test('six strict codecs match Host descriptors, global schemas reject session authority, signal is out of JSON', async () => {
+test('five strict codecs match Host descriptors, global schemas reject session authority, signal is out of JSON', async () => {
   const f = fixture()
   try {
     await tick()
@@ -81,21 +81,16 @@ test('request selection preserves session/message scope and pages decoded raw fr
   } finally { await f.close() }
 })
 
-test('association, unknown cost, partial usage and provenance are honest rather than fabricated zeros', async () => {
+test('association and locator are retained evidence, never navigation authority', async () => {
   const f = fixture({ language: 'zh' })
-  f.handlers.listRequests = async () => ({ ok: true, records: [{ ...row(), association: 'unverified' }] })
-  f.handlers.getRequest = async () => ({ ...detail(), association: 'linked', locator: { messageId: 'm', settlementSeq: 10 }, cost: { ...detail().cost, knownSubtotalUsd: 0.4, rows: [{ tierBasis: 'requested', price: { version: 'fixture-price', source: 'https://example.invalid/price' } }] } })
+  f.handlers.getRequest = async () => ({ ...detail(), association: 'linked', locator: { messageId: 'm', settlementSeq: 10 } })
   try {
-    let view = await f.draw(); await button(view, f.dictionary.inspectorRefresh).props.onClick(); view = await f.draw()
-    assert.ok(view.text.includes(requestId))
+    let view = await f.draw()
     await selectRequest(view).props.onChange({ target: { value: requestId } }); view = await f.draw()
     assert.ok(view.text.includes(f.dictionary.inspectorAssociated))
-    assert.ok(view.text.includes(f.dictionary.inspectorEstimate + ': ' + f.dictionary.inspectorUnknown))
-    assert.ok(view.text.includes('0.400000000'))
-    assert.ok(view.text.includes('fixture-price'))
-    assert.ok(view.text.includes('requested'))
-    assert.ok(view.text.includes(f.dictionary.inspectorBilling))
-    assert.ok(!view.nodes.some(n => n.type === 'a'), 'locator and arbitrary provenance are evidence, not navigation authority')
+    assert.ok(view.text.includes('settlementSeq'))
+    assert.ok(view.text.includes('In: — · Cache: — · Out: — · Think: — · Total: —'))
+    assert.ok(!view.nodes.some(n => n.type === 'a'), 'locator is evidence, not navigation authority')
   } finally { await f.close() }
 })
 
@@ -103,7 +98,7 @@ test('lookup uses global route/id only and a second AbortSignal, then explicit c
   const f = fixture()
   try {
     let view = await lookupView(f)
-    assert.deepEqual(f.calls.map(x => x.method), ['getOverview'])
+    assert.deepEqual(f.calls.map(x => x.method), ['listRequests'])
     await button(view, f.dictionary.inspectorLookup).props.onClick()
     const first = f.calls.at(-1)
     assert.equal(first.method, 'queryInteraction')
@@ -139,7 +134,7 @@ test('invalid IDs, denied session/global reads and mismatched navigation never i
       await button(view, f.dictionary.inspectorLookup).props.onClick()
       assert.ok((await f.draw()).text.includes(f.dictionary.inspectorInvalidId))
     }
-    assert.deepEqual(f.calls.map(x => x.method), ['getOverview'])
+    assert.deepEqual(f.calls.map(x => x.method), ['listRequests'])
   } finally { await f.close() }
 })
 

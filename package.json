@@ -1,7 +1,7 @@
 {
   "name": "dsh-vertex-argon",
-  "version": "1.5.3",
-  "description": "Gemini API and Vertex AI Argon for DSH: long decode, explicit service tiers, response and usage inspection, and estimated costs.",
+  "version": "1.6.0",
+  "description": "Gemini API, Vertex AI and Antigravity Argon for DSH: resilient streaming, explicit service tiers and focused request diagnostics.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -38,14 +38,11 @@
     "interaction-lifecycle.js",
     "service-level.js",
     "google-signatures.js",
-    "usage-details.js",
-    "pricing.js",
     "response-store.js",
     "bounded-json.js",
     "structured-output.js",
     "interaction-query.js",
     "inspector-service.js",
-    "inspector-overview.js",
     "inspector-tool.js",
     "request-association.js",
     "interaction-adapter.js",
@@ -56,7 +53,7 @@
   ],
   "engines": {
     "node": "^22.19.0 || >=24.0.0",
-    "dsh": "0.2.1-rc.2"
+    "dsh": "0.2.1-rc.2 || 0.2.1-rc.3"
   },
   "keywords": [
     "deepseek-harness",
@@ -69,7 +66,7 @@
   ],
   "dsh": {
     "engines": {
-      "dsh": "0.2.1-rc.2"
+      "dsh": "0.2.1-rc.2 || 0.2.1-rc.3"
     },
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -89,13 +86,13 @@
     "ajv": "8.20.0"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-llm-pi-ai": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-launch-environment": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.2 || 0.2.1-rc.3",
+    "@deepseek-ai/dsh-llm-pi-ai": "0.2.1-rc.2 || 0.2.1-rc.3",
+    "@deepseek-ai/dsh-launch-environment": "0.2.1-rc.2 || 0.2.1-rc.3",
     "@deepseek-ai/schemastery": "^3.18.4",
     "@earendil-works/pi-ai": "1.1.0",
     "@google/genai": "2.21.0",
-    "@deepseek-ai/dsh-typert-protocol": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-typert-protocol": "0.2.1-rc.2 || 0.2.1-rc.3",
     "zod": "^4.0.0"
   },
   "peerDependenciesMeta": {

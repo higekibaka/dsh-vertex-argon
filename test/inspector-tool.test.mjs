@@ -4,14 +4,14 @@ import {createInspectorTool} from '../inspector-tool.js'
 const exec=()=>({agent:{id:'session-a'},signal:new AbortController().signal})
 function fixture(){
  const calls=[]
- const service=Object.fromEntries(['listRequests','getOverview','getRequest','readResponse','queryInteraction','readQueryResponse'].map(method=>[method,async(...args)=>{calls.push({method,args});return {ok:true}}]))
+ const service=Object.fromEntries(['listRequests','getRequest','readResponse','queryInteraction','readQueryResponse'].map(method=>[method,async(...args)=>{calls.push({method,args});return {ok:true}}]))
  return {calls,service,tool:createInspectorTool(service)}
 }
 test('deferred tool is read-only and binds diagnostic queries to executing session',async()=>{
  const {tool,calls}=fixture();assert.equal(tool.deferLoading,true);assert.equal(tool.isConcurrencySafe({}),true)
  await tool.execute({action:'list',messageId:'answer-a'},exec())
  assert.deepEqual(calls,[{method:'listRequests',args:[{sessionId:'session-a',messageId:'answer-a',limit:10}]}])
- assert.equal(tool.name,'argon_inspect');assert.match(tool.description,/estimates.*invoices/)
+ assert.equal(tool.name,'argon_inspect');assert.match(tool.description,/token watermarks/);assert.doesNotMatch(tool.description,/cost|invoice|estimate/)
  assert.equal(Object.hasOwn(tool.parameters.properties,'sessionId'),false)
 })
 test('invalid actions, extra fields, missing identifiers and oversized pages never dispatch',async()=>{
@@ -27,16 +27,16 @@ test('missing agent and pre-aborted calls cannot dispatch',async()=>{
  const result=await tool.execute({action:'query',route:'google-generative-ai',id:'cloud-id'},e)
  assert.equal(result.code,'ARGON_INSPECTOR_CANCELLED');assert.doesNotMatch(JSON.stringify(result),/private/);assert.equal(calls.length,0)
 })
-test('detail independently pages hops, usage and price rows without changing totals or source',async()=>{
- const {service,tool,calls}=fixture(),rows=Array.from({length:12},(_,index)=>({index}))
- const original={ok:true,status:'available',record:{hops:rows,usageDetails:{aggregate:{totalTokens:120},rows}},cost:{estimatedUsd:2,billingVerified:false,rows}}
+test('detail pages hops without changing token watermarks or source',async()=>{
+ const {service,tool,calls}=fixture(),rows=Array.from({length:12},(_,hopIndex)=>({hopIndex}))
+ const original={ok:true,status:'available',record:{hops:rows,tokenUsage:{totalTokens:120}}}
  service.getRequest=async request=>{calls.push(request);return original}
- const result=await tool.execute({action:'detail',requestId:'00000000-0000-4000-8000-000000000001',offset:4,limit:3},exec())
- assert.deepEqual(result.record.hops,rows.slice(4,7));assert.deepEqual(result.record.usageDetails.rows,rows.slice(4,7));assert.deepEqual(result.cost.rows,rows.slice(4,7))
- assert.equal(result.record.usageDetails.aggregate.totalTokens,120);assert.equal(result.cost.estimatedUsd,2)
- assert.deepEqual(result.rowPage,{offset:4,limit:3,totals:{hops:12,usage:12,cost:12},nextOffset:7})
- assert.equal(original.record.hops.length,12);assert.equal(original.cost.rows.length,12)
- const final=await tool.execute({action:'detail',requestId:'00000000-0000-4000-8000-000000000001',offset:11},exec())
+ const requestId='00000000-0000-4000-8000-000000000001'
+ const result=await tool.execute({action:'detail',requestId,offset:4,limit:3},exec())
+ assert.deepEqual(result.record.hops,rows.slice(4,7));assert.equal(result.record.tokenUsage.totalTokens,120)
+ assert.deepEqual(result.rowPage,{offset:4,limit:3,totals:{hops:12},nextOffset:7})
+ assert.equal(original.record.hops.length,12)
+ const final=await tool.execute({action:'detail',requestId,offset:11},exec())
  assert.equal(final.rowPage.nextOffset,null);assert.equal(final.record.hops.length,1)
 })
 test('raw response fragments keep explicit frame and bounded character paging',async()=>{
@@ -65,20 +65,9 @@ test('renderer is inert JSON text and forwards missing/expired states without in
  assert.deepEqual(tool.output.render({},value),[{type:'text',text:JSON.stringify(value)}])
 })
 
-test('overview shares the bounded service but returns only aggregate data in the executing session',async()=>{
- const {tool,calls,service}=fixture()
- const overview={requestCount:3,tokens:{totalTokens:{knownSubtotal:200,complete:false}},cost:{estimatedUsd:null,knownSubtotalUsd:0.4,billingVerified:false}}
- service.getOverview=async request=>{calls.push(request);return {ok:true,records:[{id:'metadata-not-needed'}],overview}}
- assert.deepEqual(await tool.execute({action:'overview',messageId:'answer-a'},exec()),{ok:true,overview})
- assert.deepEqual(calls,[{sessionId:'session-a',messageId:'answer-a',limit:100}])
- for(const args of [{action:'overview',sessionId:'other'},{action:'overview',limit:101},{action:'overview',requestId:'00000000-0000-4000-8000-000000000001'},{action:'overview',offset:1}])assert.equal((await tool.execute(args,exec())).ok,false)
- assert.equal(calls.length,1)
-})
-test('overview rejects absent session and discards late cancellation without leaking results',async()=>{
- const {tool,calls,service}=fixture(),controller=new AbortController()
- assert.equal((await tool.execute({action:'overview'},{signal:controller.signal})).ok,false)
- assert.equal(calls.length,0)
- service.getOverview=async()=>{controller.abort();return {ok:true,overview:{secret:'late'}}}
- const result=await tool.execute({action:'overview'},{agent:{id:'session-a'},signal:controller.signal})
- assert.equal(result.code,'ARGON_INSPECTOR_CANCELLED');assert.doesNotMatch(JSON.stringify(result),/late/)
+test('retired overview action is not advertised or dispatched',async()=>{
+ const {tool,calls}=fixture()
+ assert.deepEqual(tool.parameters.properties.action.enum,['list','detail','response','query','query-response'])
+ assert.equal((await tool.execute({action:'overview'},exec())).code,'ARGON_INSPECTOR_INVALID')
+ assert.deepEqual(calls,[])
 })

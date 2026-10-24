@@ -23,6 +23,9 @@ export const PROVIDER = 'google-vertex-argon'
 export const NATIVE_PROVIDER = 'google-vertex'
 export const MODEL = 'gemini-4-argon'
 export const GOOGLE_API_MODEL = 'gemini-4-argon-google'
+export const PROXY_MODEL = 'gemini-4-argon-proxy'
+export const PROXY_API_KEY_ENV = 'ANTIGRAVITY_API_KEY'
+export const DEFAULT_PROXY_BASE_URL = 'http://127.0.0.1:8045/v1beta'
 export const LEVELS = ['low', 'medium', 'high']
 export const MAX_SINGLE_CALL_TOKENS = 65536
 export const MAX_LONG_DECODE_TOKENS = 1048576
@@ -31,6 +34,16 @@ const ENV_KEYS = ['GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_CLOUD_PROJECT', 'GCL
 const DEFAULT_THINKING_MAP = { off: null, minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: null, max: null }
 
 const readVal = v => (v && typeof v === 'object' && typeof v.get === 'function') ? v.get() : v
+
+export function normalizeProxyBaseUrl(raw) {
+  const value = typeof raw === 'string' ? raw.trim() : raw
+  if (value != null && typeof value !== 'string') throw new LlmError('Antigravity proxy base URL must be a string.', 'INVALID_CONFIG')
+  let url
+  try { url = new URL(value || DEFAULT_PROXY_BASE_URL) } catch { throw new LlmError('Antigravity proxy base URL must be a valid HTTP(S) URL.', 'INVALID_CONFIG') }
+  if (!['http:', 'https:'].includes(url.protocol)) throw new LlmError('Antigravity proxy base URL must use HTTP or HTTPS.', 'INVALID_CONFIG')
+  url.pathname = (!url.pathname || url.pathname === '/') ? '/v1beta' : url.pathname.replace(/[/]+$/, '')
+  return url.href
+}
 
 export function isGemini4Model(model) {
   return Boolean(
@@ -41,12 +54,19 @@ export function isGemini4Model(model) {
   )
 }
 
+function googleKeyEnvironment(value) {
+  const name = typeof value === 'string' ? value.trim() : ''
+  // The proxy credential namespace is reserved, including Windows case aliases.
+  return !name || name.toUpperCase() === PROXY_API_KEY_ENV ? 'GOOGLE_API_KEY' : name
+}
+
 export function detectPiAiArgonRoutes(ctx, explicitRoutes) {
   if (explicitRoutes && typeof explicitRoutes === 'object') {
     return {
       hasVertex: explicitRoutes.hasVertex !== false,
       hasGoogle: Boolean(explicitRoutes.hasGoogle),
-      googleApiKeyEnv: explicitRoutes.googleApiKeyEnv || 'GOOGLE_API_KEY',
+      hasProxy: explicitRoutes.hasProxy === true,
+      googleApiKeyEnv: googleKeyEnvironment(explicitRoutes.googleApiKeyEnv),
       googleBaseUrl: explicitRoutes.googleBaseUrl,
       vertexBaseUrl: explicitRoutes.vertexBaseUrl,
     }
@@ -64,7 +84,7 @@ export function detectPiAiArgonRoutes(ctx, explicitRoutes) {
       return {
         hasVertex: hasVertex || !hasGoogle,
         hasGoogle,
-        googleApiKeyEnv: readVal(googleCfg?.apiKeyEnv) || 'GOOGLE_API_KEY',
+        googleApiKeyEnv: googleKeyEnvironment(readVal(googleCfg?.apiKeyEnv)),
         googleBaseUrl: readVal(googleCfg?.baseURL),
         vertexBaseUrl: readVal(vertexCfg?.baseURL),
       }
@@ -325,6 +345,10 @@ export function resolveConfigValues(raw = {}) {
   const googleServiceTier = readVal(source?.googleServiceTier) ?? 'standard'
   const vertexServiceTier = readVal(source?.vertexServiceTier) ?? 'standard'
   const vertexPaygoOnly = readVal(source?.vertexPaygoOnly) ?? false
+  const proxyEnabled = readVal(source?.proxyEnabled) ?? false
+  const proxyBaseUrl = normalizeProxyBaseUrl(readVal(source?.proxyBaseUrl))
+  const proxyApiKey = readVal(source?.proxyApiKey) ?? ''
+  if (typeof proxyEnabled !== 'boolean' || typeof proxyApiKey !== 'string') throw new LlmError('Invalid Antigravity proxy configuration.', 'INVALID_CONFIG')
   const retainRawResponses = readVal(source?.retainRawResponses) ?? false
   if (typeof retainRawResponses !== 'boolean') throw new LlmError('Raw response retention consent must be an explicit boolean.', 'INVALID_CONFIG')
   if (![googleServiceTier, vertexServiceTier].every(tier => SERVICE_TIERS.includes(tier))) throw new LlmError('Invalid Argon service tier.', 'INVALID_CONFIG')
@@ -354,6 +378,9 @@ export function resolveConfigValues(raw = {}) {
     googleServiceTier,
     vertexServiceTier,
     vertexPaygoOnly,
+    proxyEnabled,
+    proxyBaseUrl,
+    proxyApiKey: proxyApiKey.trim(),
     retainRawResponses,
     interactionsBackground,
     allowInteractionStorage,
@@ -361,7 +388,7 @@ export function resolveConfigValues(raw = {}) {
   }
 }
 
-/** Serve both Vertex AI Argon and Gemini API (google) Argon under the unified plugin group. */
+/** Serve Vertex AI, Gemini API and isolated Antigravity proxy models in one plugin group. */
 export function argonProvider(nativeVertex, models, defaultLevel = 'medium', nativeGoogle = googleProvider(), longDecode = true, recordDiagnostic, serviceConfig = {}, responseHub, structuredOutput) {
   const modelMap = new Map((Array.isArray(models) ? models : [models]).map(m => [m.id, m]))
   return {
@@ -374,12 +401,16 @@ export function argonProvider(nativeVertex, models, defaultLevel = 'medium', nat
       if (!configured || requestModel.provider !== PROVIDER) {
         throw new LlmError('Vertex Argon only serves configured Gemini 4 Argon routes.', 'UNSUPPORTED_OPTION')
       }
-      const { env: rawEnv, ...restOptions } = options
-      const googleApiKey = rawEnv?.__GOOGLE_API_KEY__
+      const { env: rawEnv, apiKey: vertexApiKey, ...restOptions } = options
       const cleanEnv = rawEnv ? { ...rawEnv } : undefined
-      if (cleanEnv) delete cleanEnv.__GOOGLE_API_KEY__
-      if (requestModel.id === GOOGLE_API_MODEL || requestModel.api === 'google-generative-ai') {
-        const apiKey = googleApiKey || options.apiKey
+      if (cleanEnv) {
+        delete cleanEnv.__GOOGLE_API_KEY__
+        delete cleanEnv.__ANTIGRAVITY_API_KEY__
+      }
+      if (configured.api === 'google-generative-ai') {
+        const proxy = configured.id === PROXY_MODEL
+        const apiKey = proxy ? rawEnv?.__ANTIGRAVITY_API_KEY__ : rawEnv?.__GOOGLE_API_KEY__
+        if (!apiKey) throw new LlmError(proxy ? 'Antigravity proxy requires its dedicated API key.' : 'Gemini API credentials are not configured.', 'MISSING_CREDENTIAL')
         return gemini4StreamSimple(
           (m, c, o) => nativeGoogle.stream(m, c, o),
           requestModel,
@@ -400,7 +431,7 @@ export function argonProvider(nativeVertex, models, defaultLevel = 'medium', nat
         (m, c, o) => nativeVertex.stream(m, c, o),
         requestModel,
         context,
-        { ...restOptions, ...(cleanEnv ? { env: cleanEnv } : {}), maxTokens: options.maxTokens ?? configured.maxTokens },
+        { ...restOptions, ...(cleanEnv ? { env: cleanEnv } : {}), ...(vertexApiKey ? { apiKey: vertexApiKey } : {}), maxTokens: options.maxTokens ?? configured.maxTokens },
         defaultLevel,
         MODEL,
         longDecode,
@@ -425,7 +456,7 @@ export class ArgonAdapter extends LlmAdapter {
   imageRequestPricing(provider, model) { return this.inner.imageRequestPricing?.(provider, model) }
   imageRequestTarget(provider, model, image) {
     const cfg = this.configSnapshot?.()
-    const protocol = model === GOOGLE_API_MODEL ? cfg?.googleProtocol : cfg?.vertexProtocol
+    const protocol = (model === GOOGLE_API_MODEL || model === PROXY_MODEL) ? cfg?.googleProtocol : cfg?.vertexProtocol
     if (provider === PROVIDER && protocol === 'interactions' && this.interactionHandler) return interactionImageRequestTarget(image)
     return this.inner.imageRequestTarget(provider, model, image)
   }
@@ -436,9 +467,9 @@ export class ArgonAdapter extends LlmAdapter {
   resolveModel(provider, model, signal) { return this.inner.resolveModel(provider, model, signal) }
   async prepareCall(provider, model, signal) {
     const cfg = this.configSnapshot?.()
-    if (provider === PROVIDER && cfg) resolveServicePolicy(cfg, model === GOOGLE_API_MODEL ? 'google-generative-ai' : 'google-vertex', model === GOOGLE_API_MODEL ? cfg.googleProtocol : cfg.vertexProtocol)
+    if (provider === PROVIDER && cfg) resolveServicePolicy(cfg, (model === GOOGLE_API_MODEL || model === PROXY_MODEL) ? 'google-generative-ai' : 'google-vertex', (model === GOOGLE_API_MODEL || model === PROXY_MODEL) ? cfg.googleProtocol : cfg.vertexProtocol)
     const prepared = await this.inner.prepareCall(provider, model, signal)
-    const protocol = model === GOOGLE_API_MODEL ? cfg?.googleProtocol : cfg?.vertexProtocol
+    const protocol = (model === GOOGLE_API_MODEL || model === PROXY_MODEL) ? cfg?.googleProtocol : cfg?.vertexProtocol
     if (provider === PROVIDER && protocol === 'interactions' && this.interactionHandler) {
       return { model: prepared.model, stream: options => this.interactionHandler(options, cfg) }
     }
@@ -493,10 +524,19 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
       ld: cfg.longDecode,
       cw: cfg.contextWindow,
       mt: cfg.maxTokens,
+      visible: cfg.showInModelPicker,
+      gp: cfg.googleProtocol,
+      vp: cfg.vertexProtocol,
+      background: cfg.interactionsBackground,
+      storage: cfg.allowInteractionStorage,
       gt: cfg.googleServiceTier,
       vt: cfg.vertexServiceTier,
       paygo: cfg.vertexPaygoOnly,
       raw: cfg.retainRawResponses,
+      pe: cfg.proxyEnabled,
+      pb: cfg.proxyBaseUrl,
+      pk: cfg.proxyApiKey,
+      p: detected.hasProxy,
       v: detected.hasVertex,
       g: detected.hasGoogle,
       ge: detected.googleApiKeyEnv,
@@ -518,12 +558,14 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
             (await input.ctx.env(detected.googleApiKeyEnv || 'GOOGLE_API_KEY')) ??
             (await input.ctx.env('GOOGLE_API_KEY')) ??
             (await input.ctx.env('GEMINI_API_KEY'))
+          const proxyKey = cfg.proxyApiKey || await input.ctx.env(PROXY_API_KEY_ENV)
           if (googleKey) env.__GOOGLE_API_KEY__ = googleKey
+          if (proxyKey) env.__ANTIGRAVITY_API_KEY__ = proxyKey
           if (vertexRes) {
             return { ...vertexRes, env: { ...env, ...vertexRes.env } }
           }
-          if (googleKey) {
-            return { auth: {}, env, source: detected.googleApiKeyEnv || 'GOOGLE_API_KEY' }
+          if (googleKey || proxyKey) {
+            return { auth: {}, env, source: googleKey ? (detected.googleApiKeyEnv || 'GOOGLE_API_KEY') : PROXY_API_KEY_ENV }
           }
           return undefined
         },
@@ -552,6 +594,21 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
         provider: PROVIDER,
         api: 'google-generative-ai',
         baseUrl: detected.googleBaseUrl || 'https://generativelanguage.googleapis.com/v1beta',
+        reasoning: true,
+        input: ['text', 'image'],
+        contextWindow: cfg.contextWindow,
+        maxTokens: cfg.maxTokens,
+        thinkingLevelMap: { ...DEFAULT_THINKING_MAP },
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      })
+    }
+    if (cfg.proxyEnabled || detected.hasProxy) {
+      models.push({
+        id: PROXY_MODEL,
+        name: 'Gemini 4 Argon (Antigravity)',
+        provider: PROVIDER,
+        api: 'google-generative-ai',
+        baseUrl: cfg.proxyBaseUrl,
         reasoning: true,
         input: ['text', 'image'],
         contextWindow: cfg.contextWindow,

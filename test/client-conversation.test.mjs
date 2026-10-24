@@ -32,7 +32,7 @@ test('matching Host renders only selected native view; registration and other vi
     }
     f.conversation(viewId); const view = await f.settle()
     assert.equal(f.viewSelections.at(-1).only, viewId)
-    assert.deepEqual(f.calls.map(call => call.method), ['getOverview'])
+    assert.deepEqual(f.calls.map(call => call.method), ['listRequests'])
     assert.deepEqual(plain(f.calls[0].args[0]), { sessionId: 'session-A', limit: 100 })
     assert.ok(view.text.includes(f.dictionary.inspectorSessionScope)); assert.ok(button(view, f.dictionary.inspectorDiagnosis))
     assert.equal(button(view, f.dictionary.inspectorAllRequests), undefined)
@@ -70,7 +70,7 @@ test('conversation StrictMode effect replay creates fresh live ownership and one
     f.conversation(viewId); const view = await f.settle()
     assert.ok(f.controllers.length >= 2); assert.equal(f.controllers[0].signal.aborted, true)
     assert.equal(f.controllers[1].signal.aborted, false, 'second setup cannot reuse first aborted lifetime')
-    assert.equal(f.calls.filter(call => call.method === 'getOverview').length, 1)
+    assert.equal(f.calls.filter(call => call.method === 'listRequests').length, 1)
     assert.ok(view.text.includes(f.dictionary.inspectorSessionScope))
     f.conversation('chat'); assert.equal(f.controllers[1].signal.aborted, true, 'active view owner is cancelled; completed read controllers need no cancellation')
   } finally { await f.close() }

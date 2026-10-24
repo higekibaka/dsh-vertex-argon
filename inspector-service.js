@@ -1,8 +1,6 @@
 import {randomUUID} from 'node:crypto'
 import {shared} from './runtime.js'
 import {diagnosticSessionHash} from './diagnostics.js'
-import {estimateDiagnosticCost} from './pricing.js'
-import {summarizeRequestOverview} from './inspector-overview.js'
 import {createResponseHub} from './response-store.js'
 import {parseInteractionQuery,interactionQueryErrorResult} from './interaction-query.js'
 import {matchesSettlement} from './request-association.js'
@@ -12,13 +10,12 @@ const page={offset:z.number().int().nonnegative().default(0),length:z.number().i
 const listScope=z.object({sessionId,messageId:z.string().min(1).max(256).optional(),limit:z.number().int().min(1).max(100).default(20)}).strict()
 const schemas={
  listRequests:listScope,
- getOverview:listScope,
  getRequest:z.object({sessionId,requestId}).strict(),
  readResponse:z.object({sessionId,requestId,index:z.number().int().nonnegative().default(0),...page}).strict(),
  queryInteraction:{parse:parseInteractionQuery},
  readQueryResponse:z.object({queryId:requestId,...page}).strict(),
 }
-export const INSPECTOR_SESSION_METHODS=['listRequests','getOverview','getRequest','readResponse']
+export const INSPECTOR_SESSION_METHODS=['listRequests','getRequest','readResponse']
 export function inspectorInvocations() {
  return Object.keys(schemas).map(method=>{
   const codec=direction=>{
@@ -51,16 +48,15 @@ export function createInspectorOperations(hub,{responseHub,query,readEvent}={}) 
   }catch{return {association:'unverified',locator:{...locator}}}
  }
  const summary=(row,link)=>({id:row.id,startedAt:row.startedAt,route:row.route,model:row.model,protocol:row.protocol??null,outcome:row.outcome,serviceTier:row.serviceTier??null,responseCapture:row.responseCapture??null,...link})
- // Clone before the first history read: records and totals must describe the
- // same observation even when new diagnostics arrive during linked validation.
+ // Snapshot before historical validation so concurrent arrivals cannot change this list.
  const selectSnapshot=async({sessionId,messageId,limit})=>{
   const candidates=hub.listRecent(200).filter(row=>row.sessionHash===diagnosticSessionHash(sessionId)&&(!messageId||row.association?.messageId===messageId))
-  const selected=structuredClone(candidates.slice(0,limit)),rows=[],records=[]
+  const selected=structuredClone(candidates.slice(0,limit)),records=[]
   for(const row of selected){
    const link=await association(row,sessionId,Boolean(messageId))
-   if(!messageId||link.association==='linked'){rows.push(row);records.push(summary(row,link))}
+   if(!messageId||link.association==='linked')records.push(summary(row,link))
   }
-  return {rows,records,window:{limit,limited:candidates.length>limit}}
+  return {records}
  }
  const invoke=async(method,request,operation)=>{
   try{if(closed)throw new Error('closed');return await operation(schemas[method].parse(request))}
@@ -71,15 +67,11 @@ export function createInspectorOperations(hub,{responseHub,query,readEvent}={}) 
    const {records}=await selectSnapshot(scope)
    return {ok:true,records}
   })},
-  getOverview(request){return invoke('getOverview',request,async scope=>{
-   const {rows,records,window}=await selectSnapshot(scope)
-   return {ok:true,records,overview:summarizeRequestOverview(rows,window)}
-  })},
   getRequest(request){return invoke('getRequest',request,async({sessionId,requestId})=>{
    const row=owned(sessionId,requestId)
    if(!row)return {ok:true,status:'not-found'}
    const {association:stored,...record}=row
-   return {ok:true,status:'available',record:structuredClone(record),cost:estimateDiagnosticCost(row),...await association(row,sessionId,true)}
+   return {ok:true,status:'available',record:structuredClone(record),...await association(row,sessionId,true)}
   })},
   readResponse(request){return invoke('readResponse',request,({sessionId,requestId,...page})=>({ok:true,page:owned(sessionId,requestId)&&responseHub?responseHub.read({id:requestId,sessionHash:diagnosticSessionHash(sessionId),...page}):{status:'not-retained'}}))},
   async queryInteraction(request,signal){

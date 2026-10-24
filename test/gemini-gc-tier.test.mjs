@@ -2,7 +2,6 @@ import assert from 'node:assert/strict'
 import {test} from 'node:test'
 import {createArgonAdapter,ensureGemini4ApiClientPatch,PROVIDER,GOOGLE_API_MODEL} from '../adapter.js'
 import {createArgonDiagnosticTracker} from '../diagnostics.js'
-import {estimateDiagnosticCost} from '../pricing.js'
 import {continueArgonRequestStream,LONG_DECODE_SYMBOL} from '../generate-content.js'
 import {prepareStructuredOutput} from '../structured-output.js'
 import {shared} from '../runtime.js'
@@ -24,10 +23,9 @@ for(const tier of ['flex','priority'])for(const enabled of [true,false])test('re
   assert.equal(diagnostic.serviceTier.requested,tier)
   assert.equal(diagnostic.serviceTier.observed,enabled?'mixed':'standard')
   assert.equal(diagnostic.serviceTier.source,'response-header')
-  assert.deepEqual(diagnostic.usageDetails.rows.map(r=>r.observedServiceTier),enabled?['priority','standard']:['standard'])
-  const cost=estimateDiagnosticCost(diagnostic)
-  assert.equal(cost.billingVerified,false);assert.deepEqual(cost.rows.map(r=>r.tierBasis),enabled?['observed','observed']:['observed'])
-  assert.deepEqual(cost.rows.map(r=>r.tier),enabled?['priority','standard']:['standard'])
+  assert.equal(diagnostic.hopCount,enabled?2:1)
+  assert.equal(diagnostic.usageDetails,undefined)
+  assert.deepEqual(diagnostic.hops.map(h=>h.totalTokens),enabled?[110,110]:[110])
  }finally{globalThis.fetch=old}
 })
 for(const status of [429,503])test('Flex '+status+' retries preserve request policy and never escalate',async()=>{
@@ -40,7 +38,7 @@ for(const status of [429,503])test('Flex '+status+' retries preserve request pol
  assert.equal(requests.length,4);for(const req of requests)assert.deepEqual(req,requests[0])
  assert.equal(requests[0].service_tier,'flex');tracker.finishStream({outcome:'error'})
  assert.equal(diagnostic.serviceTier.observed,null)
- assert.equal(estimateDiagnosticCost(diagnostic).estimatedUsd,null)
+ assert.equal(diagnostic.tokenUsage.billedTotalTokens,null)
 })
 test('JSON response format composes with Flex while native SDK and Standard stay unchanged',async()=>{
  const old=globalThis.fetch,wire=[]
@@ -71,16 +69,17 @@ test('checkpoint retry retains tier and latest token without replaying uncommitt
  for await(const c of stream)chunks.push(await c.json())
  assert.equal(requests.length,2);assert.deepEqual(requests[1],{...requests[0],continuationToken:'cp'});assert.equal(requests[0].service_tier,'priority')
  tracker.finishStream({outcome:'done'})
- assert.deepEqual(diagnostic.usageDetails.rows.map(r=>[r.observedServiceTier,r.complete]),[['priority',false],['standard',true]])
- assert.equal(estimateDiagnosticCost(diagnostic).estimatedUsd,null)
+ assert.equal(diagnostic.serviceTier.observed,'mixed')
+ assert.deepEqual(diagnostic.hops.map(h=>h.outcome),['api-error','done'])
+ assert.equal(diagnostic.tokenUsage.billedTotalTokens,220)
 })
 for(const header of [undefined,'unknown','PRIORITY'])test('GC response tier header '+header,async()=>{
  let diagnostic;const old=globalThis.fetch
  globalThis.fetch=async()=>sse(row('STOP'),header)
  try{for await(const chunk of createArgonAdapter(ctx,{googleProtocol:'generate-content',googleServiceTier:'priority',routes:{hasGoogle:true}},undefined,undefined,d=>diagnostic=d).stream(input)){}
  assert.equal(diagnostic.serviceTier.observed,header==='PRIORITY'?'priority':null)
- const cost=estimateDiagnosticCost(diagnostic);assert.equal(cost.billingVerified,false)
- assert.equal(cost.rows[0].tierBasis,header==='PRIORITY'?'observed':'requested')
+ assert.equal(diagnostic.serviceTier.requested,'priority')
+ assert.equal(diagnostic.usageDetails,undefined)
  }finally{globalThis.fetch=old}
 })
 for(const tier of ['standard','flex','priority'])test('SDK extraBody cannot override frozen '+tier+' tier',async()=>{
@@ -98,18 +97,16 @@ for(const tier of ['standard','flex','priority'])test('SDK extraBody cannot over
  }finally{globalThis.fetch=old}
 })
 
-test('GC wire omissions price normally while explicit invalid counts survive streaming normalization',async()=>{
- for(const [field,bad]of [[null,undefined],['toolUsePromptTokenCount',-1],['cachedContentTokenCount','bad'],['thoughtsTokenCount',null],['thoughtsTokenCount',-1],['candidatesTokenCount',-1],['promptTokenCount',-1]]){
+test('GC invalid per-hop counters stay unknown and never retain arbitrary upstream values',async()=>{
+ for(const [field,key,bad]of [['cachedContentTokenCount','cachedTokens','bad'],['thoughtsTokenCount','thoughtsTokens',null],['candidatesTokenCount','outputTokens',-1],['promptTokenCount','promptTokens',-1]]){
   let diagnostic
-  const tracker=createArgonDiagnosticTracker({route:'google-generative-ai',model:'gemini-4-argon',protocol:'generate-content',requestedServiceTier:'standard'},r=>diagnostic=r)
-  const metadata={promptTokenCount:100,candidatesTokenCount:10,totalTokenCount:field==='candidatesTokenCount'?100:110,...(field?{[field]:bad}:{})}
+  const tracker=createArgonDiagnosticTracker({route:'google-generative-ai'},r=>diagnostic=r)
+  const metadata={promptTokenCount:100,candidatesTokenCount:10,totalTokenCount:110,[field]:bad}
   const original=async()=> (async function*(){yield {json:async()=>({...row('STOP'),usageMetadata:metadata})}})()
-  const stream=await continueArgonRequestStream({isVertexAI:()=>false},original,{body:JSON.stringify({contents:[],generationConfig:{maxOutputTokens:65536}})},{enabled:false,tracker})
-  for await(const _ of stream){}
+  for await(const _ of await continueArgonRequestStream({isVertexAI:()=>false},original,{body:JSON.stringify({contents:[]})},{enabled:false,tracker})){}
   tracker.finishStream({outcome:'done'})
-  diagnostic.startedAt='2026-10-18T00:00:00.000Z'
-  const cost=estimateDiagnosticCost(diagnostic)
-  assert.equal(cost.estimatedUsd,field?null:0.0003)
-  if(field)assert.ok(diagnostic.usageDetails.rows[0].usage.invalidCounts.length>0)
+  assert.equal(diagnostic.hops[0][key],null)
+  assert.equal(diagnostic.usageDetails,undefined)
+  assert.doesNotMatch(JSON.stringify(diagnostic),/"bad"/)
  }
 })

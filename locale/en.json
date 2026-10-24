@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Vertex Argon",
-    "description": "Gemini API and Vertex AI long decode, explicit protocol and service-tier settings, and response/usage/cost-estimate inspection."
+    "description": "Gemini API, Vertex AI and an independent Antigravity model, with resilient long decode, explicit protocol and service-tier settings, request diagnostics and raw response inspection."
   }
 }

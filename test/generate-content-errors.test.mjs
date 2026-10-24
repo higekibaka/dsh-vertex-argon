@@ -61,6 +61,36 @@ for (const model of [MODEL, GOOGLE_API_MODEL]) {
   })
 }
 
+for (const model of [MODEL, GOOGLE_API_MODEL]) {
+  for (const useToken of [false, true]) test(model + ': real SDK does not terminate on the thought-only STOP before auto-heal (token=' + useToken + ')', async () => {
+    const before = wire.length
+    let diagnostic
+    const signedThought = { text: 'THOUGHT_FIXTURE', thought: true, thoughtSignature: 'SIGNED_THOUGHT_FIXTURE' }
+    responder = () => sse(wire.length - before === 1 ? [{
+      candidates: [{ content: { role: 'model', parts: [signedThought] }, finishReason: 'STOP', ...(useToken ? { continuationToken: 'heal-checkpoint' } : {}) }],
+      usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 0, thoughtsTokenCount: 3, totalTokenCount: 13 },
+    }] : [{
+      candidates: [{ content: { role: 'model', parts: [{ text: 'HEALED_VISIBLE_ANSWER' }] }, finishReason: 'STOP' }],
+      usageMetadata: { promptTokenCount: 13, candidatesTokenCount: 2, thoughtsTokenCount: 0, totalTokenCount: 15 },
+    }])
+    const chunks = await collect(createArgonAdapter(ctx, config(), undefined, undefined, record => diagnostic = record).stream(request(model)))
+    assert.equal(chunks.at(-1).reason.kind, 'stop')
+    assert.equal(wire.length - before, 2)
+    assert.ok(JSON.stringify(chunks).includes('HEALED_VISIBLE_ANSWER'))
+    const second = wire.at(-1).body
+    if (useToken) assert.equal(second.continuationToken, 'heal-checkpoint')
+    else {
+      assert.deepEqual(second.contents.at(-2), { role: 'model', parts: [signedThought] })
+      assert.equal(second.contents.at(-1).parts[0].text, 'Continue and provide the final response or tool call.')
+    }
+    assert.equal(diagnostic.hops[1].trigger, 'thinking-dropout-heal')
+    assert.equal(diagnostic.tokenUsage.reportedInputTokens, 10)
+    assert.equal(diagnostic.tokenUsage.billedPromptTokens, 23)
+    assert.equal(diagnostic.tokenUsage.billedThoughtsTokens, 3)
+    assert.equal(recordSchema.parse(diagnostic).hops.length, 2)
+  })
+}
+
 for (const traffic of ['ON_DEMAND', 'ON_DEMAND_PRIORITY', undefined]) {
   for (const paygoOnly of [false, true]) test('Priority headers and response evidence remain distinct: ' + traffic + ', paygoOnly=' + paygoOnly, async () => {
     let diagnostic

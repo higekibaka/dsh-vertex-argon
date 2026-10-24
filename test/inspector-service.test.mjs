@@ -21,8 +21,8 @@ test('session list is bounded metadata only, never another session or raw respon
 test('request and raw page lookups re-check actual ownership instead of trusting sessionId',async()=>{
  const f=setup();try{const a=f.add('one');const request={sessionId:'two',requestId:a.id};assert.deepEqual(await f.service.getRequest(request),{ok:true,status:'not-found'});assert.deepEqual(await f.service.readResponse(request),{ok:true,page:{status:'not-retained'}});const own={...request,sessionId:'one'};assert.equal((await f.service.getRequest(own)).record.id,a.id);const raw=await f.service.readResponse({...own,length:5});assert.equal(raw.page.frame.text.length,5);assert.equal(raw.page.frame.complete,false)}finally{await f.close()}
 })
-test('detail exposes unknown costs as unknown rather than zero',async()=>{
- const f=setup();try{const a=f.add('one'),r=await f.service.getRequest({sessionId:'one',requestId:a.id});assert.equal(r.cost.estimatedUsd,null);assert.equal(r.cost.billingVerified,false)}finally{await f.close()}
+test('detail exposes core diagnostics without pricing or modality ledgers',async()=>{
+ const f=setup();try{const a=f.add('one'),r=await f.service.getRequest({sessionId:'one',requestId:a.id});assert.equal(r.cost,undefined);assert.equal(r.usageDetails,undefined);assert.equal(r.record.usageDetails,undefined);assert.equal(r.record.regionClass,undefined);assert.ok(r.record.tokenUsage);assert.equal(f.service.getOverview,undefined)}finally{await f.close()}
 })
 test('query returns a locator only; separately paged response is inert and memory-only',async()=>{
  const f=setup();try{const result=await f.service.queryInteraction({route:'google-generative-ai',id:'fixture-id'});assert.equal(result.ok,true);assert.equal(result.readOnly,true);assert.equal(result.remoteStatus,'requires_action');assert.ok(!JSON.stringify(result).includes('do_not_execute'));const page=(await f.service.readQueryResponse({queryId:result.queryId})).page;assert.equal(page.persistence,'memory-only');assert.ok(page.frame.text.includes('do_not_execute'));assert.equal(f.hub.listRecent().length,0)}finally{await f.close()}
@@ -39,15 +39,15 @@ test('query errors do not serialize provider text, credential material or arbitr
 })
 test('remote markers expose exact session ownership and no session-only route into arbitrary-ID reads',async()=>{
  const f=setup();try{const markers=remoteMethods(f.service)
- for(const method of ['listRequests','getOverview','getRequest','readResponse'])assert.equal(markers.find(m=>m.method===method).resources.session({sessionId:'one'}),'one')
+ for(const method of ['listRequests','getRequest','readResponse'])assert.equal(markers.find(m=>m.method===method).resources.session({sessionId:'one'}),'one')
  for(const method of ['queryInteraction','readQueryResponse'])assert.equal(markers.find(m=>m.method===method).resources,undefined)
  }finally{await f.close()}
 })
 test('new descriptors declare cancellation only for querying and keep query access global',()=>{
- const ds=inspectorInvocations();assert.equal(ds.length,6)
+ const ds=inspectorInvocations();assert.equal(ds.length,5)
  const q=ds.find(d=>d.method==='queryInteraction');assert.deepEqual(q.cancellation,{parameter:'signal'});assert.equal(q.parameters.length,1)
  assert.throws(()=>q.parameters[0].codec.schema.parse({route:'google-generative-ai',id:'fixture-id',sessionId:'one'}))
- for(const method of ['listRequests','getOverview','getRequest','readResponse'])assert.throws(()=>ds.find(d=>d.method===method).parameters[0].codec.schema.parse({}))
+ for(const method of ['listRequests','getRequest','readResponse'])assert.throws(()=>ds.find(d=>d.method===method).parameters[0].codec.schema.parse({}))
 })
 
 test('stored locators require exact historical validation for message filtering and detail',async()=>{

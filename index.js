@@ -17,6 +17,7 @@ import {
   LEVELS,
   MAX_SINGLE_CALL_TOKENS,
   MAX_LONG_DECODE_TOKENS,
+  DEFAULT_PROXY_BASE_URL,
 } from './adapter.js'
 import {
   diagnosticDomain,
@@ -38,6 +39,9 @@ export const Config = z.object({
   googleServiceTier: z.union(SERVICE_TIERS).default('standard').volatile(),
   vertexServiceTier: z.union(SERVICE_TIERS).default('standard').volatile(),
   vertexPaygoOnly: z.boolean().default(false).volatile(),
+  proxyEnabled: z.boolean().default(false).volatile(),
+  proxyBaseUrl: z.string().default(DEFAULT_PROXY_BASE_URL).volatile(),
+  proxyApiKey: z.string().default('').volatile(),
   retainRawResponses: z.boolean().default(false).volatile(),
   interactionsBackground: z.boolean().default(false).volatile(),
   allowInteractionStorage: z.boolean().default(false).volatile(),

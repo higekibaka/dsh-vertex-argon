@@ -1,7 +1,6 @@
 import { shared } from './runtime.js'
 import { inspectorInvocations, INSPECTOR_SESSION_METHODS, createInspectorOperations } from './inspector-service.js'
 import { transportErrorCodes, MAX_RECORDED_HOPS, diagnosticSessionHash } from './diagnostics.js'
-import { USAGE_COUNT_KEYS, USAGE_DETAIL_KEYS, USAGE_MODALITIES, MAX_USAGE_ROWS } from './usage-details.js'
 
 const { z } = await shared('zod')
 const { TypertRemoteService, Remote } = await shared('@deepseek-ai/dsh-typert-protocol')
@@ -13,7 +12,7 @@ const positiveInt = z.number().int().positive()
 
 const hopSchema = z.object({
   hopIndex: positiveInt,
-  trigger: z.enum(['initial', 'continuation', 'checkpoint-reconnect', 'retry-same-checkpoint', 'retry-original', 'interaction-create', 'interaction-resume']),
+  trigger: z.enum(['initial', 'continuation', 'checkpoint-reconnect', 'retry-same-checkpoint', 'retry-original', 'retry-initial', 'thinking-dropout-heal', 'interaction-create', 'interaction-resume']),
   usedContinuationToken: z.boolean(),
   backoffDelayMs: count,
   bodyBytes: count.nullable(),
@@ -27,6 +26,11 @@ const hopSchema = z.object({
   errorPhase: z.enum(['pre-dispatch', 'fetch', 'response-body', 'stream']).optional(),
   streamErrorStatus: z.number().int().min(400).max(599).optional(),
   requestSubmitted: z.boolean().optional(),
+  promptTokens: count.nullable().default(null),
+  cachedTokens: count.nullable().default(null),
+  outputTokens: count.nullable().default(null),
+  thoughtsTokens: count.nullable().default(null),
+  totalTokens: count.nullable().default(null),
 }).strict()
 
 const tokenUsageSchema = z.object({
@@ -34,19 +38,13 @@ const tokenUsageSchema = z.object({
   reportedCacheTokens: count.nullable(),
   outputTokens: count.nullable(),
   thoughtsTokens: count.nullable(),
+  totalTokens: count.nullable().default(null),
+  billedOutputTokens: count.nullable().default(null),
+  billedThoughtsTokens: count.nullable().default(null),
+  billedToolTokens: count.nullable().default(null),
   billedPromptTokens: count.nullable(),
   billedCachedTokens: count.nullable(),
   billedTotalTokens: count.nullable(),
-}).strict()
-
-const normalizedUsageSchema = z.object({
-  invalidCounts: z.array(z.enum(USAGE_COUNT_KEYS)).max(USAGE_COUNT_KEYS.length).optional(),
-  ...Object.fromEntries(USAGE_COUNT_KEYS.map(key => [key, count.nullable()])),
-  ...Object.fromEntries(USAGE_DETAIL_KEYS.map(key => [key, z.array(z.object({ modality: z.enum(USAGE_MODALITIES), tokens: count }).strict()).max(USAGE_MODALITIES.length).nullable()])),
-}).strict()
-const usageDetailsSchema = z.object({
-  aggregate: normalizedUsageSchema.nullable(), aggregateComplete: z.boolean(), omittedRows: count,
-  rows: z.array(z.object({ kind: z.enum(['gc-hop', 'interaction-step']), index: count.max(4095), usage: normalizedUsageSchema.nullable(), complete: z.boolean(), observedServiceTier: z.enum(['standard', 'flex', 'priority', 'provisioned']).nullable() }).strict()).max(MAX_USAGE_ROWS),
 }).strict()
 
 const associationSchema = z.object({
@@ -64,7 +62,6 @@ export const recordSchema = z.object({
   route: z.enum(['google-vertex', 'google-generative-ai']),
   model: nullableId,
   protocol: z.enum(['generate-content', 'interactions']).optional(),
-  regionClass: z.enum(['global','non-global']).nullable().optional(),
   background: z.boolean().optional(),
   remoteCancellation: z.enum(['not-requested', 'confirmed', 'unconfirmed']).optional(),
   serviceTier: z.object({ requested: z.enum(['standard', 'flex', 'priority']), observed: z.enum(['standard', 'flex', 'priority', 'provisioned', 'mixed']).nullable(), source: z.enum(['response-header', 'traffic-type']).nullable() }).strict().optional(),
@@ -79,7 +76,6 @@ export const recordSchema = z.object({
   hops: z.array(hopSchema).max(MAX_RECORDED_HOPS),
   hopsDropped: count,
   tokenUsage: tokenUsageSchema,
-  usageDetails: usageDetailsSchema.optional(),
   responseCapture: z.object({ status: z.enum(['disabled','unavailable','captured','truncated']), frames: count, omittedFrames: count, bytes: count, captureError: z.boolean() }).strict().optional(),
   outcome: z.enum(['unknown', 'done', 'max-tokens', 'tool-calls', 'error', 'aborted', 'incomplete']),
   failureCategory: z.enum([
@@ -92,12 +88,20 @@ export const recordSchema = z.object({
   durationMs: count,
 }).strict()
 
+// Read legacy records without reintroducing retired fields into new writes.
+// All other unknown fields still fail strict validation; no history is rewritten.
+export const storedRecordSchema = z.preprocess(value => {
+  if (!value || typeof value !== 'object' || ![1, 2].includes(value.schemaVersion)) return value
+  const { usageDetails: _usage, regionClass: _region, ...record } = value
+  return record
+}, recordSchema)
+
 export const diagnosticDomain = {
   name: 'vertex_argon_diagnostics',
   version: 2,
   compatibleVersions: [1],
   layout: 'per-record',
-  tables: { requests: { valueSchema: recordSchema } },
+  tables: { requests: { valueSchema: storedRecordSchema } },
 }
 
 export function diagnosticWriter(domain, warn = () => {}, limit = 200) {
@@ -149,7 +153,8 @@ export function diagnosticWriter(domain, warn = () => {}, limit = 200) {
       try {
         const cap = Math.min(Math.max(1, Number(max) || 20), limit)
         return [...table.entries()]
-          .map(([, v]) => v)
+          .map(([, value]) => storedRecordSchema.safeParse(value))
+          .filter(result => result.success).map(result => result.data)
           // Bolt ⚡: Optimized ISO 8601 date string sorting by replacing slow localeCompare with operators
           .sort((a, b) => b.startedAt < a.startedAt ? -1 : (b.startedAt > a.startedAt ? 1 : 0))
           .slice(0, cap)
@@ -317,7 +322,6 @@ export class ArgonDiagnosticsService extends TypertRemoteService {
     for (const method of ['listRecent', 'listRecovery', 'releaseUnknown', ...inspectorInvocations().map(d=>d.method)]) remoteMarker(Object.getPrototypeOf(this), method).call(this)
   }
   listRequests(request) { return this.inspector.listRequests(request) }
-  getOverview(request) { return this.inspector.getOverview(request) }
   getRequest(request) { return this.inspector.getRequest(request) }
   readResponse(request) { return this.inspector.readResponse(request) }
   queryInteraction(request, signal) { return this.inspector.queryInteraction(request, signal) }
