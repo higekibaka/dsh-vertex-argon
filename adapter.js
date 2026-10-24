@@ -200,6 +200,7 @@ export function gemini4StreamSimple(
   const mapped = requestModel?.thinkingLevelMap?.[rawLevel] ?? rawLevel
   const level = typeof mapped === 'string' ? mapped.toLowerCase() : fallback
   if (!LEVELS.includes(level)) throw new LlmError('Gemini 4 Argon requires low, medium or high.', 'UNSUPPORTED_REASONING_EFFORT')
+  const resolvedUpstreamModelId = requestModel?.id === PROXY_MODEL ? `${MODEL}-${level}` : upstreamModelId
   const { reasoning, thinking, thinkingBudgets, temperature, onPayload: prior, onProviderStreamEvent: priorEvent, ...rest } = options
   const requestedMaxTokens = options.maxTokens ?? requestModel.maxTokens
   const effectiveMaxTokens =
@@ -232,7 +233,7 @@ export function gemini4StreamSimple(
         if (!body || typeof body !== 'object' || Array.isArray(body) || !Array.isArray(body.contents) || !body.config || typeof body.config !== 'object' || Array.isArray(body.config)) {
           throw new LlmError('Gemini 4 Argon received an incompatible native payload.', 'INVALID_REQUEST')
         }
-        if (body.model !== requestModel.id && body.model !== upstreamModelId) {
+        if (body.model !== requestModel.id && body.model !== upstreamModelId && body.model !== resolvedUpstreamModelId) {
           throw new LlmError('Gemini 4 Argon received an incompatible model payload.', 'INVALID_REQUEST')
         }
         body = signatures.restorePayload(body)
@@ -244,7 +245,7 @@ export function gemini4StreamSimple(
             : {}
         return {
           ...body,
-          model: upstreamModelId,
+          model: resolvedUpstreamModelId,
           config: {
             ...cleanConfig,
             ...(cleanConfig.tools?.some(tool => tool.functionDeclarations?.length) ? {

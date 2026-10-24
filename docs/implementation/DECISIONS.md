@@ -14,6 +14,7 @@
 - `proxyBaseUrl` 默认 `http://127.0.0.1:8045/v1beta`；去除配置首尾空白，只接受 HTTP(S)，根路径补 `/v1beta`，非根路径移除末尾斜杠。
 - `proxyApiKey` 去除首尾空白后优先使用；为空时只读取 `ANTIGRAVITY_API_KEY`。绝不借用 `GOOGLE_API_KEY`、`GEMINI_API_KEY`、Vertex Key 或 ADC；代理 Key 也不反向进入 Google/Vertex。设置中的 Key 保存在插件配置，密码框只遮挡显示；可留空改用 DSH 的 `ANTIGRAVITY_API_KEY` 凭据。
 - 代理复用 `googleProtocol` / `googleServiceTier`，不增加协议自动选择；三个代理设置均为 `volatile`，模型配置缓存必须随设置和路由变化失效。私有环境传递标记在进入实际 SDK 环境前清除。
+- 当选中 `PROXY_MODEL`（`gemini-4-argon-proxy`）时，根据解析后的推理等级（`low` / `medium` / `high`）将发往反代的上游模型 ID 映射为 `gemini-4-argon-low`、`gemini-4-argon-medium`、`gemini-4-argon-high`，使 DSH 推理档位与 `Antigravity Tools` 的三档模型卡片一一对应；官方 Vertex AI 与 Gemini API 直连路由维持发送 `gemini-4-argon`。
 
 ### 凭据解析与能力校验
 

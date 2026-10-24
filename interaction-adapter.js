@@ -123,7 +123,7 @@ export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, get
         return block
       }) }))
       const { streamInteractions } = await import('./interactions.js')
-      for await (const chunk of streamInteractions({ ...options, messages, signal }, { route, upstreamModel: 'gemini-4-argon', ...controls, serviceTier: route === 'google-generative-ai' ? servicePolicy.tier : undefined, background: cfg.interactionsBackground, store: cfg.allowInteractionStorage, transport, resolveImage, structuredOutput, onEvent: observed, onTerminal: () => { complete = true }, onExit: reason => { exitReason = reason } })) {
+      for await (const chunk of streamInteractions({ ...options, messages, signal }, { route, upstreamModel: proxy ? `gemini-4-argon-${controls.reasoning}` : 'gemini-4-argon', ...controls, serviceTier: route === 'google-generative-ai' ? servicePolicy.tier : undefined, background: cfg.interactionsBackground, store: cfg.allowInteractionStorage, transport, resolveImage, structuredOutput, onEvent: observed, onTerminal: () => { complete = true }, onExit: reason => { exitReason = reason } })) {
         if (chunk.type === 'usage') {
           recordUsage(chunk.usage)
           if (firstInput !== undefined) {

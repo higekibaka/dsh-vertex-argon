@@ -88,7 +88,8 @@ for (const protocol of protocols) for (const baseUrl of ['http://127.0.0.1:8045'
   const sent = wire.at(-1)
   const base = normalizeProxyBaseUrl(baseUrl)
   assert.ok(sent.url.startsWith(base + '/'), sent.url)
-  assert.ok(sent.url.endsWith(protocol === 'interactions' ? '/interactions' : '/models/gemini-4-argon:streamGenerateContent?alt=sse'), sent.url)
+  assert.ok(sent.url.endsWith(protocol === 'interactions' ? '/interactions' : '/models/gemini-4-argon-medium:streamGenerateContent?alt=sse'), sent.url)
+  if (protocol === 'interactions') assert.equal(sent.body.model, 'gemini-4-argon-medium')
   assert.equal((sent.url.match(/v1beta/g) ?? []).length, 1)
   assertKey(sent, keys.ANTIGRAVITY_API_KEY)
   assert.equal(sent.body.service_tier, 'priority')
@@ -98,6 +99,30 @@ for (const protocol of protocols) for (const baseUrl of ['http://127.0.0.1:8045'
   assert.equal(diagnostic.hops[0].promptTokens, 30)
   assert.equal(diagnostic.hops[0].outputTokens, 3)
   assert.equal(JSON.stringify(diagnostic).includes(keys.ANTIGRAVITY_API_KEY), false)
+})
+
+for (const protocol of protocols) test(protocol + ': proxy reasoning effort maps 1-to-1 to gemini-4-argon-{low,medium,high} while direct routes keep gemini-4-argon', async () => {
+  const adapter = createArgonAdapter(context(), config(protocol))
+  for (const level of ['low', 'medium', 'high']) {
+    const chunks = await collect(adapter.stream({ ...request(PROXY_MODEL), reasoningEffort: level }))
+    assert.equal(chunks.at(-1)?.reason?.kind, 'stop')
+    const sent = wire.at(-1)
+    if (protocol === 'interactions') {
+      assert.equal(sent.body.model, `gemini-4-argon-${level}`)
+      assert.equal(sent.body.generation_config.thinking_level, level)
+    } else {
+      assert.ok(sent.url.endsWith(`/models/gemini-4-argon-${level}:streamGenerateContent?alt=sse`), sent.url)
+      assert.equal(sent.body.generationConfig.thinkingConfig.thinkingLevel, level.toUpperCase())
+    }
+    const directChunks = await collect(adapter.stream({ ...request(GOOGLE_API_MODEL), reasoningEffort: level }))
+    assert.equal(directChunks.at(-1)?.reason?.kind, 'stop')
+    const directSent = wire.at(-1)
+    if (protocol === 'interactions') {
+      assert.equal(directSent.body.model, 'gemini-4-argon')
+    } else {
+      assert.ok(directSent.url.endsWith('/models/gemini-4-argon:streamGenerateContent?alt=sse'), directSent.url)
+    }
+  }
 })
 
 for (const protocol of protocols) test(protocol + ': each route uses only its own key, and configuration wins only for proxy', async () => {

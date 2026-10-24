@@ -2,6 +2,12 @@
 
 All notable changes to `dsh-vertex-argon` are documented in this file.
 
+## [1.6.1] - 2026-10-25
+
+### Changed
+- **1-to-1 Tiered Upstream Model Mapping on Antigravity Proxy (`adapter.js`, `interaction-adapter.js`)**:
+  - Mapped `Gemini 4 Argon (Antigravity)` (`gemini-4-argon-proxy`) reasoning levels (`Low` / `Medium` / `High`) directly to the tiered upstream model IDs expected by `Antigravity Tools` (`gemini-4-argon-low`, `gemini-4-argon-medium`, `gemini-4-argon-high`) across both `GenerateContent` and `Interactions` while keeping official Vertex AI and Gemini API routes on `gemini-4-argon`.
+
 ## [1.6.0] - 2026-10-25
 
 ### Added
