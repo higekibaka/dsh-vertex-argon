@@ -9,7 +9,7 @@ function openAnswer(f, messageId = 'answer-A') {
   f.followTab('session-A', tab)
   return tab
 }
-const listCalls = f => f.calls.filter(call => call.method === 'getOverview').map(call => plain(call.args[0]))
+const listCalls = f => f.calls.filter(call => call.method === 'listRequests').map(call => plain(call.args[0]))
 const backLabel = language => language === 'zh' ? '返回此回答的请求' : 'Back to this answer’s requests'
 
 test('answer scope can round-trip through all requests in both languages and remembers only the current answer', async () => {
@@ -34,7 +34,7 @@ test('answer scope can round-trip through all requests in both languages and rem
         assert.deepEqual(listCalls(f).at(-1), { sessionId: 'session-A', messageId: answer, limit: 100 })
         assert.equal(button(view, backLabel(language)), undefined)
       }
-      assert.ok(f.calls.every(call => call.method === 'getOverview'), 'navigation only reads local lists')
+      assert.ok(f.calls.every(call => call.method === 'listRequests'), 'navigation only reads local lists')
     } finally { await f.close() }
   }
 })

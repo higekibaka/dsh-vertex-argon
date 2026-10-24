@@ -39,7 +39,7 @@ test('native Guide open has absent params and resolves only the slot session', a
     const view = await f.settle()
     assert.equal(view.nodes.some(n => n.props.role === 'alert'), false)
     assert.deepEqual(plain(f.calls[0]?.args[0]), { sessionId: 'session-A', limit: 100 })
-    assert.deepEqual(f.calls.map(x => x.method), ['getOverview'])
+    assert.deepEqual(f.calls.map(x => x.method), ['listRequests'])
   } finally { await f.close() }
 })
 
@@ -57,7 +57,7 @@ test('stable visible authorized diagnosis auto-loads local list exactly once, ne
     let view = await f.settle()
     assert.equal(button(view, f.dictionary.inspectorDiagnosis)?.props['aria-pressed'], true)
     assert.equal(button(view, f.dictionary.inspectorOperations)?.props['aria-pressed'], false)
-    assert.deepEqual(f.calls.map(x => x.method), ['getOverview'])
+    assert.deepEqual(f.calls.map(x => x.method), ['listRequests'])
     await f.settle(); await f.settle(); assert.equal(f.calls.length, 1, 'no render/effect polling')
     assert.equal(view.nodes.some(n => n.type === 'details' && n.props['data-operation']), false)
     button(view, f.dictionary.inspectorOperations).props.onClick(); view = await f.settle()
@@ -92,7 +92,7 @@ test('answer zero/one/many never guesses latest; only exact unique match loads d
       assert.equal(f.calls.filter(x => x.method === 'getRequest').length, count === 1 ? 1 : 0)
       assert.ok(!f.calls.some(x => ['readResponse', 'queryInteraction', 'listRecovery'].includes(x.method)))
       if (count === 0) assert.ok(view.text.includes(f.dictionary.inspectorMessageEmpty))
-      if (count === 1) { assert.equal(selectRequest(view).props.value, requestId); assert.ok(view.text.includes(f.dictionary.inspectorEstimate + ': ' + f.dictionary.inspectorUnknown)) }
+      if (count === 1) { assert.equal(selectRequest(view).props.value, requestId); assert.ok(view.text.includes('In: — · Cache: —')) }
       if (count === 2) assert.equal(selectRequest(view).props.value, '')
     } finally { await f.close() }
   }
@@ -126,7 +126,7 @@ test('explicit whole-session action broadens only after click, clears prior deta
     const old = selectRequest(f.draw()).props.onChange({ target: { value: requestId } }); await tick()
     const broaden = button(f.draw(), f.dictionary.inspectorAllRequests); assert.ok(broaden)
     await broaden.props.onClick(); await f.settle()
-    assert.deepEqual(plain(f.calls.filter(x => x.method === 'getOverview').at(-1).args[0]), { sessionId: 'session-A', limit: 100 })
+    assert.deepEqual(plain(f.calls.filter(x => x.method === 'listRequests').at(-1).args[0]), { sessionId: 'session-A', limit: 100 })
     pending.resolve({ ...detail(), record: { ...row(), marker: 'stale-answer' } }); await old
     const view = await f.settle(); assert.equal(selectRequest(view).props.value, ''); assert.ok(!view.text.includes('stale-answer'))
   } finally { pending.resolve(detail()); await f.close() }

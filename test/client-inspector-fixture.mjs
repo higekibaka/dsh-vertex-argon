@@ -15,7 +15,6 @@ registerHooks({
   return next(url, context)
 } })
 import { Context } from '@deepseek-ai/cordis'
-import { summarizeRequestOverview } from '../inspector-overview.js'
 
 const root = process.env.DSH_TEST_HOST_ROOT || import.meta.resolve('@deepseek-ai/dsh-client-ui-sidebar-right/package.json')
 assert.ok(root, 'Matching DSH source is required; never replace the sidebar controller with a spy')
@@ -33,7 +32,7 @@ export const requestId = '11111111-1111-4111-8111-111111111111'
 export const secondId = '22222222-2222-4222-8222-222222222222'
 export const queryId = '33333333-3333-4333-8333-333333333333'
 export const row = (id = requestId) => ({ id, startedAt: '2026-10-18T00:00:00.000Z', route: 'google-generative-ai', outcome: 'done', association: 'unassociated' })
-export const detail = (id = requestId) => ({ ok: true, status: 'available', association: 'unassociated', record: { ...row(id), serviceTier: { requested: 'priority', observed: null }, usageDetails: null }, cost: { kind: 'usage-estimate', estimatedUsd: null, knownSubtotalUsd: null, missing: ['usage-details'], rows: [], billingVerified: false } })
+export const detail = (id = requestId) => ({ ok: true, status: 'available', association: 'unassociated', record: { ...row(id), tokenUsage: { reportedInputTokens: null, reportedCacheTokens: null, outputTokens: null, thoughtsTokens: null, totalTokens: null } } })
 export const page = (index = 0, offset = 0) => ({ status: 'available', persistence: 'memory-only', metadata: { frames: 2, omittedFrames: 4, captureError: true }, frame: { index, offset, hop: 1, kind: 'gc-chunk', text: '<script>not executed</script>', nextOffset: offset === 0 ? 65536 : null, totalChars: 70000, complete: false } })
 
 export function renderer(React, { strictEffects = false } = {}) {
@@ -95,13 +94,6 @@ export function fixture({ language = 'en', access = true, globalAccess = true, s
   show('session-A')
   const handlers = {
     listRequests: async () => ({ ok: true, records: [row(), row(secondId)] }),
-    // Reuse legacy test customizations locally, not through the RPC proxy.
-    // The one getOverview RPC returns one records/overview snapshot.
-    getOverview: async request => {
-      const result = await handlers.listRequests(request)
-      if (result?.ok !== true) return result
-      return { ...result, overview: summarizeRequestOverview(result.records, { limit: request.limit ?? 100, limited: false }) }
-    },
     getRequest: async request => detail(request.requestId),
     readResponse: async request => ({ ok: true, page: page(request.index, request.offset) }),
     queryInteraction: async () => ({ ok: true, queryId, readOnly: true, retention: 'memory-only', identity: { route: 'google-generative-ai', credentialBinding: 'current-configuration' } }),

@@ -25,7 +25,7 @@ for(const [model,route]of [[GOOGLE_API_MODEL,'google-generative-ai'],[MODEL,'goo
  const adapter=createArgonAdapter(ctx,config,undefined,undefined,d=>diagnostic=d)
  const prepared=await adapter.prepareCall(PROVIDER,model)
  const out=await collect(prepared.stream(req(model)))
- assert.equal(out.at(-1).reason.kind,'stop');assert.equal(diagnostic.protocol,'interactions');assert.equal(diagnostic.regionClass,route==='google-vertex'?'global':null)
+ assert.equal(out.at(-1).reason.kind,'stop');assert.equal(diagnostic.protocol,'interactions');assert.equal('regionClass' in diagnostic,false)
  const last=wire.at(-1);assert.ok(last.url.endsWith(route==='google-vertex'?'/v1beta1/locations/global/interactions':'/v1beta/interactions'))
  assert.equal(last.body.store,false);assert.equal(last.body.background,false)
  assert.equal(out.find(c=>c.type==='usage').usage.totalTokens,31)
@@ -139,7 +139,7 @@ for (const malformed of [false, true]) test('background adapter distinguishes ' 
   assert.equal(rows.size,malformed?0:1)
  } finally {responder=undefined;await hub.close()}
 })
-test('step_usage remains per-step while cumulative usage is not summed with it',async()=>{
+test('basic usage excludes per-step modality evidence and retains observed hop tokens',async()=>{
  let diagnostic
  const events=structuredClone(interactionEvents)
  events[3].step_usage={total_input_tokens:10,total_output_tokens:2,total_thought_tokens:1,input_tokens_by_modality:[{modality:'text',tokens:10}]}
@@ -148,10 +148,15 @@ test('step_usage remains per-step while cumulative usage is not summed with it',
  responder=()=>sse(events)
  try {
   await collect(createArgonAdapter(ctx,cfg(),undefined,undefined,d=>diagnostic=d).stream(req(GOOGLE_API_MODEL)))
-  assert.equal(diagnostic.usageDetails.rows.length,1)
-  assert.equal(diagnostic.usageDetails.rows[0].usage.outputTokens,2)
-  assert.deepEqual(diagnostic.usageDetails.rows[0].usage.inputByModality,[{modality:'text',tokens:10}])
-  assert.equal(diagnostic.usageDetails.aggregate.outputTokens,6);assert.equal(diagnostic.usageDetails.aggregateComplete,true)
+  assert.equal('usageDetails' in diagnostic,false)
+  assert.equal('costEstimate' in diagnostic,false)
+  assert.equal(diagnostic.tokenUsage.billedPromptTokens,30)
+  assert.equal(diagnostic.tokenUsage.billedOutputTokens,6)
+  assert.equal(diagnostic.tokenUsage.billedThoughtsTokens,3)
+  assert.equal(diagnostic.hops[0].promptTokens,30)
+  assert.equal(diagnostic.hops[0].outputTokens,6)
+  assert.equal(diagnostic.hops[0].thoughtsTokens,3)
+  assert.equal(JSON.stringify(diagnostic).includes('inputByModality'),false)
  }finally{responder=undefined}
 })
 for(const protocol of ['generate-content','interactions'])for(const enabled of [false,true])test(protocol+': raw capture is explicit, request-frozen, and separate from diagnostic metadata ('+enabled+')',async()=>{
@@ -159,7 +164,7 @@ for(const protocol of ['generate-content','interactions'])for(const enabled of [
  const adapter=createArgonAdapter(ctx,()=>config,undefined,undefined,d=>record=d,undefined,hub)
  const prepared=await adapter.prepareCall(PROVIDER,GOOGLE_API_MODEL);config.retainRawResponses=!enabled
  const out=await collect(prepared.stream(req(GOOGLE_API_MODEL)))
- assert.equal(out.at(-1).reason.kind,'stop');recordSchema.parse(record)
+ assert.equal(out.at(-1).reason.kind,'stop',JSON.stringify(out.at(-1)));recordSchema.parse(record)
  assert.equal(record.responseCapture.status,enabled?'captured':'disabled')
  assert.ok(!JSON.stringify(record).includes('hello'));assert.ok(record.sessionHash)
  const result=hub.read({id:record.id,sessionHash:record.sessionHash})
@@ -167,8 +172,24 @@ for(const protocol of ['generate-content','interactions'])for(const enabled of [
  if(enabled){assert.equal(result.frame.kind,protocol==='generate-content'?'gc-chunk':'interaction-event');assert.ok(result.metadata.frames>0)}
  await hub.close()
 })
-test('actual Vertex SDK express request records configured global pricing region',async()=>{
+test('partial Interactions usage frames preserve prior counters within the same hop',async()=>{
+ const events=structuredClone(interactionEvents)
+ events[0].interaction.usage={total_input_tokens:30,total_cached_tokens:4}
+ events.at(-1).interaction.usage={total_output_tokens:2,total_thought_tokens:3,total_tokens:35}
+ let diagnostic
+ responder=()=>sse(events)
+ try {
+  const out=await collect(createArgonAdapter(ctx,cfg(),undefined,undefined,d=>diagnostic=d).stream(req(GOOGLE_API_MODEL)))
+  assert.equal(out.at(-1).reason.kind,'stop')
+  assert.equal(diagnostic.hops[0].promptTokens,30)
+  assert.equal(diagnostic.hops[0].cachedTokens,4)
+  assert.equal(diagnostic.hops[0].outputTokens,2)
+  assert.equal(diagnostic.hops[0].thoughtsTokens,3)
+  assert.equal(diagnostic.hops[0].totalTokens,35)
+ }finally{responder=undefined}
+})
+test('actual Vertex SDK express request retains debug metadata without pricing fields',async()=>{
  let diagnostic;const adapter=createArgonAdapter(ctx,cfg(),undefined,undefined,d=>diagnostic=d)
- await collect(adapter.stream(req(MODEL)));assert.equal(diagnostic.regionClass,'global');recordSchema.parse(diagnostic)
+ await collect(adapter.stream(req(MODEL)));assert.equal('regionClass' in diagnostic,false);assert.equal('costEstimate' in diagnostic,false);recordSchema.parse(diagnostic)
 })
 process.on('exit',()=>{globalThis.fetch=originalFetch})

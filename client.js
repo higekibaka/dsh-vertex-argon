@@ -23,28 +23,6 @@ window.__ModuleLoader__.load({
       return value
     }
 
-    function diagnosticsCodec(direction) {
-      const schema = {
-        parse: value => (direction === 'request' ? parseListRecentRequest(value) : parseListRecentResult(value)),
-      }
-      return {
-        mode: 'strict',
-        typeSymbol: 'dsh-vertex-argon/listRecent' + (direction === 'request' ? 'Request' : 'Result'),
-        schema,
-        create: () => schema,
-      }
-    }
-
-    const DIAGNOSTICS_INVOCATION = {
-      id: 'dsh-vertex-argon#vertexArgonDiagnostics/listRecent',
-      service: 'vertexArgonDiagnostics',
-      namespace: 'vertexArgonDiagnostics',
-      method: 'listRecent',
-      invocation: { kind: 'direct' },
-      parameters: [{ name: 'request', wire: 'request', source: 'json', codec: diagnosticsCodec('request') }],
-      result: diagnosticsCodec('result'),
-    }
-
     const isRecoveryTime = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(value) && Number.isFinite(Date.parse(value))
 
     function parseRecoveryResult(value) {
@@ -120,21 +98,21 @@ window.__ModuleLoader__.load({
       return true
     }
 
-    const INSPECTOR_METHODS = ['listRequests', 'getOverview', 'getRequest', 'readResponse', 'queryInteraction', 'readQueryResponse']
+    const INSPECTOR_METHODS = ['listRequests', 'getRequest', 'readResponse', 'queryInteraction', 'readQueryResponse']
     const inspectorObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
     const inspectorId = value => typeof value === 'string' && /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/i.test(value)
     function parseInspectorRequest(method, value) {
       const fields = {
-        listRequests: ['sessionId', 'messageId', 'limit'], getOverview: ['sessionId', 'messageId', 'limit'], getRequest: ['sessionId', 'requestId'],
+        listRequests: ['sessionId', 'messageId', 'limit'], getRequest: ['sessionId', 'requestId'],
         readResponse: ['sessionId', 'requestId', 'index', 'offset', 'length'],
         queryInteraction: ['route', 'id'], readQueryResponse: ['queryId', 'offset', 'length'],
       }[method]
       const invalid = () => { throw new Error('Invalid inspector request') }
       if (!inspectorObject(value) || Object.keys(value).some(key => !fields.includes(key))) invalid()
       const result = { ...value }
-      if (['listRequests', 'getOverview', 'getRequest', 'readResponse'].includes(method) &&
+      if (['listRequests', 'getRequest', 'readResponse'].includes(method) &&
         (typeof value.sessionId !== 'string' || value.sessionId.length < 1 || value.sessionId.length > 256)) invalid()
-      if (method === 'listRequests' || method === 'getOverview') {
+      if (method === 'listRequests') {
         if (value.messageId !== undefined && (typeof value.messageId !== 'string' || value.messageId.length < 1 || value.messageId.length > 256)) invalid()
         result.limit = value.limit === undefined ? 20 : value.limit
         if (!Number.isInteger(result.limit) || result.limit < 1 || result.limit > 100) invalid()
@@ -169,7 +147,7 @@ window.__ModuleLoader__.load({
 
     const DIAGNOSTICS_REMOTE = {
       package: 'dsh-vertex-argon',
-      descriptors: [DIAGNOSTICS_INVOCATION, ...RECOVERY_INVOCATIONS, ...INSPECTOR_INVOCATIONS],
+      descriptors: [...RECOVERY_INVOCATIONS, ...INSPECTOR_INVOCATIONS],
     }
 
     const dictionaries = {
@@ -197,7 +175,7 @@ window.__ModuleLoader__.load({
         budgetWarningVertex: 'Vertex AI (Interactions) 预算冲突：超过 65,536 的预算当前会被预检直接拒绝，请切回 GenerateContent 或手动将输出预算调至 ≤ 65,536。',
         budgetTitle: '3. 长解码与预算（双通道共用）',
         longDecodeLabel: '长解码能力与续传开关（Long Decode）',
-        longDecodeHint: '默认开启，同时控制 > 65,536 预算上限与 GenerateContent 客户端检查点续传（不代表每轮都会写满）。关闭时仅停用 GenerateContent 客户端续传（Interactions 事件流重连仍保留），且有效预算上限受限为 ≤ 65,536（同时受窗口预留限制），不会改动原配置值。GenerateContent 仅提交检查点已确认内容，断流回滚尾段，首批显示可能延后。',
+        longDecodeHint: '默认开启，同时控制 > 65,536 预算上限与 GenerateContent 客户端检查点续传（不代表每轮都会写满）。关闭时仅停用 GenerateContent 客户端续传（Interactions 事件流重连仍保留），且有效预算上限受限为 ≤ 65,536（同时受窗口预留限制），不会改动原配置值。GenerateContent 在首个检查点前实时显示输出；取得检查点后按检查点确认尾段，断流时仅回放未提交部分。',
         longDecodeOn: '已开启',
         longDecodeOff: '已关闭',
         maxTokensLabel: '最大输出预算（Max Output Tokens）',
@@ -249,38 +227,12 @@ window.__ModuleLoader__.load({
         recoveryCancel: '取消',
         recoveryReleasing: '正在解除本地拦截…',
         recoverySuccess: '本地拦截已解除，旧云端结果仍未知；未发送新请求。回原会话手动继续。',
-        diagPhase: '失败阶段',
-        diagNotSubmitted: '请求尚未发送',
-        diagTitle: '最近请求诊断摘要',
-        diagSubtitle: '点击展开查看最近 20 次请求的通道版本、64K 续传跳数、断流检查点自愈与双轨 Token 计量',
-        diagRefresh: '刷新诊断',
-        diagLoading: '正在读取诊断记录…',
-        diagEmpty: '暂无请求诊断记录。使用 Gemini 4 Argon 发起一次对话后即可在此查看。',
-        diagError: '读取诊断记录失败，请确认已重启 DSH 加载最新版插件后重试。',
-        diagStorageHint: '诊断落盘目录：~/.dsh/storages/vertex_argon_diagnostics/requests/（最多保留最近 200 条，严格脱敏，不保存对话正文、图片或密钥）',
-        diagStatTotal: '最近记录',
-        diagStatOk: '成功完成',
-        diagStatCont: '64K 续传跳数',
-        diagStatRecovered: '断流自愈',
-        diagStatErr: '异常/失败',
         diagOutcome_done: '完成',
         diagOutcome_tool: '工具调用',
         diagOutcome_max: '达到上限',
         diagOutcome_error: '失败',
         diagOutcome_aborted: '已取消',
         diagOutcome_incomplete: '中断',
-        diagOutcome_recovered: '断流已自愈',
-        diagTrigger_initial: '首跳',
-        diagTrigger_continuation: '64K续传',
-        diagTrigger_reconnect: '检查点重连',
-        diagTrigger_retry: '同检查点重试',
-        diagTrigger_original: '原请求重试',
-        diagTrigger_icreate: '创建交互任务',
-        diagTrigger_iresume: '恢复交互事件流',
-        diagCancelUnconfirmed: '云端终止未确认',
-        diagCancelConfirmed: '云端终止已确认',
-        diagReqCap: '本次请求上限',
-        diagUnrecorded: '未记录',
         diagHopsDroppedPrefix: '已省略 ',
         diagHopsDroppedSuffix: ' 条分段诊断（非输出丢失）',
       },
@@ -308,7 +260,7 @@ window.__ModuleLoader__.load({
         budgetWarningVertex: 'Vertex AI (Interactions) budget conflict: budgets above 65,536 are currently rejected by pre-flight check; switch Vertex AI to GenerateContent or lower maxTokens to ≤ 65,536.',
         budgetTitle: '3. Shared Long Decode & Output Budget',
         longDecodeLabel: 'Long Decode Capability & Continuation',
-        longDecodeHint: 'Enabled by default; controls both > 65,536 budget caps and GenerateContent client checkpoint continuation (does not force every turn to run long). When disabled, only GenerateContent client continuation is turned off (Interactions stream reconnect remains active), and the effective cap is bounded to ≤ 65,536 (and by window headroom) without overwriting your saved maxTokens. GenerateContent commits only checkpoint-confirmed chunks, so first output may wait for a checkpoint or completion.',
+        longDecodeHint: 'Enabled by default; controls both > 65,536 budget caps and GenerateContent client checkpoint continuation (does not force every turn to run long). When disabled, only GenerateContent client continuation is turned off (Interactions stream reconnect remains active), and the effective cap is bounded to ≤ 65,536 (and by window headroom) without overwriting your saved maxTokens. GenerateContent streams live before its first checkpoint; after a checkpoint, tails are committed at checkpoints and only uncommitted content is replayed after interruption.',
         longDecodeOn: 'Enabled',
         longDecodeOff: 'Disabled',
         maxTokensLabel: 'Max Output Budget (Max Output Tokens)',
@@ -360,38 +312,12 @@ window.__ModuleLoader__.load({
         recoveryCancel: 'Cancel',
         recoveryReleasing: 'Releasing local block…',
         recoverySuccess: 'Local block released; the old cloud result is still unknown. No new request was sent. Return to the original session to continue manually.',
-        diagPhase: 'Failure phase',
-        diagNotSubmitted: 'Request not submitted',
-        diagTitle: 'Recent Request Diagnostics Summary',
-        diagSubtitle: 'Expand to inspect the latest 20 requests: route/API version, 64K continuation hops, checkpoint drop recovery, and dual-track token accounting',
-        diagRefresh: 'Refresh',
-        diagLoading: 'Loading diagnostics…',
-        diagEmpty: 'No request diagnostics recorded yet. Send a message with Gemini 4 Argon to populate this view.',
-        diagError: 'Could not load diagnostics. Restart DSH after upgrading the plugin and try again.',
-        diagStorageHint: 'Persisted under ~/.dsh/storages/vertex_argon_diagnostics/requests/ (retains latest 200 records; strictly scrubbed—no prompts, images, or credentials).',
-        diagStatTotal: 'Records',
-        diagStatOk: 'Succeeded',
-        diagStatCont: '64K Cont. Hops',
-        diagStatRecovered: 'Drop Recoveries',
-        diagStatErr: 'Errors',
         diagOutcome_done: 'Done',
         diagOutcome_tool: 'Tool Calls',
         diagOutcome_max: 'Max Tokens',
         diagOutcome_error: 'Error',
         diagOutcome_aborted: 'Aborted',
         diagOutcome_incomplete: 'Incomplete',
-        diagOutcome_recovered: 'Recovered',
-        diagTrigger_initial: 'Initial',
-        diagTrigger_continuation: '64K Cont.',
-        diagTrigger_reconnect: 'Ckpt Reconnect',
-        diagTrigger_retry: 'Ckpt Retry',
-        diagTrigger_original: 'Original Retry',
-        diagTrigger_icreate: 'Interaction Create',
-        diagTrigger_iresume: 'Interaction Resume',
-        diagCancelUnconfirmed: 'Remote termination unconfirmed',
-        diagCancelConfirmed: 'Remote termination confirmed',
-        diagReqCap: 'Request cap',
-        diagUnrecorded: 'unrecorded',
         diagHopsDroppedPrefix: '',
         diagHopsDroppedSuffix: ' hop diagnostic entries omitted (not output loss)',
       },
@@ -402,7 +328,6 @@ window.__ModuleLoader__.load({
   "inspectorTitle": "Argon 诊断",
   "inspectorOpen": "Argon 详情",
   "inspectorRequests": "请求与响应",
-  "inspectorUsage": "用量与费用",
   "inspectorQuery": "按 ID 查询云端状态 · 网络访问",
   "inspectorSession": "会话",
   "inspectorMessage": "正式消息",
@@ -438,16 +363,6 @@ window.__ModuleLoader__.load({
   "inspectorDisk": "已落盘",
   "inspectorSummary": "脱敏诊断汇总（不是原始响应）",
   "inspectorUnknown": "未记录 / 未知",
-  "inspectorRequested": "请求服务等级",
-  "inspectorObserved": "服务端观察等级",
-  "inspectorEstimate": "用量估算 USD（非账单实扣）",
-  "inspectorSubtotal": "已知部分小计 USD（不代表总额）",
-  "inspectorBilling": "未核验云账单；缺失不是零。请求地区来自配置，价格按 UTC 日期估算，账户折扣、税、非 Token 工具费和未报告用量不含在内。",
-  "inspectorMissing": "估算缺口",
-  "inspectorProvenance": "价格版本与逐段估算依据",
-  "inspectorUsageHint": "DSH step、Google step、GC HTTP hop 与 GET 重连不同。Interactions step 不与累计总量相加；GC 按 hop 独立计价，可能含未提交尾段。",
-  "inspectorAggregate": "上游累计用量",
-  "inspectorUsageRows": "逐 step / hop 与分模态用量",
   "inspectorQueryHint": "使用所选路由当前配置凭据，仅执行一次已知 ID 的只读 GET；不生成、不执行工具、不导入会话、不恢复或取消云端任务。查询并不承诺免费。",
   "inspectorRoute": "查询路由",
   "inspectorId": "Interaction ID（仅 ID，不是 URL）",
@@ -465,7 +380,6 @@ window.__ModuleLoader__.load({
   "inspectorTitle": "Argon diagnostics",
   "inspectorOpen": "Argon details",
   "inspectorRequests": "Requests & responses",
-  "inspectorUsage": "Usage & cost",
   "inspectorQuery": "Cloud ID lookup · network access",
   "inspectorSession": "Session",
   "inspectorMessage": "Durable message",
@@ -501,16 +415,6 @@ window.__ModuleLoader__.load({
   "inspectorDisk": "Persisted to disk",
   "inspectorSummary": "Redacted diagnostic summary (not raw response)",
   "inspectorUnknown": "Not recorded / unknown",
-  "inspectorRequested": "Requested tier",
-  "inspectorObserved": "Observed tier",
-  "inspectorEstimate": "Usage estimate USD (not billed charge)",
-  "inspectorSubtotal": "Known subtotal USD (not a total)",
-  "inspectorBilling": "Cloud billing is unverified; missing is not zero. Region is request configuration, price dates use UTC estimation, and account discounts, tax, non-token tools and unreported usage are excluded.",
-  "inspectorMissing": "Estimate gaps",
-  "inspectorProvenance": "Price version & per-part provenance",
-  "inspectorUsageHint": "DSH steps, Google steps, GC HTTP hops and GET reconnects differ. Interaction steps are not added to cumulative totals; GC is priced per hop and may include uncommitted tails.",
-  "inspectorAggregate": "Upstream cumulative usage",
-  "inspectorUsageRows": "Per-step / hop & modality usage",
   "inspectorQueryHint": "Uses current configured credentials on the selected route for one read-only GET of a known ID. No generation, tools, session import, recovery or cloud cancellation. Lookup is not promised to be free.",
   "inspectorRoute": "Lookup route",
   "inspectorId": "Interaction ID (ID only, not URL)",
@@ -581,8 +485,8 @@ window.__ModuleLoader__.load({
     dictionaries.en.tierResetHint = "Reset defaults explicitly restores Standard on both routes and turns PayGo-only off; ordinary protocol switches never change these values."
 
     Object.assign(dictionaries.zh, {
-      inspectorDiagnosis: '诊断', inspectorOperations: '操作', inspectorProtocol: '请求协议',
-      inspectorGuideHint: '当前会话的请求、用量与费用估算；操作另行确认。',
+      inspectorDiagnosis: 'Debug', inspectorOperations: '操作', inspectorProtocol: '请求协议',
+      inspectorGuideHint: '当前会话的请求调试与响应证据；操作另行确认。',
       inspectorScopeChanged: '会话位置已变化或入口参数无效；请在目标会话的右侧栏重新打开 Argon 诊断。',
       inspectorSessionScope: '范围：当前会话', inspectorAnswerScope: '范围：此条回答（精确关联）',
       inspectorScopeIds: '查看范围标识', inspectorAllRequests: '查看本会话全部请求', inspectorBackToAnswer: '返回此回答的请求',
@@ -597,30 +501,13 @@ window.__ModuleLoader__.load({
       inspectorCapture_captured: '已捕获（当前是否可读取需单独检查）', inspectorCapture_truncated: '捕获已截断',
       inspectorCapture_unavailable: '捕获不可用', inspectorCapture_unknown: '未记录 / 未知',
       inspectorSettingsHint: '此处仅修改后续请求的默认设置。请求诊断与操作请使用当前会话的 Argon 详情页、右侧栏的 Argon 诊断，或回答下方的详情图标。',
-      inspectorKpiRequests: '保留请求', inspectorKpiRoutes: '路由与协议', inspectorKpiTokens: 'Token 构成', inspectorKpiCost: '估算与等级',
-      inspectorTokenMix: 'Token 分布与缓存命中', inspectorTokenUncached: '未缓存输入', inspectorTokenCached: '缓存命中',
-      inspectorTokenReasoning: '推理思考', inspectorTokenOutput: '输出生成', inspectorTokenTool: '工具提示',
-      inspectorTokenTotal: '总计 Token', inspectorCacheHitRate: '缓存命中率', inspectorTimeline: '请求时间线',
-      inspectorEyebrow: 'ARGON / 请求检查器', inspectorInput: '输入', inspectorEstimateBadge: 'USD · 估算', inspectorRowsPreview: '预览行数（完整数据见下方）',
-      inspectorGcBasis: '所选请求 · 各 hop 合计', inspectorIaBasis: '所选请求 · 累计用量',
-      inspectorTokenNotRecorded: '未记录',
-      inspectorChartRecordedOnly: '已记录分项合计与总量一致，比例按总量计算；未记录项保持未知，不补零。',
-      inspectorChartUnavailable: '分布数据不足、未结算或分项与总量不一致；仅展示已记录数值，不补零。',
-      inspectorSelectedScope: '以下 Token 与费用仅属于所选请求', inspectorNoSelection: '未选择请求',
       inspectorMetaScope: '当前保留列表 · 最多 100 条，非会话全历史', inspectorRawTitle: '响应与证据',
-      inspectorDashboardHint: '从请求到证据，一处看清。', inspectorLocalOnly: '本地诊断',
+      inspectorDebugHint: '从请求到证据，一处看清。', inspectorLocalOnly: '本地诊断',
       inspectorStepHopTable: 'Step / Hop 轨迹明细',
-      inspectorOverview: '当前范围总览', inspectorOverviewKnown: '已知小计', inspectorOverviewComplete: '完整记录合计',
-      inspectorOverviewCoverage: '已记录请求', inspectorOverviewCoverageComplete: '完整请求', inspectorOverviewPartial: '部分记录；不是完整总量',
-      inspectorOverviewDenied: '无总览读取权限；请求列表仍可单独查看。', inspectorOverviewWindow: '当前本地保留窗口，非全历史或云账单；最多扫描最近 200 条，再按当前范围取最多 100 条。',
-      inspectorOverviewLimited: '当前范围匹配记录超过显示上限，较早记录不含在内。', inspectorOverviewDates: '记录时间范围',
-      inspectorOverviewCache: '按完整有效请求的输入 Token 加权计算。',
-      inspectorOverviewCost: '已知费用小计（USD）', inspectorOverviewCostComplete: '完整费用估算（USD）',
-      inspectorOverviewFields: '各项 Token 合计',
     })
     Object.assign(dictionaries.en, {
-      inspectorDiagnosis: 'Diagnosis', inspectorOperations: 'Operations', inspectorProtocol: 'Request protocol',
-      inspectorGuideHint: 'Requests, usage and cost estimates for this session; operations require separate actions.',
+      inspectorDiagnosis: 'Debug', inspectorOperations: 'Operations', inspectorProtocol: 'Request protocol',
+      inspectorGuideHint: 'Request debug details and response evidence for this session; operations require separate actions.',
       inspectorScopeChanged: 'The session surface changed or entry parameters are invalid. Reopen Argon diagnostics from the intended session’s right sidebar.',
       inspectorSessionScope: 'Scope: current session', inspectorAnswerScope: 'Scope: this answer (exact association)',
       inspectorScopeIds: 'Scope identifiers', inspectorAllRequests: 'View all requests in this session', inspectorBackToAnswer: 'Back to this answer’s requests',
@@ -635,26 +522,26 @@ window.__ModuleLoader__.load({
       inspectorCapture_captured: 'Captured (current availability requires a separate read)', inspectorCapture_truncated: 'Capture truncated',
       inspectorCapture_unavailable: 'Capture unavailable', inspectorCapture_unknown: 'Not recorded / unknown',
       inspectorSettingsHint: 'Only defaults for future requests are changed here. Use the session’s Argon details tab, Argon diagnostics in the right sidebar, or the details icon below an answer for diagnostics and operations.',
-      inspectorKpiRequests: 'Retained requests', inspectorKpiRoutes: 'Routes & protocols', inspectorKpiTokens: 'Token composition', inspectorKpiCost: 'Estimate & tier',
-      inspectorTokenMix: 'Token breakdown & cache hit', inspectorTokenUncached: 'Uncached input', inspectorTokenCached: 'Cached input',
-      inspectorTokenReasoning: 'Reasoning', inspectorTokenOutput: 'Output', inspectorTokenTool: 'Tool prompt',
-      inspectorTokenTotal: 'Total tokens', inspectorCacheHitRate: 'Cache hit rate', inspectorTimeline: 'Request timeline',
-      inspectorEyebrow: 'ARGON / REQUEST INSPECTOR', inspectorInput: 'Input', inspectorEstimateBadge: 'USD · Estimate', inspectorRowsPreview: 'Preview rows (full data below)',
-      inspectorGcBasis: 'Selected request · sum of hops', inspectorIaBasis: 'Selected request · cumulative usage',
-      inspectorTokenNotRecorded: 'Not recorded',
-      inspectorChartRecordedOnly: 'Recorded parts match the reported total; percentages use that total. Missing fields remain unknown, not zero.',
-      inspectorChartUnavailable: 'Distribution is insufficient, provisional, or inconsistent with the total. Recorded values only; no zero filling.',
-      inspectorSelectedScope: 'Tokens and cost below belong only to the selected request', inspectorNoSelection: 'No request selected',
       inspectorMetaScope: 'Retained list · up to 100, not the full session history', inspectorRawTitle: 'Response & evidence',
-      inspectorDashboardHint: 'From request to evidence, in one place.', inspectorLocalOnly: 'Local diagnostics',
+      inspectorDebugHint: 'From request to evidence, in one place.', inspectorLocalOnly: 'Local diagnostics',
       inspectorStepHopTable: 'Step / Hop trajectory',
-      inspectorOverview: 'Current scope overview', inspectorOverviewKnown: 'Known subtotal', inspectorOverviewComplete: 'Complete recorded total',
-      inspectorOverviewCoverage: 'Reported requests', inspectorOverviewCoverageComplete: 'Complete requests', inspectorOverviewPartial: 'Partial records; not a complete total',
-      inspectorOverviewDenied: 'No permission to read the overview; individual requests remain available in the list.', inspectorOverviewWindow: 'Current local retained window, not all history or cloud billing; scans at most the latest 200 records, then takes up to 100 for this scope.',
-      inspectorOverviewLimited: 'Matching retained records exceed the display limit; earlier records are excluded.', inspectorOverviewDates: 'Record time range',
-      inspectorOverviewCache: 'Weighted by input tokens across requests with complete, valid cache/input counts.',
-      inspectorOverviewCost: 'Known cost subtotal (USD)', inspectorOverviewCostComplete: 'Complete cost estimate (USD)',
-      inspectorOverviewFields: 'Token totals by field',
+    })
+
+    Object.assign(dictionaries.zh, {
+      inspectorTimeline: '请求列表', inspectorThinking: '思考等级', inspectorFailure: '失败类别', inspectorDuration: '耗时',
+      inspectorAssociation: '关联状态', inspectorTokenWatermark: 'Token 水位', inspectorEyebrow: 'ARGON / DEBUG',
+      proxyTitle: 'Antigravity 反代通道 (Antigravity Proxy)', proxyEnabled: '启用独立代理模型', proxyBaseUrl: '代理 Base URL', proxyApiKey: '代理 API Key',
+      proxyHint: '独立模型 gemini-4-argon-proxy；共用 Gemini API 的协议与服务等级。密钥只使用此处配置或 ANTIGRAVITY_API_KEY，不复用 Google / Vertex 凭据。',
+      proxySaveHint: '开关点击即保存；地址和密钥在离开输入框或点击对应保存按钮时保存，不逐字提交。恢复默认值会关闭代理、恢复默认地址并清空专属密钥。',
+      proxySaveBaseUrl: '保存代理地址', proxySaveApiKey: '保存代理密钥',
+    })
+    Object.assign(dictionaries.en, {
+      inspectorTimeline: 'Requests', inspectorThinking: 'Thinking level', inspectorFailure: 'Failure category', inspectorDuration: 'Duration',
+      inspectorAssociation: 'Association status', inspectorTokenWatermark: 'Token watermark', inspectorEyebrow: 'ARGON / DEBUG',
+      proxyTitle: 'Antigravity Proxy', proxyEnabled: 'Enable the independent proxy model', proxyBaseUrl: 'Proxy Base URL', proxyApiKey: 'Proxy API Key',
+      proxyHint: 'Independent gemini-4-argon-proxy model; shares Gemini API protocol and service tier settings. Uses only this key or ANTIGRAVITY_API_KEY, never Google / Vertex credentials.',
+      proxySaveHint: 'The switch saves immediately. URL and key save on blur or with their Save buttons, never on each keystroke. Reset disables the proxy, restores the default URL and clears its dedicated key.',
+      proxySaveBaseUrl: 'Save proxy URL', proxySaveApiKey: 'Save proxy key',
     })
 
     function installAdjacentPicker(ctx) {
@@ -713,18 +600,6 @@ window.__ModuleLoader__.load({
       })
     }
 
-    // toLocaleTimeString rebuilt a formatter for every rendered row. The cached
-    // one is byte-identical: hour/minute/second numeric with hour12:false keeps
-    // zh-CN and en-GB zero-padded hours and never rewrites a ko-KR pattern.
-    const timeFormatter = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: false })
-
-    function formatTimeShort(iso) {
-      if (typeof iso !== 'string') return ''
-      const d = new Date(iso)
-      if (Number.isNaN(d.getTime())) return iso.slice(11, 19)
-      return timeFormatter.format(d)
-    }
-
     function formatDuration(ms) {
       if (typeof ms !== 'number' || !Number.isFinite(ms)) return '0ms'
       if (ms < 1000) return Math.round(ms) + 'ms'
@@ -734,166 +609,6 @@ window.__ModuleLoader__.load({
     // Number#toLocaleString allocated a formatter per rendered value; the
     // cached formatter prints identically, including 786432 -> "786,432".
     const numberFormatter = new Intl.NumberFormat()
-
-    function DiagnosticsPanel({ loadDiagnostics, t }) {
-      const [open, setOpen] = React.useState(false)
-      const [loading, setLoading] = React.useState(false)
-      const [error, setError] = React.useState(false)
-      const [records, setRecords] = React.useState([])
-
-      const refresh = React.useCallback(async () => {
-        if (typeof loadDiagnostics !== 'function') {
-          setError(true)
-          return
-        }
-        setLoading(true)
-        setError(false)
-        try {
-          const res = await loadDiagnostics(20)
-          if (res && res.ok === true && Array.isArray(res.records)) {
-            setRecords(res.records)
-          } else {
-            setError(true)
-          }
-        } catch {
-          setError(true)
-        } finally {
-          setLoading(false)
-        }
-      }, [loadDiagnostics])
-
-      React.useEffect(() => {
-        if (open) void refresh()
-      }, [open, refresh])
-
-      const fmt = n => (typeof n === 'number' && Number.isFinite(n) ? numberFormatter.format(n) : '-')
-      const total = records.length
-      const okCount = records.filter(r => r.outcome === 'done' || r.outcome === 'tool-calls' || r.outcome === 'max-tokens').length
-      const contHops = records.reduce((acc, r) => acc + (r.continuationCount || 0), 0)
-      const recoveredCount = records.filter(r => r.recoveredFromDrop).length
-      const errCount = records.filter(r => r.outcome === 'error').length
-
-      const outcomeBadge = r => {
-        if (r.recoveredFromDrop) return { text: t('diagOutcome_recovered'), cls: 'badge-recovered' }
-        switch (r.outcome) {
-          case 'done': return { text: t('diagOutcome_done'), cls: 'badge-ok' }
-          case 'tool-calls': return { text: t('diagOutcome_tool'), cls: 'badge-ok' }
-          case 'max-tokens': return { text: t('diagOutcome_max'), cls: 'badge-warn' }
-          case 'error': return { text: t('diagOutcome_error'), cls: 'badge-err' }
-          case 'aborted': return { text: t('diagOutcome_aborted'), cls: 'badge-muted' }
-          default: return { text: t('diagOutcome_incomplete'), cls: 'badge-muted' }
-        }
-      }
-
-      const triggerLabel = tr => {
-        switch (tr) {
-          case 'continuation': return t('diagTrigger_continuation')
-          case 'checkpoint-reconnect': return t('diagTrigger_reconnect')
-          case 'retry-same-checkpoint': return t('diagTrigger_retry')
-          case 'retry-original': return t('diagTrigger_original')
-          case 'interaction-create': return t('diagTrigger_icreate')
-          case 'interaction-resume': return t('diagTrigger_iresume')
-          case 'initial': return t('diagTrigger_initial')
-          default: return tr
-        }
-      }
-
-      return h('div', { className: 'card' },
-        h('div', { className: 'row', style: { marginBottom: '4px' } },
-          h('button', {
-            type: 'button',
-            className: 'diag-toggle',
-            'aria-expanded': open,
-            onClick: () => setOpen(!open),
-          },
-            h('span', { style: { marginRight: '6px', display: 'inline-block' } }, open ? '▾' : '▸'),
-            h('strong', null, t('diagTitle')),
-          ),
-          open
-            ? h('button', { type: 'button', disabled: loading, onClick: refresh }, loading ? t('diagLoading') : t('diagRefresh'))
-            : null,
-        ),
-        h('p', { className: 'muted', style: { marginBottom: open ? '12px' : '0' } }, t('diagSubtitle')),
-        open
-          ? h('div', { className: 'diag-body' },
-              error
-                ? h('p', { className: 'status error', role: 'alert' }, t('diagError'))
-                : records.length === 0 && !loading
-                  ? h('p', { className: 'muted' }, t('diagEmpty'))
-                  : h(React.Fragment, null,
-                      h('div', { className: 'diag-stats' },
-                        h('span', { className: 'diag-stat' }, t('diagStatTotal') + ': ' + total),
-                        h('span', { className: 'diag-stat' }, t('diagStatOk') + ': ' + okCount),
-                        h('span', { className: 'diag-stat' }, t('diagStatCont') + ': ' + contHops),
-                        h('span', { className: 'diag-stat' }, t('diagStatRecovered') + ': ' + recoveredCount),
-                        h('span', { className: 'diag-stat' }, t('diagStatErr') + ': ' + errCount),
-                      ),
-                      h('div', { className: 'diag-list' },
-                        ...records.map(r => {
-                          const badge = outcomeBadge(r)
-                          const u = r.tokenUsage || {}
-                          const hops = Array.isArray(r.hops) ? r.hops : []
-                          const hopsDropped = typeof r.hopsDropped === 'number' && r.hopsDropped > 0 ? r.hopsDropped : 0
-                          const showHops = hops.length > 1 || r.reconnectCount > 0 || hopsDropped > 0 || r.outcome === 'error'
-                          const routeLabel = r.route === 'google-generative-ai' ? 'Gemini API' : 'Vertex AI'
-                          const reqCapText = typeof r.configuredMaxTokens === 'number' && Number.isFinite(r.configuredMaxTokens)
-                            ? fmt(r.configuredMaxTokens)
-                            : t('diagUnrecorded')
-                          return h('div', { key: r.id, className: 'diag-item' },
-                            h('div', { className: 'diag-item-head' },
-                              h('span', { className: 'diag-mono' }, formatTimeShort(r.startedAt)),
-                              h('span', { className: 'diag-chip' }, routeLabel + ' · ' + r.apiVersion),
-                              h('span', { className: 'diag-chip' }, (r.protocol || 'generate-content') + (r.background ? ' · background' : '')),
-                              h('span', { className: 'diag-chip' }, r.thinkingLevel),
-                              h('span', { className: 'diag-chip' }, t('diagReqCap') + ': ' + reqCapText),
-                              r.remoteCancellation === 'unconfirmed' ? h('span', { className: 'diag-chip badge-err' }, t('diagCancelUnconfirmed')) : null,
-                              r.remoteCancellation === 'confirmed' ? h('span', { className: 'diag-chip badge-muted' }, t('diagCancelConfirmed')) : null,
-                              h('span', { className: 'diag-badge ' + badge.cls }, badge.text),
-                              r.failureCategory ? h('span', { className: 'diag-chip badge-err' }, r.failureCategory) : null,
-                              h('span', { className: 'diag-mono', style: { marginLeft: 'auto' } },
-                                (r.hopCount || 1) + ' hop' + ((r.hopCount || 1) > 1 ? 's' : '') + ' · ' + formatDuration(r.durationMs)
-                              ),
-                            ),
-                            u.reportedInputTokens !== null || u.outputTokens !== null
-                              ? h('div', { className: 'diag-tokens muted' },
-                                  'Tokens — In: ' + fmt(u.reportedInputTokens) +
-                                  (u.reportedCacheTokens ? ' (Cache: ' + fmt(u.reportedCacheTokens) + ')' : '') +
-                                  ' · Out: ' + fmt(u.outputTokens) +
-                                  (u.thoughtsTokens ? ' · Think: ' + fmt(u.thoughtsTokens) : '') +
-                                  ((r.hopCount || 1) > 1 && u.billedTotalTokens !== null
-                                    ? ' | Billed In: ' + fmt(u.billedPromptTokens) + ' · Billed Total: ' + fmt(u.billedTotalTokens)
-                                    : '')
-                                )
-                              : null,
-                            showHops
-                              ? h('div', { className: 'diag-hops' },
-                                  ...hops.map(hp =>
-                                    h('div', { key: hp.hopIndex, className: 'diag-hop-row' },
-                                      '#' + hp.hopIndex + ' [' + triggerLabel(hp.trigger) + ']' +
-                                      (hp.backoffDelayMs > 0 ? ' (backoff ' + hp.backoffDelayMs + 'ms)' : '') +
-                                      ' · HTTP ' + (hp.status ?? '-') +
-                                      (hp.errorPhase ? ' · ' + t('diagPhase') + ': ' + hp.errorPhase : '') +
-                                      (hp.requestSubmitted === false ? ' · ' + t('diagNotSubmitted') : '') +
-                                      ' · ' + hp.chunkCount + ' chunks' +
-                                      (hp.finishReason ? ' · ' + hp.finishReason : '') +
-                                      (Array.isArray(hp.errorCodes) && hp.errorCodes.length > 0 ? ' · ' + hp.errorCodes.join(',') : '') +
-                                      ' · ' + formatDuration(hp.durationMs)
-                                    )
-                                  ),
-                                  hopsDropped > 0
-                                    ? h('div', { className: 'diag-hop-row' }, t('diagHopsDroppedPrefix') + hopsDropped + t('diagHopsDroppedSuffix'))
-                                    : null,
-                                )
-                              : null,
-                          )
-                        }),
-                      ),
-                    ),
-              h('p', { className: 'muted', style: { marginTop: '10px', fontSize: '12px' } }, t('diagStorageHint')),
-            )
-          : null,
-      )
-    }
 
     function formWritable(form) {
       const snapshot = form.getSnapshot()
@@ -1103,7 +818,6 @@ window.__ModuleLoader__.load({
       // Undefined access is deny; Host reauthorizes every RPC on either surface.
       const permissions = {
         listRequests: useAccess(inspectorEndpoint('listRequests')) === true,
-        getOverview: useAccess(inspectorEndpoint('getOverview')) === true,
         getRequest: useAccess(inspectorEndpoint('getRequest')) === true,
         readResponse: useAccess(inspectorEndpoint('readResponse')) === true,
         queryInteraction: useRemoteAccess(inspectorEndpoint('queryInteraction')) === true,
@@ -1118,149 +832,10 @@ window.__ModuleLoader__.load({
       })
     }
 
-    const INSPECTOR_CSS = "\n.argon-inspector{box-sizing:border-box;min-width:0;width:100%;height:100%;padding:20px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);line-height:1.55;font-size:13px;overflow:auto;container:argon-inspector/inline-size;scrollbar-gutter:stable}\n.argon-inspector *{box-sizing:border-box}\n.argon-inspector h2{font-size:24px;line-height:1.25;font-weight:650;letter-spacing:-.6px;margin:4px 0 8px}\n.argon-inspector h3{font-size:14px;font-weight:600;margin:0 0 8px}\n.argon-inspector h4{font-size:13px;margin:10px 0}\n.argon-inspector p{overflow-wrap:anywhere;margin:8px 0}\n.argon-inspector .muted,.argon-inspector dt{color:var(--dsw-alias-label-secondary)}\n.argon-inspector .ag-small{font-size:11px;line-height:1.6}\n.argon-inspector .ag-header{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:18px}\n.argon-inspector .ag-eyebrow{font-size:10px;letter-spacing:1.8px;font-weight:600;color:var(--dsw-alias-brand-primary)}\n.argon-inspector .ag-toolbar,.argon-inspector .group,.argon-inspector .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}\n.argon-inspector .ag-toolbar{padding:10px 0;border-block:1px solid var(--dsw-alias-border-l1)}\n.argon-inspector button,.argon-inspector input,.argon-inspector select{font:inherit;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l2);border-radius:8px;padding:7px 10px;max-width:100%;min-width:0}\n.argon-inspector button{cursor:pointer;transition:background .15s,border-color .15s;min-height:32px;text-align:start}\n.argon-inspector button:hover:not(:disabled){background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-brand-primary)}\n.argon-inspector button:disabled{opacity:.5;cursor:not-allowed}\n.argon-inspector :focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}\n.argon-inspector .ag-segmented{background:var(--dsw-alias-bg-layer-2);padding:3px;border-radius:10px;gap:2px}\n.argon-inspector .ag-segmented button{border-color:transparent;background:transparent;min-height:28px;padding:4px 14px}\n.argon-inspector .ag-segmented button[aria-pressed=true]{background:var(--dsw-alias-bg-layer-1);border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-brand-primary);font-weight:600}\n.argon-inspector .ag-refresh{margin-inline-start:auto}\n.argon-inspector details{min-width:0}\n.argon-inspector summary{cursor:pointer;overflow-wrap:anywhere;padding:6px 0;font-size:12px}\n.argon-inspector .ag-scope{font-size:11px;color:var(--dsw-alias-label-secondary);margin:6px 0 14px}\n.argon-inspector .card{min-width:0;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-1);padding:16px;margin:0}\n.argon-inspector .ag-card-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:12px}\n.argon-inspector .ag-card-head h3{margin:0}\n.argon-inspector .ag-overview,.argon-inspector .ag-selected-kpis{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:12px 0}\n.argon-inspector .ag-metric{min-width:0;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:12px 14px;background:var(--dsw-alias-bg-layer-1);display:flex;flex-direction:column;gap:5px;border-top:2px solid color-mix(in srgb,var(--dsw-alias-brand-primary) 40%,var(--dsw-alias-border-l2))}\n.argon-inspector .ag-metric-label{font-size:11px;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}\n.argon-inspector .ag-kpi-value{font-size:24px;line-height:1.3;font-weight:600;letter-spacing:-.6px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}\n.argon-inspector .ag-workbench{display:grid;grid-template-columns:minmax(0,1fr);align-items:start;gap:16px;margin-top:14px}\n.argon-inspector .ag-detail-column{min-width:0;display:grid;gap:14px}\n.argon-inspector .ag-selected-scope{margin:0;font-size:11px;color:var(--dsw-alias-label-secondary)}\n.argon-inspector .ag-selected-kpis{margin:0}\n.argon-inspector label{display:block;margin:8px 0;font-size:12px}\n.argon-inspector label>input:not([type=checkbox]),.argon-inspector label>select{display:block;width:100%;margin-top:6px}\n.argon-inspector .ag-request-select{font-size:11px;color:var(--dsw-alias-label-secondary);margin:0 0 12px}\n.argon-inspector .ag-request-select select{font-size:11px}\n.argon-inspector .ag-request-list{display:flex;flex-direction:column;gap:8px;max-height:480px;overflow-y:auto;padding:3px}\n.argon-inspector .ag-request-item{width:100%;height:auto;flex:0 0 auto;white-space:normal;display:flex;flex-direction:column;gap:6px;padding:12px;border-radius:9px;position:relative;overflow-wrap:anywhere}\n.argon-inspector .ag-request-item[aria-pressed=true]{border-color:var(--dsw-alias-brand-primary);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 7%,var(--dsw-alias-bg-layer-1));box-shadow:inset 3px 0 var(--dsw-alias-brand-primary)}\n.argon-inspector .ag-request-line{display:flex;align-items:center;justify-content:space-between;gap:6px;width:100%;flex-wrap:wrap;font-size:12px}\n.argon-inspector .ag-request-id{font:10px/1.5 ui-monospace,monospace;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}\n.argon-inspector .ag-pill{display:inline-flex;align-items:center;max-width:100%;gap:5px;font-size:10px;line-height:1.5;padding:3px 7px;border-radius:6px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-2);overflow-wrap:anywhere}\n.argon-inspector [data-tone=success]{color:var(--dsw-alias-state-success-primary);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 10%,transparent)}\n.argon-inspector [data-tone=warn],.argon-inspector .ag-pill-amber{color:var(--dsw-alias-state-warn-primary);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 10%,transparent)}\n.argon-inspector [data-tone=error],.argon-inspector [role=alert]{color:var(--dsw-alias-state-error-primary)}\n.argon-inspector .ag-empty{min-height:150px;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;gap:8px;padding:24px 8px;color:var(--dsw-alias-label-secondary)}\n.argon-inspector .ag-detail-empty .ag-empty{min-height:280px}\n.argon-inspector .ag-empty-symbol{font-size:28px;color:var(--dsw-alias-brand-primary)}\n.argon-inspector .ag-definition-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(180px,100%),1fr));gap:12px;margin:10px 0}\n.argon-inspector dt{font-size:11px}.argon-inspector dd{margin:4px 0 0;overflow-wrap:anywhere;font-size:12px}\n.argon-inspector .ag-token-body{display:flex;gap:18px;align-items:center;flex-wrap:wrap;padding:10px 0 16px}\n.argon-inspector .ag-donut-wrap{flex:0 0 112px;width:112px;height:112px;position:relative}\n.argon-inspector .ag-donut-svg{display:block;transform:rotate(-90deg)}\n.argon-inspector .ag-donut-center{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:3px;font-size:10px;color:var(--dsw-alias-label-secondary);pointer-events:none}\n.argon-inspector .ag-donut-val{font-size:15px;max-width:86px;overflow-wrap:anywhere;color:var(--dsw-alias-label-primary);font-variant-numeric:tabular-nums;text-align:center}\n.argon-inspector .ag-token-right{flex:1 1 180px;min-width:0}\n.argon-inspector .ag-legend-grid{display:grid;gap:7px}\n.argon-inspector .ag-legend-item{display:grid;grid-template-columns:8px minmax(0,1fr) auto 42px;align-items:center;gap:8px;font-size:11px}\n.argon-inspector .ag-legend-dot{width:7px;height:7px;border-radius:2px}\n.argon-inspector .ag-legend-num,.argon-inspector .ag-legend-pct,.argon-inspector .ag-hop-tot{font-variant-numeric:tabular-nums;text-align:right}\n.argon-inspector .ag-legend-pct{color:var(--dsw-alias-label-secondary)}\n.argon-inspector .ag-cache-rate{font-size:11px;border-top:1px solid var(--dsw-alias-border-l1);padding-top:8px}\n.argon-inspector .ag-kv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(220px,100%),1fr));gap:8px;margin-top:8px}\n.argon-inspector .ag-kv-cell{margin:0;padding:10px;background:var(--dsw-alias-bg-layer-2);border-radius:8px;font-size:12px;font-variant-numeric:tabular-nums}\n.argon-inspector .ag-kv-wide{grid-column:1/-1}\n.argon-inspector .ag-hint-banner{font-size:11px;color:var(--dsw-alias-label-secondary);padding:10px 12px;background:var(--dsw-alias-bg-layer-2);border-radius:8px}\n.argon-inspector .ag-subhead{font-size:12px;font-weight:600}\n.argon-inspector .ag-hop-visual{margin:16px 0}.argon-inspector .ag-hop-list{display:grid;gap:6px;margin-top:8px}\n.argon-inspector .ag-hop-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;border-bottom:1px solid var(--dsw-alias-border-l1);padding:6px 0;font-size:11px}\n.argon-inspector .ag-hop-tot{margin-left:auto}.argon-inspector .ag-hop-nums{overflow-wrap:anywhere}\n.argon-inspector .ag-drawers{border-top:1px solid var(--dsw-alias-border-l1);margin-top:12px;padding-top:6px}\n.argon-inspector .ag-details summary{padding:9px 0;color:var(--dsw-alias-label-secondary)}\n.argon-inspector pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-height:360px;overflow:auto;padding:12px;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1);border-radius:8px;font:11px/1.65 ui-monospace,monospace}\n.argon-inspector .ag-notice{padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1)}\n.argon-inspector .ag-progress-track{height:3px;background:var(--dsw-alias-border-l1);margin:10px 0}.argon-inspector .ag-progress-fill{height:100%;background:var(--dsw-alias-brand-primary)}\n.argon-inspector .ag-mono-meta{font-size:11px;font-variant-numeric:tabular-nums}.argon-inspector .ag-chip-line{font-size:11px}\n.argon-inspector .ag-operations{display:grid;gap:12px;margin-top:12px}.argon-inspector .ag-operations>.card>summary{font-weight:600;padding:5px 0}\n.argon-inspector .diag-list{display:grid;gap:10px;margin-top:12px}.argon-inspector .diag-item{padding:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px}.argon-inspector .diag-item-head{display:flex;flex-wrap:wrap;gap:8px}\n.argon-inspector .diag-chip{font-size:11px;border-radius:5px;padding:2px 6px;background:var(--dsw-alias-bg-layer-2)}.argon-inspector .recovery-confirm{border-top:1px solid var(--dsw-alias-border-l2);margin-top:12px;padding-top:10px}.argon-inspector .recovery-risk{display:flex;align-items:flex-start;gap:8px}\n@container argon-inspector (min-width:760px){.argon-inspector .ag-workbench{grid-template-columns:minmax(240px,.85fr) minmax(0,2fr)}.argon-inspector .ag-overview{grid-template-columns:repeat(4,minmax(0,1fr))}.argon-inspector .ag-selected-kpis{grid-template-columns:repeat(3,minmax(0,1fr))}}\n@container argon-inspector (max-width:400px){.argon-inspector .ag-header{align-items:flex-start}.argon-inspector .ag-header>.ag-pill{display:none}.argon-inspector .ag-selected-kpis{grid-template-columns:minmax(0,1fr)}.argon-inspector .ag-kpi-value{font-size:20px}.argon-inspector .ag-request-list{max-height:220px}.argon-inspector .card{padding:12px}}\n@media (prefers-reduced-motion:no-preference){.argon-inspector .ag-donut-arc{animation:argon-chart-in .3s ease-out}@keyframes argon-chart-in{from{opacity:0}to{opacity:1}}}\n"
-
-    const OVERVIEW_CSS = '\n.argon-inspector .ag-scope-overview{margin:14px 0}.argon-inspector .ag-scope-overview .ag-overview{grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));margin:12px 0}.argon-inspector .ag-overview-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,140px),1fr));gap:14px;margin:12px 0}.argon-inspector .ag-overview-fields dd{margin:4px 0;font-variant-numeric:tabular-nums;font-size:17px}.argon-inspector .ag-overview-fields small{display:block;font-size:11px;color:var(--dsw-alias-label-secondary)}'
-    function ScopeOverview({ overview, t, metric, busy, allowed }) {
-      const coverage = value => t('inspectorOverviewCoverage') + ': ' + (value?.reportedRequests ?? 0) + '/' + overview.requestCount + ' · ' + t('inspectorOverviewCoverageComplete') + ': ' + (value?.completeRequests ?? 0) + '/' + overview.requestCount
-      const cacheCoverage = () => t('inspectorOverviewCoverageComplete') + ': ' + (overview?.cache?.completeRequests ?? 0) + '/' + overview.requestCount + ' · ' + t('inspectorOverviewCache')
-      const total = overview?.tokens?.totalTokens, cost = overview?.cost, cache = overview?.cache
-      const money = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? '$' + value.toFixed(6) : '—'
-      const completeCost = cost?.estimatedUsd != null
-      const completeCache = overview?.requestCount > 0 && cache?.completeRequests === overview.requestCount
-      const fields = [['inputTokens', 'inspectorInput'], ['cachedTokens', 'inspectorTokenCached'], ['outputTokens', 'inspectorTokenOutput'], ['thoughtTokens', 'inspectorTokenReasoning'], ['toolTokens', 'inspectorTokenTool']]
-      return h('section', { className: 'card ag-scope-overview', 'data-overview': true, 'aria-label': t('inspectorOverview') },
-        h('h3', null, t('inspectorOverview')),
-        h('p', { className: 'muted ag-small' }, t('inspectorOverviewWindow')),
-        !allowed ? h('p', { role: 'status' }, t('inspectorOverviewDenied')) : !overview ? h('p', { role: 'status' }, t(busy ? 'inspectorLoading' : 'inspectorStart')) : h(React.Fragment, null,
-          overview.window?.limited ? h('p', { className: 'ag-notice' }, t('inspectorOverviewLimited')) : null,
-          h('div', { className: 'ag-overview' },
-            metric('overview-total', t('inspectorTokenTotal') + ' · ' + t(total?.complete ? 'inspectorOverviewComplete' : 'inspectorOverviewKnown'), tokenText(total?.knownSubtotal), coverage(total)),
-            metric('overview-cache', t('inspectorCacheHitRate') + (typeof cache?.percent === 'number' && Number.isFinite(cache.percent) && !completeCache ? ' · ' + t('inspectorOverviewKnown') : ''), typeof cache?.percent === 'number' && Number.isFinite(cache.percent) ? cache.percent.toFixed(1) + '%' : '—', cacheCoverage()),
-            metric('overview-cost', t(completeCost ? 'inspectorOverviewCostComplete' : 'inspectorOverviewCost'), money(completeCost ? cost.estimatedUsd : cost?.knownSubtotalUsd), coverage(cost))),
-          h('dl', { className: 'ag-overview-fields', 'aria-label': t('inspectorOverviewFields') }, ...fields.map(([key, label]) => {
-            const value = overview.tokens?.[key]
-            return h('div', { key }, h('dt', null, t(label)), h('dd', { 'data-metric': 'overview-' + key }, tokenText(value?.knownSubtotal)),
-              h('small', null, t(value?.complete ? 'inspectorOverviewComplete' : 'inspectorOverviewPartial')), h('small', null, coverage(value)))
-          })),
-          h('p', { className: 'muted ag-small' }, t('inspectorOverviewDates') + ': ' + (overview.window?.oldestAt ?? '—') + ' → ' + (overview.window?.newestAt ?? '—')),
-          h('p', { className: 'muted ag-small' }, t('inspectorBilling'))))
-    }
+    const INSPECTOR_CSS = "\n.argon-inspector{box-sizing:border-box;min-width:0;width:100%;height:100%;padding:20px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);line-height:1.55;font-size:13px;overflow:auto;container:argon-inspector/inline-size;scrollbar-gutter:stable}\n.argon-inspector *{box-sizing:border-box}\n.argon-inspector h2{font-size:24px;line-height:1.25;font-weight:650;letter-spacing:-.6px;margin:4px 0 8px}\n.argon-inspector h3{font-size:14px;font-weight:600;margin:0 0 8px}\n.argon-inspector h4{font-size:13px;margin:10px 0}\n.argon-inspector p{overflow-wrap:anywhere;margin:8px 0}\n.argon-inspector .muted,.argon-inspector dt{color:var(--dsw-alias-label-secondary)}\n.argon-inspector .ag-small{font-size:11px;line-height:1.6}\n.argon-inspector .ag-header{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:18px}\n.argon-inspector .ag-eyebrow{font-size:10px;letter-spacing:1.8px;font-weight:600;color:var(--dsw-alias-brand-primary)}\n.argon-inspector .ag-toolbar,.argon-inspector .group,.argon-inspector .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}\n.argon-inspector .ag-toolbar{padding:10px 0;border-block:1px solid var(--dsw-alias-border-l1)}\n.argon-inspector button,.argon-inspector input,.argon-inspector select{font:inherit;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l2);border-radius:8px;padding:7px 10px;max-width:100%;min-width:0}\n.argon-inspector button{cursor:pointer;transition:background .15s,border-color .15s;min-height:32px;text-align:start}\n.argon-inspector button:hover:not(:disabled){background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-brand-primary)}\n.argon-inspector button:disabled{opacity:.5;cursor:not-allowed}\n.argon-inspector :focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}\n.argon-inspector .ag-segmented{background:var(--dsw-alias-bg-layer-2);padding:3px;border-radius:10px;gap:2px}\n.argon-inspector .ag-segmented button{border-color:transparent;background:transparent;min-height:28px;padding:4px 14px}\n.argon-inspector .ag-segmented button[aria-pressed=true]{background:var(--dsw-alias-bg-layer-1);border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-brand-primary);font-weight:600}\n.argon-inspector .ag-refresh{margin-inline-start:auto}\n.argon-inspector details{min-width:0}\n.argon-inspector summary{cursor:pointer;overflow-wrap:anywhere;padding:6px 0;font-size:12px}\n.argon-inspector .ag-scope{font-size:11px;color:var(--dsw-alias-label-secondary);margin:6px 0 14px}\n.argon-inspector .card{min-width:0;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-1);padding:16px;margin:0}\n.argon-inspector .ag-card-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:12px}\n.argon-inspector .ag-card-head h3{margin:0}\n.argon-inspector .ag-workbench{display:grid;grid-template-columns:minmax(0,1fr);align-items:start;gap:16px;margin-top:14px}\n.argon-inspector .ag-detail-column{min-width:0;display:grid;gap:14px}\n.argon-inspector label{display:block;margin:8px 0;font-size:12px}\n.argon-inspector label>input:not([type=checkbox]),.argon-inspector label>select{display:block;width:100%;margin-top:6px}\n.argon-inspector .ag-request-select{font-size:11px;color:var(--dsw-alias-label-secondary);margin:0 0 12px}\n.argon-inspector .ag-request-select select{font-size:11px}\n.argon-inspector .ag-request-list{display:flex;flex-direction:column;gap:8px;max-height:480px;overflow-y:auto;padding:3px}\n.argon-inspector .ag-request-item{width:100%;height:auto;flex:0 0 auto;white-space:normal;display:flex;flex-direction:column;gap:6px;padding:12px;border-radius:9px;position:relative;overflow-wrap:anywhere}\n.argon-inspector .ag-request-item[aria-pressed=true]{border-color:var(--dsw-alias-brand-primary);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 7%,var(--dsw-alias-bg-layer-1));box-shadow:inset 3px 0 var(--dsw-alias-brand-primary)}\n.argon-inspector .ag-request-line{display:flex;align-items:center;justify-content:space-between;gap:6px;width:100%;flex-wrap:wrap;font-size:12px}\n.argon-inspector .ag-request-id{font:10px/1.5 ui-monospace,monospace;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}\n.argon-inspector .ag-pill{display:inline-flex;align-items:center;max-width:100%;gap:5px;font-size:10px;line-height:1.5;padding:3px 7px;border-radius:6px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-2);overflow-wrap:anywhere}\n.argon-inspector [data-tone=success]{color:var(--dsw-alias-state-success-primary);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 10%,transparent)}\n.argon-inspector [data-tone=warn],.argon-inspector .ag-pill-amber{color:var(--dsw-alias-state-warn-primary);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 10%,transparent)}\n.argon-inspector [data-tone=error],.argon-inspector [role=alert]{color:var(--dsw-alias-state-error-primary)}\n.argon-inspector .ag-empty{min-height:150px;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;gap:8px;padding:24px 8px;color:var(--dsw-alias-label-secondary)}\n.argon-inspector .ag-detail-empty .ag-empty{min-height:280px}\n.argon-inspector .ag-empty-symbol{font-size:28px;color:var(--dsw-alias-brand-primary)}\n.argon-inspector .ag-definition-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(180px,100%),1fr));gap:12px;margin:10px 0}\n.argon-inspector dt{font-size:11px}.argon-inspector dd{margin:4px 0 0;overflow-wrap:anywhere;font-size:12px}\n.argon-inspector .ag-hint-banner{font-size:11px;color:var(--dsw-alias-label-secondary);padding:10px 12px;background:var(--dsw-alias-bg-layer-2);border-radius:8px}\n.argon-inspector pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-height:360px;overflow:auto;padding:12px;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1);border-radius:8px;font:11px/1.65 ui-monospace,monospace}\n.argon-inspector .ag-notice{padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1)}\n.argon-inspector .ag-progress-track{height:3px;background:var(--dsw-alias-border-l1);margin:10px 0}.argon-inspector .ag-progress-fill{height:100%;background:var(--dsw-alias-brand-primary)}\n.argon-inspector .ag-mono-meta{font-size:11px;font-variant-numeric:tabular-nums}.argon-inspector .ag-chip-line{font-size:11px}\n.argon-inspector .ag-operations{display:grid;gap:12px;margin-top:12px}.argon-inspector .ag-operations>.card>summary{font-weight:600;padding:5px 0}\n.argon-inspector .diag-list{display:grid;gap:10px;margin-top:12px}.argon-inspector .diag-item{padding:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px}.argon-inspector .diag-item-head{display:flex;flex-wrap:wrap;gap:8px}\n.argon-inspector .diag-chip{font-size:11px;border-radius:5px;padding:2px 6px;background:var(--dsw-alias-bg-layer-2)}.argon-inspector .recovery-confirm{border-top:1px solid var(--dsw-alias-border-l2);margin-top:12px;padding-top:10px}.argon-inspector .recovery-risk{display:flex;align-items:flex-start;gap:8px}\n\n.argon-inspector .ag-token-watermark{font:12px/1.7 ui-monospace,monospace;overflow-wrap:anywhere}.argon-inspector .ag-hop-scroll{overflow:auto;max-width:100%}.argon-inspector table{border-collapse:collapse;width:100%;font-size:11px;font-variant-numeric:tabular-nums}.argon-inspector th,.argon-inspector td{padding:7px;text-align:start;vertical-align:top;border-bottom:1px solid var(--dsw-alias-border-l1);overflow-wrap:anywhere}.argon-inspector th{white-space:nowrap}\n@container argon-inspector (min-width:800px){.argon-inspector .ag-workbench{grid-template-columns:minmax(220px,30%) minmax(0,1fr)}}"
 
     const knownTokens = value => Number.isSafeInteger(value) && value >= 0
     const tokenText = value => knownTokens(value) ? numberFormatter.format(value) : '—'
-    function resolveUsageCounts(usage, protocol) {
-      if (!inspectorObject(usage)) return null
-      const invalid = new Set(Array.isArray(usage.invalidCounts) ? usage.invalidCounts : [])
-      const keys = ['inputTokens', 'cachedTokens', 'outputTokens', 'thoughtTokens', 'toolTokens', 'totalTokens']
-      const result = Object.fromEntries(keys.map(key => [key, invalid.has(key) ? null : (knownTokens(usage[key]) ? usage[key] : null)]))
-      const absent = key => usage[key] == null && !invalid.has(key)
-      if (result.inputTokens !== null) {
-        for (const key of ['cachedTokens', 'toolTokens']) if (absent(key)) result[key] = 0
-      }
-      if (protocol === 'generate-content' && absent('outputTokens') && result.inputTokens !== null && result.totalTokens !== null && result.toolTokens !== null) {
-        const thoughts = absent('thoughtTokens') ? 0 : result.thoughtTokens
-        const accounted = thoughts === null ? null : result.inputTokens + result.toolTokens + thoughts
-        if (accounted !== null && knownTokens(accounted) && accounted === result.totalTokens) result.outputTokens = 0
-      }
-      if (result.outputTokens !== null && absent('thoughtTokens')) result.thoughtTokens = 0
-      return result
-    }
-    function selectGcUsageRows(record) {
-      const details = record?.usageDetails
-      const allRows = (details?.rows ?? []).filter(row => row?.kind === 'gc-hop')
-      const ledgerValid = allRows.length > 0 && allRows.length === record?.hopCount && !details?.omittedRows
-        && allRows.every(row => knownTokens(row.index)) && new Set(allRows.map(row => row.index)).size === allRows.length
-      if (!ledgerValid) return { rows: allRows, ledgerValid: false }
-      const sorted = [...allRows].sort((a, b) => a.index - b.index)
-      const hops = Array.isArray(record?.hops) && !record?.hopsDropped ? record.hops : []
-      const byIndex = new Map(hops.filter(inspectorObject).map(hop => [hop.hopIndex, hop]))
-      let start = 0
-      if (['done', 'max-tokens', 'tool-calls'].includes(record?.outcome) && sorted.every((row, i) => row.index === i + 1)) {
-        while (start + 1 < sorted.length) {
-          const row = sorted[start], hop = byIndex.get(row.index), next = byIndex.get(sorted[start + 1].index)
-          if (row.usage === null && row.complete === false
-            && hop && hop.trigger === (start === 0 ? 'initial' : 'retry-original')
-            && hop.usedContinuationToken === false && hop.chunkCount === 0 && hop.hasCheckpoint === false
-            && ['transport-error', 'api-error'].includes(hop.outcome)
-            && next && next.trigger === 'retry-original' && next.usedContinuationToken === false) start++
-          else break
-        }
-      }
-      return { rows: start > 0 ? sorted.slice(start) : allRows, ledgerValid: true }
-    }
-    function extractTokenMix(record) {
-      const details = record?.usageDetails
-      const keys = ['inputTokens', 'cachedTokens', 'outputTokens', 'thoughtTokens', 'toolTokens', 'totalTokens']
-      let usage = null, complete = false, sourceCacheValid = true, sourceTotalsValid = true
-      if (record?.protocol === 'generate-content') {
-        const { rows, ledgerValid: ledger } = selectGcUsageRows(record)
-        const usages = rows.map(row => resolveUsageCounts(row.usage, 'generate-content'))
-        usage = Object.fromEntries(keys.map(key => {
-          const values = usages.map(u => u?.[key])
-          const sum = ledger && values.every(knownTokens) ? values.reduce((a, b) => a + b, 0) : null
-          return [key, knownTokens(sum) ? sum : null]
-        }))
-        sourceCacheValid = usages.every(u => knownTokens(u?.inputTokens) && knownTokens(u?.cachedTokens) && u.cachedTokens <= u.inputTokens)
-        sourceTotalsValid = usages.every(u => {
-          const parts = ['inputTokens', 'outputTokens', 'thoughtTokens', 'toolTokens'].map(key => u?.[key])
-          return knownTokens(u?.totalTokens) && parts.every(value => value == null || knownTokens(value))
-            && parts.filter(knownTokens).reduce((sum, value) => sum + value, 0) === u.totalTokens
-        })
-        complete = ledger && rows.every(row => row.complete === true)
-      } else if (record?.protocol === 'interactions') {
-        usage = resolveUsageCounts(details?.aggregate, 'interactions')
-        complete = details?.aggregateComplete === true
-      }
-      const read = key => knownTokens(usage?.[key]) ? usage[key] : null
-      const input = read('inputTokens'), cached = read('cachedTokens'), total = read('totalTokens')
-      const cacheValid = sourceCacheValid && input !== null && cached !== null && cached <= input
-      const segments = [
-        ['uncached', 'inspectorTokenUncached', cacheValid ? input - cached : null, 'var(--dsw-alias-brand-primary)'],
-        ['cached', 'inspectorTokenCached', cached, 'var(--dsw-alias-state-success-primary)'],
-        ['output', 'inspectorTokenOutput', read('outputTokens'), 'var(--dsw-alias-label-primary)'],
-        ['reasoning', 'inspectorTokenReasoning', read('thoughtTokens'), 'var(--dsw-alias-state-warn-primary)'],
-        ['tool', 'inspectorTokenTool', read('toolTokens'), 'var(--dsw-alias-state-idle-primary)'],
-      ].map(([key, labelKey, count, color]) => ({ key, labelKey, count, color, pct: null }))
-      const sumParts = segments.every(s => s.count !== null) ? segments.reduce((sum, s) => sum + s.count, 0) : null
-      // A missing field remains unknown. Only chart recorded parts when they
-      // account for the reported total, both per hop and after aggregation.
-      const recordedSum = sumParts !== null ? sumParts : segments.filter(s => s.count !== null).reduce((sum, s) => sum + s.count, 0)
-      const chartReady = complete && cacheValid && sourceTotalsValid && knownTokens(recordedSum) && total !== null && total > 0 && recordedSum === total
-      if (chartReady) for (const s of segments) if (s.count !== null) s.pct = s.count / total * 100
-      return { segments, total, sumParts, complete, chartReady, hasData: total !== null || segments.some(s => s.count !== null), cacheHitPct: cacheValid && input > 0 ? cached / input * 100 : null }
-    }
-
-    function TokenMixVisual({ record, t }) {
-      const mix = extractTokenMix(record)
-      const circumference = 2 * Math.PI * 42
-      let offset = 0
-      return h('div', { className: 'ag-token-visual' },
-        h('div', { className: 'ag-card-head' },
-          h('span', { className: 'ag-subhead' }, t('inspectorTokenMix')),
-          h('span', { className: 'ag-pill' }, t(record?.protocol === 'generate-content' ? 'inspectorGcBasis' : 'inspectorIaBasis'))),
-        h('div', { className: 'ag-token-body' },
-          h('div', { className: 'ag-donut-wrap' },
-            h('svg', { viewBox: '0 0 112 112', width: 112, height: 112, className: 'ag-donut-svg', 'aria-hidden': true },
-              h('circle', { cx: 56, cy: 56, r: 42, fill: 'none', stroke: 'var(--dsw-alias-border-l2)', strokeWidth: 10 }),
-              ...(mix.chartReady ? mix.segments.filter(s => s.count > 0).map(seg => {
-                const arc = h('circle', { key: seg.key, cx: 56, cy: 56, r: 42, fill: 'none', stroke: seg.color, strokeWidth: 10,
-                  strokeDasharray: (seg.pct / 100 * circumference) + ' ' + circumference, strokeDashoffset: -offset, className: 'ag-donut-arc' })
-                offset += seg.pct / 100 * circumference
-                return arc
-              }) : [])),
-            h('div', { className: 'ag-donut-center' }, h('strong', { className: 'ag-donut-val' }, tokenText(mix.total)), h('span', null, t('inspectorTokenTotal')))),
-          h('div', { className: 'ag-token-right' },
-            h('div', { className: 'ag-legend-grid' }, ...mix.segments.map(seg => h('div', { key: seg.key, className: 'ag-legend-item', 'data-token-kind': seg.key },
-              h('span', { className: 'ag-legend-dot', style: { background: seg.color }, 'aria-hidden': true }),
-              h('span', null, t(seg.labelKey)), h('strong', { className: 'ag-legend-num' }, seg.count === null ? t('inspectorTokenNotRecorded') : tokenText(seg.count)),
-              h('span', { className: 'ag-legend-pct' }, seg.pct === null ? '—' : seg.pct.toFixed(1) + '%')))),
-            h('p', { className: 'ag-cache-rate' }, t('inspectorCacheHitRate') + ': ' + (mix.cacheHitPct === null ? '—' : mix.cacheHitPct.toFixed(1) + '%')))),
-        !mix.chartReady ? h('p', { className: 'muted ag-small' }, t('inspectorChartUnavailable'))
-          : mix.segments.some(s => s.count === null) ? h('p', { className: 'muted ag-small' }, t('inspectorChartRecordedOnly')) : null,
-        h('p', { className: 'muted ag-small' }, t('inspectorUsageHint')),
-      )
-    }
 
     function ResponsePage({ page, query, readPage, busy, t }) {
       if (!page) return null
@@ -1294,51 +869,35 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function UsageEvidence({ detail, t }) {
-      const { record, cost } = detail
-      const value = input => input === null || input === undefined ? t('inspectorUnknown') : String(input)
-      const money = input => typeof input === 'number' && Number.isFinite(input) ? input.toFixed(9) : t('inspectorUnknown')
-      const rows = Array.isArray(record.usageDetails?.rows) ? record.usageDetails.rows : []
-      return h('section', { className: 'card ag-card', 'aria-label': t('inspectorUsage') },
-        h('div', { className: 'ag-card-head' },
-          h('h3', null, t('inspectorUsage')),
-          cost?.billingVerified === false ? h('span', { className: 'ag-pill ag-pill-sky' }, t('inspectorEstimateBadge')) : null,
+    function RequestDebug({ detail, t, routeName, association, badge }) {
+      const record = detail.record
+      const hops = Array.isArray(record.hops) ? record.hops : []
+      const value = input => input === null || input === undefined ? t('inspectorUnknown') : Array.isArray(input) ? input.join(', ') || '—' : String(input)
+      const duration = ms => typeof ms === 'number' && Number.isFinite(ms) && ms >= 0 ? formatDuration(ms) : t('inspectorUnknown')
+      const u = record.tokenUsage || {}
+      const fields = [
+        ['id', t('inspectorRequestId'), record.id], ['route', t('inspectorRequestRoute'), routeName(record)],
+        ['protocol', t('inspectorProtocol'), record.protocol], ['thinkingLevel', t('inspectorThinking'), record.thinkingLevel],
+        ['outcome', t('inspectorOutcome'), record.outcome], ['failureCategory', t('inspectorFailure'), record.failureCategory],
+        ['durationMs', t('inspectorDuration'), duration(record.durationMs)], ['finishReason', t('inspectorFinish'), hops.at(-1)?.finishReason],
+        ['association', t('inspectorAssociation'), association(detail)],
+      ]
+      const columns = ['hopIndex', 'trigger', 'status', 'streamErrorStatus', 'errorPhase', 'backoffDelayMs', 'chunkCount', 'hasCheckpoint', 'finishReason', 'errorCodes', 'durationMs']
+      const watermark = [['In', 'reportedInputTokens'], ['Cache', 'reportedCacheTokens'], ['Out', 'outputTokens'], ['Think', 'thoughtsTokens'], ['Total', 'totalTokens']]
+      if (record.hopCount > 1) watermark.push(['Billed In', 'billedPromptTokens'], ['Billed Total', 'billedTotalTokens'])
+      return h(React.Fragment, null,
+        h('section', { className: 'card', 'aria-label': t('inspectorRequestSummary') },
+          h('div', { className: 'ag-card-head' }, h('h3', null, t('inspectorRequestSummary')), badge(record)),
+          h('dl', { className: 'ag-definition-grid' }, ...fields.map(([key, label, input]) => h('div', { key, 'data-summary-field': key }, h('dt', null, label), h('dd', null, value(input))))),
+          h('p', { className: 'ag-token-watermark', 'aria-label': t('inspectorTokenWatermark') }, watermark.map(([label, key]) => label + ': ' + tokenText(u[key])).join(' · ')),
         ),
-        h(TokenMixVisual, { record, t }),
-        h('div', { className: 'ag-kv-grid ag-usage-grid' },
-          h('p', { className: 'ag-kv-cell' }, t('inspectorRequested') + ': ' + value(record.serviceTier?.requested)),
-          h('p', { className: 'ag-kv-cell' }, t('inspectorObserved') + ': ' + value(record.serviceTier?.observed)),
-          h('p', { className: 'ag-kv-cell ag-kv-accent' }, t('inspectorEstimate') + ': ' + money(cost?.estimatedUsd)),
-          h('p', { className: 'ag-kv-cell ag-kv-accent' }, t('inspectorSubtotal') + ': ' + money(cost?.knownSubtotalUsd)),
-          h('p', { className: 'ag-kv-cell ag-kv-wide' }, t('inspectorMissing') + ': ' + (cost?.missing?.length ? cost.missing.join(', ') : cost ? '—' : t('inspectorUnknown'))),
-        ),
-        h('p', { className: 'muted ag-hint-banner' }, t('inspectorBilling')),
-        rows.length > 0 ? h('div', { className: 'ag-hop-visual' },
-          h('div', { className: 'ag-subhead' }, t('inspectorStepHopTable') + ' (' + rows.length + ')'),
-          h('div', { className: 'ag-hop-list' },
-            ...rows.slice(0, 12).map((r, idx) => {
-              const resolved = resolveUsageCounts(r.usage, r.kind === 'interaction-step' ? 'interactions' : 'generate-content')
-              const pTok = resolved?.inputTokens
-              const oTok = resolved?.outputTokens
-              const tTok = resolved?.thoughtTokens
-              const tot = resolved?.totalTokens
-              return h('div', { key: idx, className: 'ag-hop-row' },
-                h('span', { className: 'ag-pill ag-pill-muted' }, (r.kind ?? 'hop') + ' #' + (r.index ?? idx)),
-                h('span', { className: 'ag-hop-nums' }, t('inspectorInput') + ' ' + tokenText(pTok) + ' · ' + t('inspectorTokenOutput') + ' ' + tokenText(oTok) + ' · ' + t('inspectorTokenReasoning') + ' ' + tokenText(tTok)),
-                h('span', { className: 'ag-hop-tot' }, tokenText(tot)),
-              )
-            }),
-          ),
-          rows.length > 12 ? h('p', { className: 'muted ag-small' }, t('inspectorRowsPreview') + ' 12 / ' + rows.length) : null,
-        ) : null,
-        h('div', { className: 'ag-drawers' },
-          h('details', { className: 'ag-details' }, h('summary', null, t('inspectorAggregate')),
-            h('pre', { className: 'ag-code-block', tabIndex: 0 }, record.usageDetails?.aggregate ? jsonEvidence({ complete: record.usageDetails.aggregateComplete, usage: record.usageDetails.aggregate }) : t('inspectorUnknown'))),
-          h('details', { className: 'ag-details' }, h('summary', null, t('inspectorUsageRows')),
-            h('p', { className: 'muted' }, t('inspectorUsageHint')),
-            h('pre', { className: 'ag-code-block', tabIndex: 0 }, record.usageDetails ? jsonEvidence({ rows: record.usageDetails.rows, omittedRows: record.usageDetails.omittedRows }) : t('inspectorUnknown'))),
-          h('details', { className: 'ag-details' }, h('summary', null, t('inspectorProvenance')),
-            h('pre', { className: 'ag-code-block', tabIndex: 0 }, cost ? jsonEvidence(cost) : t('inspectorUnknown'))),
+        h('section', { className: 'card', 'aria-label': t('inspectorStepHopTable') },
+          h('h3', null, t('inspectorStepHopTable')),
+          hops.length ? h('div', { className: 'ag-hop-scroll', tabIndex: 0 }, h('table', null,
+            h('thead', null, h('tr', null, ...columns.map(key => h('th', { key, scope: 'col' }, key === 'hopIndex' ? '#hopIndex' : key)))),
+            h('tbody', null, ...hops.map((hop, index) => h('tr', { key: index, 'data-hop-index': hop.hopIndex }, ...columns.map(key => h('td', { key, 'data-hop-field': key }, value(hop[key])))))),
+          )) : h('p', { className: 'muted' }, t('inspectorUnknown')),
+          record.hopsDropped > 0 ? h('p', { className: 'muted' }, t('diagHopsDroppedPrefix') + record.hopsDropped + t('diagHopsDroppedSuffix')) : null,
         ),
       )
     }
@@ -1350,7 +909,6 @@ window.__ModuleLoader__.load({
       const [rawOpen, setRawOpen] = React.useState(false)
       const [snapshot, setSnapshot] = React.useState(null)
       const records = snapshot?.records ?? null
-      const overview = snapshot?.overview ?? null
       const [selected, setSelected] = React.useState('')
       const [detail, setDetail] = React.useState(null)
       const [page, setPage] = React.useState(null)
@@ -1412,17 +970,21 @@ window.__ModuleLoader__.load({
       }
       const refresh = () => {
         if (!gate.current.alive || gate.current.mode !== 'diagnosis' || !permissions.listRequests) return
-        setSnapshot(null)
-        const method = permissions.getOverview ? 'getOverview' : 'listRequests'
-        return run(method, { sessionId, ...(messageId ? { messageId } : {}), limit: 100 }, result => {
-          if (!Array.isArray(result.records)) throw new Error('Invalid request list')
-          const previous = gate.current.selected
-          const first = gate.current.records === null
-          if (method === 'getOverview' && (!result.overview || result.overview.requestCount !== result.records.length)) throw new Error('Invalid overview snapshot')
+        const previous = gate.current.selected
+        const first = gate.current.records === null && !previous
+        // Invalidate old list callbacks immediately; a refresh cannot leave old
+        // request details/raw pages visible while its new scope is unresolved.
+        gate.current.records = null; gate.current.rawOpen = false
+        setSnapshot(null); setDetail(null); setPage(null); setRawOpen(false)
+        return run('listRequests', { sessionId, ...(messageId ? { messageId } : {}), limit: 100 }, result => {
+          if (!Array.isArray(result.records) || result.records.some(row => !inspectorObject(row) || !inspectorId(row.id)) ||
+            new Set(result.records.map(row => row.id)).size !== result.records.length) throw new Error('Invalid request list')
           gate.current.records = result.records
-          setSnapshot({ records: result.records, overview: method === 'getOverview' ? result.overview : null })
+          setSnapshot({ records: result.records })
           if (previous && !result.records.some(row => row.id === previous)) {
             clearSelection(); setNotice(t('inspectorSelectionMissing'))
+          } else if (previous) {
+            void select(previous)
           } else if (first && messageId && result.records.length === 1) {
             // Host filters by the exact durable answer. Never pick the latest in a session.
             void select(result.records[0].id)
@@ -1436,12 +998,12 @@ window.__ModuleLoader__.load({
         return () => { gate.current.listed = false; stop() }
       }, [])
       const readRaw = (index = 0, offset = 0) => {
-        if (gate.current.mode !== 'diagnosis' || !gate.current.rawOpen || !selected || selected !== gate.current.selected) return
+        if (gate.current.mode !== 'diagnosis' || !gate.current.rawOpen || !selected || selected !== gate.current.selected || !gate.current.records?.some(row => row.id === selected)) return
         setPage(null)
         return run('readResponse', { sessionId, requestId: selected, index, offset, length: 65536 }, result => setPage(result.page))
       }
       const toggleRaw = () => {
-        if (!gate.current.alive || gate.current.mode !== 'diagnosis' || !permissions.readResponse || !selected || selected !== gate.current.selected) return
+        if (!gate.current.alive || gate.current.mode !== 'diagnosis' || !permissions.readResponse || !selected || selected !== gate.current.selected || !gate.current.records?.some(row => row.id === selected)) return
         gate.current.rawOpen = !gate.current.rawOpen; setRawOpen(gate.current.rawOpen)
         if (gate.current.rawOpen) return readRaw()
         stop(); setBusy(false); setPage(null)
@@ -1485,22 +1047,17 @@ window.__ModuleLoader__.load({
         navigate()
       }
       const association = row => t(row?.association === 'linked' ? 'inspectorAssociated' : row?.association === 'unverified' ? 'inspectorUnverified' : 'inspectorUnassociated')
-      const routeName = value => value === 'google-generative-ai' ? 'Gemini API' : value === 'google-vertex' ? 'Vertex AI' : (value ?? t('inspectorUnknown'))
+      const routeName = record => record?.model === 'gemini-4-argon-proxy' || record?.route === 'antigravity-proxy' ? 'Antigravity Proxy' : record?.route === 'google-generative-ai' ? 'Gemini API' : record?.route === 'google-vertex' ? 'Vertex AI' : (record?.route ?? t('inspectorUnknown'))
       const outcome = value => t(({ done: 'diagOutcome_done', 'tool-calls': 'diagOutcome_tool', 'max-tokens': 'diagOutcome_max', error: 'diagOutcome_error', aborted: 'diagOutcome_aborted' })[value] ?? 'diagOutcome_incomplete')
       const tone = value => value === 'done' || value === 'tool-calls' ? 'success' : value === 'error' ? 'error' : value === 'max-tokens' ? 'warn' : 'idle'
-      const metric = (key, label, value, note) => h('div', { className: 'ag-metric', key },
-        h('span', { className: 'ag-metric-label' }, label), h('strong', { className: 'ag-kpi-value', 'data-metric': key }, value),
-        note ? h('span', { className: 'muted ag-small' }, note) : null)
       const activeDetail = detail?.status === 'available' ? detail : null
-      const mix = extractTokenMix(activeDetail?.record)
       const count = records === null ? '—' : String(records.length)
-      const routes = new Set((records ?? []).map(row => row.route).filter(Boolean))
       const badge = row => h('span', { className: 'ag-pill', 'data-tone': tone(row.outcome) }, outcome(row.outcome))
       const placeholder = text => h('div', { className: 'ag-empty' }, h('span', { className: 'ag-empty-symbol', 'aria-hidden': true }, '◈'), h('p', null, text))
-      return h('section', { className: 'argon-inspector', 'aria-label': t('inspectorTitle'), 'data-dashboard-version': '1' },
-        h('style', null, INSPECTOR_CSS + OVERVIEW_CSS),
+      return h('section', { className: 'argon-inspector', 'aria-label': t('inspectorTitle'), 'data-debug-version': '1' },
+        h('style', null, INSPECTOR_CSS),
         h('header', { className: 'ag-header' },
-          h('div', null, h('span', { className: 'ag-eyebrow' }, t('inspectorEyebrow')), h('h2', null, t('inspectorTitle')), h('p', { className: 'muted' }, t('inspectorDashboardHint'))),
+          h('div', null, h('span', { className: 'ag-eyebrow' }, t('inspectorEyebrow')), h('h2', null, t('inspectorTitle')), h('p', { className: 'muted' }, t('inspectorDebugHint'))),
           h('span', { className: 'ag-pill' }, t('inspectorLocalOnly'))),
         h('div', { className: 'ag-toolbar' },
           h('div', { className: 'group ag-segmented', role: 'group', 'aria-label': t('inspectorTitle') }, ...[['diagnosis', 'inspectorDiagnosis'], ['operations', 'inspectorOperations']].map(([key, label]) =>
@@ -1515,39 +1072,23 @@ window.__ModuleLoader__.load({
         error ? h('p', { className: 'ag-notice', role: 'alert' }, error) : null,
         notice ? h('p', { className: 'ag-notice', role: 'status' }, notice) : null,
         mode === 'diagnosis' ? h(React.Fragment, null,
-          h('div', { className: 'ag-overview' },
-            metric('requests', t('inspectorKpiRequests'), count, t('inspectorMetaScope')),
-            metric('done', t('diagStatOk'), records === null ? '—' : String(records.filter(row => ['done', 'tool-calls'].includes(row.outcome)).length)),
-            metric('errors', t('diagStatErr'), records === null ? '—' : String(records.filter(row => row.outcome === 'error').length)),
-            metric('routes', t('inspectorKpiRoutes'), records === null ? '—' : String(routes.size), [...routes].map(routeName).join(' / '))),
-          h(ScopeOverview, { overview, t, metric, busy, allowed: permissions.listRequests && permissions.getOverview }),
           h('p', { className: 'muted ag-small' }, t('inspectorLocalHint')),
           h('div', { className: 'ag-workbench' },
             h('section', { className: 'card ag-request-column', 'aria-label': t('inspectorTimeline') },
               h('div', { className: 'ag-card-head' }, h('h3', null, t('inspectorTimeline')), h('span', { className: 'ag-pill' }, count)),
               !permissions.listRequests ? placeholder(t('inspectorDenied')) : records === null ? placeholder(t(busy ? 'inspectorLoading' : 'inspectorStart')) : records.length === 0 ? placeholder(t(messageId ? 'inspectorMessageEmpty' : 'inspectorEmpty')) : h(React.Fragment, null,
                 h('label', { className: 'ag-request-select' }, t('inspectorSelect'), h('select', { value: selected, disabled: busy || !permissions.getRequest, onChange: event => select(event.target.value) },
-                  h('option', { value: '' }, t('inspectorChoose')), ...records.map(row => h('option', { key: row.id, value: row.id }, row.startedAt + ' · ' + routeName(row.route) + ' · ' + row.id)))),
+                  h('option', { value: '' }, t('inspectorChoose')), ...records.map(row => h('option', { key: row.id, value: row.id }, row.startedAt + ' · ' + routeName(row) + ' · ' + row.id)))),
                 h('div', { className: 'ag-request-list' }, ...records.map(row => h('button', {
                   type: 'button', key: row.id, className: 'ag-request-item', 'data-request-id': row.id, 'aria-pressed': selected === row.id,
                   disabled: !permissions.getRequest, onClick: () => select(row.id),
-                }, h('span', { className: 'ag-request-line' }, h('strong', null, routeName(row.route)), badge(row)),
+                }, h('span', { className: 'ag-request-line' }, h('strong', null, routeName(row)), badge(row)),
                 h('span', { className: 'muted ag-small' }, (row.startedAt ?? '—') + ' · ' + (row.protocol ?? t('inspectorUnknown'))),
                 h('span', { className: 'ag-request-id' }, row.id))))),
               !permissions.getRequest ? h('p', { className: 'muted' }, t('inspectorDenied')) : null),
             h('div', { className: 'ag-detail-column' },
               activeDetail ? h(React.Fragment, null,
-                h('p', { className: 'ag-selected-scope' }, t('inspectorSelectedScope')),
-                h('div', { className: 'ag-selected-kpis' },
-                  metric('total', t('inspectorTokenTotal'), tokenText(mix.total)),
-                  metric('cache', t('inspectorCacheHitRate'), mix.cacheHitPct === null ? '—' : mix.cacheHitPct.toFixed(1) + '%'),
-                  metric('cost', t('inspectorEstimate'), typeof activeDetail.cost?.estimatedUsd === 'number' && Number.isFinite(activeDetail.cost.estimatedUsd) ? '$' + activeDetail.cost.estimatedUsd.toFixed(6) : '—')),
-                h('section', { className: 'card', 'aria-label': t('inspectorRequestSummary') },
-                  h('div', { className: 'ag-card-head' }, h('h3', null, t('inspectorRequestSummary')), badge(detail.record)),
-                  h('dl', { className: 'ag-definition-grid' }, ...[['inspectorRequestId', detail.record.id], ['inspectorRequestRoute', detail.record.route], ['inspectorProtocol', detail.record.protocol], ['inspectorFinish', detail.record.hops?.at(-1)?.finishReason]].map(([label, value]) =>
-                    h('div', { key: label }, h('dt', null, t(label)), h('dd', null, value ?? t('inspectorUnknown'))))),
-                  h('p', { className: 'muted ag-small' }, association(detail))),
-                h(UsageEvidence, { detail, t }),
+                h(RequestDebug, { detail, t, routeName, association, badge }),
                 h('section', { className: 'card' },
                   h('h3', null, t('inspectorRawTitle')),
                   h('p', { className: 'muted' }, t('inspectorCaptureStatus') + ': ' + t('inspectorCapture_' + (['disabled', 'captured', 'truncated', 'unavailable'].includes(detail.record.responseCapture?.status) ? detail.record.responseCapture.status : 'unknown'))),
@@ -1589,6 +1130,10 @@ window.__ModuleLoader__.load({
       const [pending, setPending] = React.useState(false)
       const [notice, setNotice] = React.useState('')
       const writing = React.useRef(false)
+      const alive = React.useRef(true)
+      const drafts = React.useRef({})
+      const [proxyDrafts, setProxyDrafts] = React.useState({})
+      React.useEffect(() => { alive.current = true; return () => { alive.current = false; drafts.current = {} } }, [])
       const val = state.value || {}
       const visible = val.showInModelPicker !== false
       const reasoning = val.reasoning || 'medium'
@@ -1616,18 +1161,29 @@ window.__ModuleLoader__.load({
       const isReadonly = isReady && !state.writable
       const disabled = pending || !isReady || !state.writable
 
-      const setField = (key, value) => formWritable(form) ? form.set(key, value) : false
+      const setField = (key, value) => alive.current && formWritable(form) ? form.set(key, value) : false
       const updateField = async (key, nextVal) => {
-        if (disabled || writing.current || !formWritable(form)) return
+        if (!alive.current || disabled || writing.current || !formWritable(form)) return
         if (!serviceSettingAllowed(form.getSnapshot().value || {}, key, nextVal)) { setNotice('tierNotVerified'); return }
         writing.current = true; setPending(true); setNotice('')
-        try { setNotice(await setField(key, nextVal) ? 'saved' : 'error') }
-        catch { setNotice('error') }
-        finally { writing.current = false; setPending(false) }
+        try {
+          const saved = await setField(key, nextVal)
+          if (alive.current && saved && Object.hasOwn(drafts.current, key) && drafts.current[key] === nextVal) {
+            delete drafts.current[key]; setProxyDrafts({ ...drafts.current })
+          }
+          if (alive.current) setNotice(saved ? 'saved' : 'error')
+        }
+        catch { if (alive.current) setNotice('error') }
+        finally { writing.current = false; if (alive.current) setPending(false) }
       }
 
+      const editProxy = (key, value) => {
+        if (!alive.current || disabled || !formWritable(form)) return
+        drafts.current[key] = value; setProxyDrafts({ ...drafts.current })
+      }
+      const saveProxy = key => Object.hasOwn(drafts.current, key) ? updateField(key, drafts.current[key]) : undefined
       const resetAll = async () => {
-        if (disabled || writing.current || !formWritable(form)) return
+        if (!alive.current || disabled || writing.current || !formWritable(form)) return
         writing.current = true; setPending(true); setNotice('')
         try {
           const ok1 = await setField('showInModelPicker', true)
@@ -1643,9 +1199,16 @@ window.__ModuleLoader__.load({
           const ok8 = await setField('interactionsBackground', false)
           const ok9 = await setField('allowInteractionStorage', false)
           const ok10 = await setField('retainRawResponses', false)
-          setNotice(ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11 && ok12 && ok13 ? 'saved' : 'error')
-        } catch { setNotice('error') }
-        finally { writing.current = false; setPending(false) }
+          const ok14 = await setField('proxyEnabled', false)
+          const ok15 = await setField('proxyBaseUrl', 'http://127.0.0.1:8045/v1beta')
+          const ok16 = await setField('proxyApiKey', '')
+          if (!alive.current) return
+          if (ok15) delete drafts.current.proxyBaseUrl
+          if (ok16) delete drafts.current.proxyApiKey
+          setProxyDrafts({ ...drafts.current })
+          setNotice(ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11 && ok12 && ok13 && ok14 && ok15 && ok16 ? 'saved' : 'error')
+        } catch { if (alive.current) setNotice('error') }
+        finally { writing.current = false; if (alive.current) setPending(false) }
       }
 
       const fmt = n => numberFormatter.format(n)
@@ -1675,25 +1238,7 @@ window.__ModuleLoader__.load({
           '.local-vertex-argon .adv-details summary{cursor:pointer;font-weight:600;font-size:14px;padding:2px 0;user-select:none}' +
           '.local-vertex-argon .adv-body{margin-top:10px}' +
           '.local-vertex-argon ol{padding-left:20px;margin:6px 0}.local-vertex-argon li{margin:4px 0}' +
-          '.local-vertex-argon .diag-toggle{border:none;background:transparent;padding:4px 0;min-width:0;text-align:left}' +
-          '.local-vertex-argon .diag-toggle:hover:not(:disabled){background:transparent;opacity:.85}' +
-          '.local-vertex-argon .diag-stats{display:flex;gap:12px;flex-wrap:wrap;padding:8px 12px;border-radius:8px;background:var(--dsw-alias-bg-layer-2);margin-bottom:10px;font-size:12px}' +
-          '.local-vertex-argon .recovery-confirm{margin-top:10px;padding-top:8px;border-top:1px solid var(--dsw-alias-border-l2)}' +
-          '.local-vertex-argon .recovery-risk{display:flex;align-items:flex-start;gap:8px;margin-bottom:8px}.local-vertex-argon .recovery-risk input{accent-color:var(--dsw-alias-brand-primary)}' +
-          '.local-vertex-argon .diag-stat{font-weight:500}' +
-          '.local-vertex-argon .diag-list{display:flex;flex-direction:column;gap:8px;max-height:360px;overflow-y:auto;padding-right:2px}' +
-          '.local-vertex-argon .diag-item{padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);font-size:12.5px}' +
-          '.local-vertex-argon .diag-item-head{display:flex;gap:8px;align-items:center;flex-wrap:wrap}' +
-          '.local-vertex-argon .diag-mono{font-family:ui-monospace,monospace;font-size:12px}' +
-          '.local-vertex-argon .diag-chip{padding:1px 7px;border-radius:6px;background:var(--dsw-alias-bg-layer-2);font-size:11.5px}' +
-          '.local-vertex-argon .diag-badge{padding:1px 8px;border-radius:999px;font-weight:600;font-size:11.5px}' +
-          '.local-vertex-argon .badge-ok{color:var(--dsw-alias-state-success-primary);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 12%,transparent)}' +
-          '.local-vertex-argon .badge-recovered{color:var(--dsw-alias-brand-primary);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 14%,transparent)}' +
-          '.local-vertex-argon .badge-warn{color:var(--dsw-alias-state-warn-primary);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 14%,transparent)}' +
-          '.local-vertex-argon .badge-err{color:var(--dsw-alias-state-error-primary);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 12%,transparent)}' +
-          '.local-vertex-argon .badge-muted{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-2)}' +
-          '.local-vertex-argon .diag-tokens{margin-top:6px;font-size:12px;font-family:ui-monospace,monospace}' +
-          '.local-vertex-argon .diag-hops{margin-top:6px;padding-top:6px;border-top:1px dashed var(--dsw-alias-border-l2);display:flex;flex-direction:column;gap:3px;font-family:ui-monospace,monospace;font-size:11.5px;color:var(--dsw-alias-label-secondary)}'
+          '.local-vertex-argon input{font:inherit;width:100%;min-width:0;padding:7px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary)}.local-vertex-argon label{display:block;margin:10px 0}'
         ),
         h('h2', null, t('title')),
         h('p', { className: 'muted' }, t('subtitle')),
@@ -1754,6 +1299,21 @@ window.__ModuleLoader__.load({
           h('p', { className: 'muted' }, t('protocolHint')),
           h('p', { className: 'muted', id: 'argon-tier-protocol-hint' }, t('tierProtocolBlocked')),
           budgetMismatch ? h('p', { role: 'alert', className: 'status error' }, budgetWarningText) : null,
+        ),
+        h('section', { className: 'card', 'aria-label': t('proxyTitle') },
+          h('h3', null, t('proxyTitle')),
+          h('div', { className: 'row' }, h('strong', { id: 'argon-proxy-enabled' }, t('proxyEnabled')),
+            h('button', { type: 'button', role: 'switch', 'aria-checked': val.proxyEnabled === true,
+              'aria-labelledby': 'argon-proxy-enabled', disabled, onClick: () => updateField('proxyEnabled', val.proxyEnabled !== true),
+            }, t(val.proxyEnabled === true ? 'longDecodeOn' : 'longDecodeOff'))),
+          h('p', { className: 'muted' }, t('proxyHint')),
+          ...[['proxyBaseUrl', 'text', 'http://127.0.0.1:8045/v1beta', 'proxySaveBaseUrl'], ['proxyApiKey', 'password', 'sk-... / ANTIGRAVITY_API_KEY', 'proxySaveApiKey']].map(([key, type, placeholder, saveLabel]) =>
+            h('div', { key }, h('label', null, t(key), h('input', {
+              name: key, type, placeholder, autoComplete: 'off', spellCheck: false, disabled,
+              value: proxyDrafts[key] ?? val[key] ?? (key === 'proxyBaseUrl' ? 'http://127.0.0.1:8045/v1beta' : ''),
+              onChange: event => editProxy(key, event.target.value), onBlur: () => saveProxy(key),
+            })), h('button', { type: 'button', disabled, onClick: () => saveProxy(key) }, t(saveLabel)))),
+          h('p', { className: 'muted' }, t('proxySaveHint')),
         ),
         h('div', { className: 'card' },
           h('h3', null, t('tierTitle')),
@@ -1947,7 +1507,6 @@ window.__ModuleLoader__.load({
         }
 
         const callInspector = (method, request, signal) => callDiagnostics(method, parseInspectorRequest(method, request), parseInspectorResult, false, signal)
-        const loadDiagnostics = (limit = 20) => callDiagnostics('listRecent', { limit }, parseListRecentResult)
         const loadRecovery = (limit = 20) => callDiagnostics('listRecovery', { limit }, parseRecoveryResult)
         const releaseRecovery = request => callDiagnostics('releaseUnknown', parseReleaseRequest(request), parseReleaseResult, true)
 

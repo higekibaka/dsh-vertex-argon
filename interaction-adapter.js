@@ -19,7 +19,8 @@ export function assertInteractionOptions(options, cfg, route) {
 
 export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, getRoutes, taskHub, recordDiagnostic, responseHub, structuredOutput }) {
   return async function* interactions(options, cfg) {
-    const route = options.model === 'gemini-4-argon-google' ? 'google-generative-ai' : 'google-vertex'
+    const proxy = options.model === 'gemini-4-argon-proxy'
+    const route = proxy || options.model === 'gemini-4-argon-google' ? 'google-generative-ai' : 'google-vertex'
     const requestController = new AbortController()
     const signal = options.signal ? AbortSignal.any([options.signal, requestController.signal]) : requestController.signal
     let tracker, durable, claim, complete = false, usage, firstInput, firstCached, hopIndex = 0
@@ -31,12 +32,10 @@ export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, get
       const u = event.interaction?.usage ?? event.usage ?? event.metadata?.total_usage
       if (u && typeof u === 'object') {
         usage = { ...usage, ...u }
-        tracker?.recordUsageAggregate('interactions', usage)
         if ((!originalPromptClosed || firstInput === undefined) && Number.isSafeInteger(u.total_input_tokens) && u.total_input_tokens > 0) {
           firstInput = u.total_input_tokens; firstCached = usage.total_cached_tokens ?? 0
         }
       }
-      if (event.event_type === 'step.stop') tracker?.recordUsageRow('interaction-step', event.index, 'interactions', event.step_usage, true)
       if (event.event_type === 'step.stop' && modelOutputs.has(event.index)) originalPromptClosed = true
     }
     const recordUsage = reported => {
@@ -45,6 +44,10 @@ export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, get
         reportedCacheTokens: firstCached ?? reported?.cacheReadTokens,
         outputTokens: usage?.total_output_tokens,
         thoughtsTokens: usage?.total_thought_tokens,
+        totalTokens: firstInput !== undefined && usage ? firstInput + (usage.total_output_tokens ?? 0) + (usage.total_thought_tokens ?? 0) + (usage.total_tool_use_tokens ?? 0) : reported?.totalTokens,
+        billedOutputTokens: usage?.total_output_tokens,
+        billedThoughtsTokens: usage?.total_thought_tokens,
+        billedToolTokens: usage?.total_tool_use_tokens ?? 0,
         billedPromptTokens: usage?.total_input_tokens,
         billedCachedTokens: usage?.total_cached_tokens ?? 0,
         billedTotalTokens: usage?.total_tokens,
@@ -57,19 +60,32 @@ export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, get
       if (cfg.interactionsBackground) taskHub?.requireReady()
       if (cfg.interactionsBackground && !taskHub) throw new Error('Background recovery storage is not configured.')
       const routes = getRoutes(cfg)
-      const connection = await createGoogleConnection(GoogleGenAI, { route, resolveSecret, apiKeyEnv: routes.googleApiKeyEnv, baseURL: route === 'google-vertex' ? routes.vertexBaseUrl : routes.googleBaseUrl, onResponse: receipt => { if (route === 'google-generative-ai' && receipt.operation === 'create') tracker?.recordServiceTier(receipt.serviceTier, 'response-header') } })
-      tracker = createArgonDiagnosticTracker({ route, regionClass: connection.regionClass, model: options.model, protocol: 'interactions', background: cfg.interactionsBackground, apiVersion: connection.apiVersion, thinkingLevel: controls.reasoning.toUpperCase(), longDecode: controls.maxTokens > 65536, maxTokens: controls.maxTokens, sessionId: options.sessionId, requestedServiceTier: servicePolicy.tier }, recordDiagnostic, { responseHub, retainRawResponses: cfg.retainRawResponses })
+      const connection = await createGoogleConnection(GoogleGenAI, { route, resolveSecret, apiKey: proxy ? cfg.proxyApiKey.trim() || undefined : undefined, apiKeyEnv: proxy ? 'ANTIGRAVITY_API_KEY' : routes.googleApiKeyEnv, baseURL: proxy ? cfg.proxyBaseUrl : route === 'google-vertex' ? routes.vertexBaseUrl : routes.googleBaseUrl, onResponse: receipt => { if (route === 'google-generative-ai' && receipt.operation === 'create') tracker?.recordServiceTier(receipt.serviceTier, 'response-header') } })
+      tracker = createArgonDiagnosticTracker({ route, model: options.model, protocol: 'interactions', background: cfg.interactionsBackground, apiVersion: connection.apiVersion, thinkingLevel: controls.reasoning.toUpperCase(), longDecode: controls.maxTokens > 65536, maxTokens: controls.maxTokens, sessionId: options.sessionId, requestedServiceTier: servicePolicy.tier }, recordDiagnostic, { responseHub, retainRawResponses: cfg.retainRawResponses })
       tracker?.setApiVersion(connection.apiVersion)
       const observe = async (operation, args, trigger) => {
         const hop = tracker?.beginHop({ hopIndex: ++hopIndex, trigger, usedContinuationToken: trigger !== 'interaction-create', backoffDelayMs: 0, body: operation === 'create' ? JSON.stringify(args[0]) : undefined })
-        let status
+        let status, hopUsage
+        const recordHopUsage = response => {
+          const u = response?.interaction?.usage ?? response?.usage ?? response?.metadata?.total_usage
+          if (!u || typeof u !== 'object') return
+          hopUsage = { ...hopUsage, ...u }
+          hop?.recordTokenUsage({
+            promptTokens: hopUsage.total_input_tokens,
+            cachedTokens: hopUsage.total_cached_tokens,
+            outputTokens: hopUsage.total_output_tokens,
+            thoughtsTokens: hopUsage.total_thought_tokens,
+            totalTokens: hopUsage.total_tokens,
+          })
+        }
         try {
           const response = await (durable ?? connection.transport)[operation](...args)
-          if (!response?.[Symbol.asyncIterator]) { tracker?.observeResponse('interaction-object', hopIndex, response); return response }
+          if (!response?.[Symbol.asyncIterator]) { tracker?.observeResponse('interaction-object', hopIndex, response); recordHopUsage(response); hop?.finish({ finishReason: terminalStates.has(response?.status) ? response.status.toUpperCase() : undefined }); return response }
           return (async function* () {
             try {
               for await (const event of response) {
                 tracker?.observeResponse('interaction-event', hopIndex, event)
+                recordHopUsage(event)
                 status = event.interaction?.status ?? event.status ?? status
                 hop?.onChunk({ status: 200, hasCheckpoint: Boolean(event.event_id), finishReason: terminalStates.has(status) ? status.toUpperCase() : undefined })
                 yield event
@@ -107,7 +123,7 @@ export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, get
         return block
       }) }))
       const { streamInteractions } = await import('./interactions.js')
-      for await (const chunk of streamInteractions({ ...options, messages, signal }, { route, upstreamModel: 'gemini-4-argon', ...controls, serviceTier: route === 'google-generative-ai' ? servicePolicy.tier : undefined, background: cfg.interactionsBackground, store: cfg.allowInteractionStorage, transport, resolveImage, structuredOutput, onEvent: observed, onTerminal: () => { complete = true; tracker?.completeUsageAggregate() }, onExit: reason => { exitReason = reason } })) {
+      for await (const chunk of streamInteractions({ ...options, messages, signal }, { route, upstreamModel: 'gemini-4-argon', ...controls, serviceTier: route === 'google-generative-ai' ? servicePolicy.tier : undefined, background: cfg.interactionsBackground, store: cfg.allowInteractionStorage, transport, resolveImage, structuredOutput, onEvent: observed, onTerminal: () => { complete = true }, onExit: reason => { exitReason = reason } })) {
         if (chunk.type === 'usage') {
           recordUsage(chunk.usage)
           if (firstInput !== undefined) {

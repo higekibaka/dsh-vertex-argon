@@ -1,273 +1,204 @@
-<div align="center">
-  <img src="./icon.svg" width="80" height="80" alt="Vertex Argon Icon" />
-  <h1>dsh-vertex-argon</h1>
-  <p><strong>Google Vertex AI &amp; Gemini Developer API 双通道 · 双协议 Gemini 4 Argon 全功能插件（面向 <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a>）</strong></p>
-  <p>
-    <a href="https://www.npmjs.com/package/dsh-vertex-argon"><img src="https://img.shields.io/npm/v/dsh-vertex-argon?style=flat-square&color=2563eb" alt="npm version" /></a>
-    <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/DSH-0.2.1--rc.2-4f46e5?style=flat-square" alt="DSH compatibility" /></a>
-    <a href="#-工作原理与双通道--双协议架构流向"><img src="https://img.shields.io/badge/Protocols-GenerateContent%20%7C%20Interactions-0284c7?style=flat-square" alt="Protocols" /></a>
-    <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/4-argon"><img src="https://img.shields.io/badge/Thinking-LOW%20%7C%20MEDIUM%20%7C%20HIGH-0ea5e9?style=flat-square" alt="Thinking Levels" /></a>
-    <a href="#️-服务层级service-tiers与-vertex-paygo-能力矩阵"><img src="https://img.shields.io/badge/Service%20Tiers-Standard%20%7C%20Flex%20%7C%20Priority-8b5cf6?style=flat-square" alt="Service Tiers" /></a>
-    <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-10b981?style=flat-square" alt="License" /></a>
-    <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white" alt="Powered by dsh" /></a>
-  </p>
-  <p>
-    <a href="#-为什么需要这个插件">✨ 核心对比</a> ·
-    <a href="#-真实超长解码实测基准奥德赛七号全年-365-天舰长日志">🧪 98.9K 长解码实测</a> ·
-    <a href="#-工作原理与双通道--双协议架构流向">🔄 架构图解</a> ·
-    <a href="#-argon-inspector-检视器模态用量账本与成本估算">📊 Inspector 检视器</a> ·
-    <a href="#-安装方法">🚀 快速安装</a> ·
-    <a href="#-双通道凭据配置">🔑 凭据配置</a> ·
-    <a href="#️-设置页面与完整配置项参考">⚙️ 配置参考</a>
-  </p>
-</div>
+# dsh-vertex-argon
 
----
+![Vertex Argon](<icon.svg>)
 
-`dsh-vertex-argon` 为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) 提供生产级的 **Gemini 4 Argon** 双通道接入支持。插件同时打通 **Google Vertex AI**（ADC 服务账号 / Express API Key）与 **Google Gemini Developer API**（AI Studio API Key），完整支持 **`GenerateContent` (`v1beta1` / `v1`) 多跳长解码续传**与 **`Interactions` (`v1beta`) 持久化后台恢复**双协议，配备显式服务层级路由（`Standard` / `Flex` / `Priority`）、仅签名空 `Part` 无损回放、模态级 Token 账本、公开价格成本估算、**Argon Inspector 全景检视台**以及只读 Agent 诊断工具 `argon_inspect`。
+**为 [DeepSeek Harness](<https://github.com/deepseek-ai/deepseek-harness>) 提供 Vertex AI、Gemini API、Antigravity 三路由，以及 GenerateContent / Interactions 双协议接入。**
 
-Current release: **[1.5.2](https://github.com/higekibaka/dsh-vertex-argon)** · [npm](https://www.npmjs.com/package/dsh-vertex-argon) · [CHANGELOG](./CHANGELOG.md)
+工程版本 **1.6.0**；兼容 **DSH 0.2.1-rc.2 / 0.2.1-rc.3**，Node.js `^22.19.0 || >=24.0.0`。版本与依赖以 [package.json](<package.json>) 为准；历史变更见 [CHANGELOG.md](<CHANGELOG.md>)。本文说明本地工程，不代表已安装、已发布或已完成本轮云端实测。
 
----
+[三路由与凭据](<#三路由与凭据>) · [完整配置](<#完整配置16-项>) · [流式恢复](<#generatecontent四项韧性机制>) · [Inspector](<#argon-inspectordebug-与-operations>) · [历史实测](<#历史实测奥德赛七号全年舰长日志>)
 
-## ✨ 为什么需要这个插件？
+## 核心能力
 
-| 能力维度 | DSH 内置 `google` / `google-vertex` 默认适配器 | `dsh-vertex-argon` (v1.5.2) |
-|---|---|---|
-| **思考控制参数** | 误传 `thinkingBudget: -1` 触发云端 `HTTP 400`，或传入超限档位 `max` 报错 | 原生映射 `thinkingLevel: "LOW" \| "MEDIUM" \| "HIGH"`，自动将 `max` 收敛为 `high`，剔除无效采样参数 |
-| **思维链与空块签名回放** | 容易丢失不带文本的独立 `thoughtSignature` `Part`，影响长链路多轮推理与工具续答 | 固定开启 `includeThoughts: true`，通过 `google-signatures.js` 无损编码并原样回放仅含签名的空 `Part` |
-| **GenerateContent 超长解码** | 单次锁死 64K，遇 `CONTINUATION` 直接截断结束；无流内错误帧识别 | 自动切换 `v1beta1` 执行 `continuationToken` 多跳续写（最高 `1,048,576` 输出 token 预算 / 最多 32 跳）、同一检查点无进展最多 3 次指数退避重连与 HTTP 200 SSE 内联 `{ error }` 拦截 |
-| **Interactions 协议与后台恢复** | 不支持 `Interactions` 协议及后台持久化执行 | 原生支持 `Interactions` (`v1beta`)、`creating` 预写防重发锁、以及基于 `last_event_id` 游标的流式断点续读 |
-| **服务层级与 PayGo 控制** | 仅默认标准队列，无层级路由与响应账单核验 | 支持按通道显式指定 `standard` / `flex` / `priority` 及 Vertex `PayGo-Only` 共享池请求头，未验证组合发包前 Fail-Closed 拦截 |
-| **可观测性、用量与成本估算** | 仅展示粗粒度总 Token，多跳长解码易虚报上下文水位触发误压缩 | **水位线 Token 与累计计费 Token 双轨分离** + 模态级（文本/图像/音频/视频/文档）拆解 + 公开价格非账单 USD 估算 + **Argon Inspector** 检视台与 `argon_inspect` 工具 |
+- **独立第三模型**：Antigravity 使用 `gemini-4-argon-proxy`，独立地址与专属密钥，不覆盖 Gemini API 模型。
+- **GenerateContent 长解码**：单跳输出上限 `65,536`，输出预算配置最高 `1,048,576`，所有尝试共用 32 跳上限；支持检查点恢复、阶段超时、安全首包重试和仅思考结束自愈。
+- **Interactions 后台恢复**：显式启用后台与存储后，用 `creating` 预写锁防止未知创建被自动重发，以 `last_event_id` 续读已知任务。
+- **签名保真**：保留并回放仅含 `thoughtSignature` / `thought_signature` 的空 `Part`；思考档位为 `low` / `medium` / `high`，宿主传入 `max` 时收敛为 `high`。
+- **聚焦请求诊断**：只展示请求摘要、基本 Token 水位、逐跳轨迹、原始响应和完整 JSON，不再提供费用估算、模态用量或范围概览。
 
----
+## 三路由与凭据
 
-## 🧪 真实超长解码实测基准：奥德赛七号全年 365 天舰长日志
+Provider ID 保持 `google-vertex-argon`，模型位于 **Vertex Argon** 分组。实现见 [adapter.js](<adapter.js>) 与 [google-connection.js](<google-connection.js>)。
 
-`dsh-vertex-argon` v1.5.0 的 `GenerateContent` 多跳长解码引擎已在真实高密度长文本与状态保持压力测试（**Temporal LongGenBench — 奥德赛七号全年 365 天舰长日志**）中完成实测验证：
+| 接入通道 | 独立模型 ID | 协议/诊断 `route` | 协议与服务层级配置 |
+|---|---|---|---|
+| Vertex AI | `gemini-4-argon` | `google-vertex` | `vertexProtocol` / `vertexServiceTier` |
+| Gemini Developer API | `gemini-4-argon-google` | `google-generative-ai` | `googleProtocol` / `googleServiceTier` |
+| Antigravity Proxy | `gemini-4-argon-proxy` | `google-generative-ai` | 复用 `googleProtocol` / `googleServiceTier` |
 
-- **测试任务约束**：在**单次模型回复回合**内，严禁跳日、严禁摘要省略，连续输出深空科考船「奥德赛七号」从 `[DAY 001 | 2186-01-01]` 至 `[DAY 365 | 2186-12-31]` 全部 **365 篇**每日日志（每天 180–250 中文字），并全程维持：
-  1. **每日递归状态台账**：每天首行精确计算并输出 `[燃料: XX.XX% | 氧气: XX.XX% | 船体: XX.XX% | 船员: X/6 | 距地: X.XXXX光年]`（初始值：燃料 `100.00%`、氧气 `100.00%`、船体 `100.00%`、船员 `6/6`、距地 `0.0000光年`；日常基础消耗：燃料 `-0.20%/天`，距地 `+0.0120光年/天`）。
-  2. **双周期强制不变式**：
-     - **`PI-1`（每逢第 7 的倍数天：`DAY 007, 014, ..., 364`）**：人工清理聚变偏滤器，当日燃料消耗翻倍为 `-0.40%`。
-     - **`PI-2`（每个公历自然月最后一天：`01-31`, `02-28`, ..., `12-31`）**：船载 AI「赫尔墨斯」输出当月航行数据汇总与船员心理健康评级（`A`–`D` 级）。
-  3. **四处单点长程锚定事件**：
-     - **`DAY 100 (2186-04-10)`**：捕获冰彗星提炼重水，当日结算后燃料一次性 `+12.50%`（封顶 `100.00%`）。
-     - **`DAY 200 (2186-07-19)` – `DAY 215 (2186-08-03)`**：绿藻生态舱基因突变，`DAY 200` 氧气骤降 `-8.00%`，`DAY 201–214` 每天额外泄漏 `-0.50%`，直至 `DAY 215` 彻底修复并将氧气恢复锁定在 `95.00%`。
-     - **`DAY 300 (2186-10-27)`**：接收到半人马座方向无法解释的质数矩阵引力波信号并召开全员听证会。
-     - **`DAY 365 (2186-12-31)`**：抵达奥尔特云边界星门中继站，完成全年航行与台账终审。
+这里的“三路由”指三个独立模型与连接目标，**并未新增第三种诊断 `route` 值**。Inspector 根据独立 `model` 显示 **Antigravity Proxy**。代理启用条件为 `proxyEnabled === true || explicitRoutes.hasProxy === true`；默认关闭，仅配置密钥不会自动开启。
 
-### 实测诊断账本数据（Diagnostic ID: `f911d0c5-fe7a-43ca-b205-5d2202105a41`）
+### Vertex AI
 
-| 指标维度 | 实测记录值 |
-|---|---|
-| **通道 / 模型 / 协议** | `google-vertex` / `gemini-4-argon` / `generate-content` (`v1beta1`, `regionClass: "global"`) |
-| **思考档位 / 配置预算** | `LOW` / `configuredMaxTokens: 131,072` (`longDecodeEnabled: true`) |
-| **服务层级（请求 vs 实测回执）** | `requested: "priority"` → `observed: "standard"` (`source: "traffic-type"`) |
-| **单回合总输出 Token** | **98,985 tokens**（单次逻辑回合无缝跨越 65,536 单跳硬上限） |
-| **第 1 跳（Initial Hop）** | `HTTP 200` · 耗时 `961,781 ms` (~16.0 分钟) · `1,291` 个 SSE 块 · 输入 `52,737` tokens · 输出满额 **`65,536` tokens** · `finishReason: "CONTINUATION"` |
-| **第 2 跳（Continuation Hop）** | `HTTP 200` · 自动携带 `continuationToken` 续写 · 耗时 `476,132 ms` (~7.9 分钟) · 输入 `118,274` tokens · 输出 **`33,449` tokens** · `finishReason: "STOP"` |
-| **总耗时与流稳定性** | **1,437,917 ms（约 23 分 58 秒）** · `hopCount: 2` · `continuationCount: 1` · `reconnectCount: 0` · `outcome: "done"` |
-| **双轨 Token 计量** | 上报宿主上下文水位 `reportedInputTokens: 52,737` · 多跳累计计费输入 `billedPromptTokens: 171,011` · 累计总计费 `billedTotalTokens: 269,996` |
+- ADC 模式使用 `GOOGLE_APPLICATION_CREDENTIALS`、`GOOGLE_CLOUD_PROJECT`（或 `GCLOUD_PROJECT`）与 `GOOGLE_CLOUD_LOCATION`。
+- Vertex Express 模式使用 `GOOGLE_CLOUD_API_KEY`。
+- Google/Vertex 凭据按 DSH `credentials` → `launchEnvironment` → `process.env` 解析；凭据服务抛错时立即失败，不偷偷回退到旧环境密钥。
 
-> **实测结论**：在近 **9.9 万 Output Tokens** 的单回合连续生成中，`GenerateContent` 多跳续传引擎在 65,536 token 边界处零丢字无缝衔接，从 `DAY 001` 到 `DAY 365` 全年日志完整闭环，所有周期性偏滤器双倍燃耗、月末赫尔墨斯评级与四处单点灾变/补给锚点全部严格命中。
+### Gemini API
 
----
+使用 `GOOGLE_API_KEY` 或 `GEMINI_API_KEY`；其连接地址与凭据不会因启用 Antigravity 而改变。
 
-## 🔄 工作原理与双通道 · 双协议架构流向
+### Antigravity Proxy
 
-```mermaid
-flowchart TD
-    U["DSH 会话请求 / 模型选择器"] --> R{"路由与凭据解析<br/>credentials → launchEnvironment → process.env"}
-    R -->|"gemini-4-argon (Vertex AI)"| V["google-vertex<br/>ADC 服务账号 或 Express API Key"]
-    R -->|"gemini-4-argon-google (Gemini API)"| G["google-generative-ai<br/>GOOGLE_API_KEY / GEMINI_API_KEY"]
+在 **设置 → Vertex Argon → Antigravity Proxy** 中启用独立模型，配置地址与专属密钥：
 
-    V --> S["service-level.js 能力矩阵校验<br/>Standard / Flex / Priority & Vertex PayGo"]
-    G --> S
+- `proxyBaseUrl` 默认 `http://127.0.0.1:8045/v1beta`；只接受 `http` / `https`。仅有根路径时补 `/v1beta`，非根路径去掉末尾斜杠。
+- `proxyApiKey` 先去除首尾空白；有值时使用设置值，否则只读取 `ANTIGRAVITY_API_KEY`。
+- **绝不回退到 Google/Vertex 密钥，也不把代理密钥送往 Google/Vertex。** 缺少专属密钥时应明确失败。
+- 地址和密钥使用草稿输入，失焦或点击保存后提交，重置恢复默认值。填写的 Key 保存在插件配置中，密码框仅遮挡显示；也可留空并使用 DSH 凭据中的 `ANTIGRAVITY_API_KEY`，避免直接填写配置。设置实时更新时，模型列表缓存随之失效。
+- 代理沿用 Google 协议与服务层级配置；具体端点是否支持所选能力仍取决于代理实现，不是新增的云端验证结论。
 
-    S --> P{"按通道选择的协议引擎"}
-    P -->|"generate-content (默认)"| GC["GenerateContent 引擎 (v1beta1 / v1)<br/>• continuationToken 多跳续传 (最高 32 跳)<br/>• 检查点指数退避重连 & 内联 { error } 拦截<br/>• google-signatures.js 空块签名无损回放"]
-    P -->|"interactions"| IA["Interactions 引擎 (v1beta)<br/>• 前台 SSE 流式 或 后台持久化执行<br/>• creating 预写锁防止断网重复创建计费<br/>• last_event_id 游标流式断点续读"]
+## 完整配置：16 项
 
-    GC --> D["诊断、关联与公开价格估算中心<br/>• request-association.js 绑定精确 messageId<br/>• usage-details.js 模态拆解 & 水位/计费双轨计量<br/>• pricing.js 公开价格表非账单 USD 估算<br/>• response-store.js 可选上游 JSON 响应帧"]
-    IA --> D
+以下为 [index.js](<index.js>) 中的全部 `volatile` 配置。保存后实时更新；界面由 [client.js](<client.js>) 提供。
 
-    D --> UI["Argon Inspector 检视台 & argon_inspect 工具<br/>右侧栏 · 对话主视图 · 单条回复图标 · 只读云端 ID 查询"]
+| 分组 | 字段 | 默认值 | 范围与说明 |
+|---|---|---|---|
+| 基础与生成 | `showInModelPicker` | `true` | 是否在模型选择器显示插件模型 |
+| 基础与生成 | `reasoning` | `medium` | `low` / `medium` / `high` |
+| 基础与生成 | `maxTokens` | `65536` | `1`–`1048576`；超过单跳预算需启用长解码 |
+| 基础与生成 | `contextWindow` | `1048576` | `1`–`1048576` |
+| 基础与生成 | `longDecode` | `true` | GenerateContent 多跳/检查点续传和仅思考自愈；关闭不禁用零交付初始重试 |
+| 协议与服务层级 | `googleProtocol` | `generate-content` | `generate-content` / `interactions`；Gemini API 与代理共用 |
+| 协议与服务层级 | `vertexProtocol` | `generate-content` | `generate-content` / `interactions` |
+| 协议与服务层级 | `googleServiceTier` | `standard` | `standard` / `flex` / `priority`；Gemini API 与代理共用 |
+| 协议与服务层级 | `vertexServiceTier` | `standard` | `standard` / `flex` / `priority`；实际允许组合见下表 |
+| 协议与服务层级 | `vertexPaygoOnly` | `false` | 仅 Vertex GenerateContent 的共享池请求 |
+| Antigravity Proxy | `proxyEnabled` | `false` | 启用独立代理模型；显式路由也可开启 |
+| Antigravity Proxy | `proxyBaseUrl` | `http://127.0.0.1:8045/v1beta` | HTTP(S) 代理地址，按上述规则规范化 |
+| Antigravity Proxy | `proxyApiKey` | 空字符串 | 去除首尾空白后优先使用；空值只回退 `ANTIGRAVITY_API_KEY` |
+| Interactions 后台模式 | `interactionsBackground` | `false` | 启用后台执行，须同时允许云端存储 |
+| Interactions 后台模式 | `allowInteractionStorage` | `false` | 允许发送 `store: true`，用于后台恢复 |
+| 诊断与高级 | `retainRawResponses` | `false` | 显式允许捕获新的上游 JSON 响应；关闭不清空旧记录 |
+
+### 服务层级与 Vertex PayGo
+
+[service-level.js](<service-level.js>) 在发包前校验能力矩阵；未支持的组合以 `ARGON_SERVICE_TIER_UNVERIFIED` 拒绝，不自动切换协议或层级。
+
+| `route` | 协议 | 服务层级 | `vertexPaygoOnly` |
+|---|---|---|---|
+| `google-generative-ai`（含代理） | `generate-content` | `standard` / `flex` / `priority` | 不适用 |
+| `google-generative-ai`（含代理） | `interactions` | `standard` / `flex` / `priority` | 不适用 |
+| `google-vertex` | `generate-content` | `standard` / `priority` | 支持 |
+| `google-vertex` | `interactions` | 仅 `standard` | 不支持 |
+
+Vertex GenerateContent 通过 `X-Vertex-AI-LLM-Shared-Request-Type: priority` 指定优先层级，通过 `X-Vertex-AI-LLM-Request-Type: shared` 指定 PayGo 共享池。请求值与响应观测值分别保留，不把请求值当作实际执行回执。
+
+## GenerateContent：四项韧性机制
+
+实现见 [generate-content.js](<generate-content.js>)；精确边界见 [协议合同](<docs/implementation/DECISIONS.md>)。开启 `longDecode` 后，Vertex 使用 `v1beta1`，Gemini API / Antigravity 使用 `v1beta`。关闭长解码仅禁用多跳/检查点续传与仅思考自愈，零交付初始重试和阶段超时仍可用。
+
+1. **流内错误与服务端等待建议**：HTTP `200` 的 SSE 也可能包含顶层 `{ error }`。插件单独记录流内状态，解析 `Retry-After`、Google `details` 中的重试/配额恢复延时以及消息中的等待提示，取有效建议并加 `200ms` 余量，与本地退避共同决定等待；解析后的延时超过 `60s` 立即失败，不长期占用重试。
+2. **每跳独立的阶段超时**：首包、思考、思考到可见输出的转换阶段各 `180s`，可见文本或工具流的滑动等待为 `120s`。每跳使用独立 `AbortController`；上游阻塞可终止，不把用户主动取消当作可恢复故障，也不让上一跳定时器影响下一跳。消费方暂停读取不消耗上游等待预算。
+3. **首包安全重试与检查点恢复**：可恢复故障发生时，若本跳尚未向调用方 `yield` 任何分片，即使没有 `continuationToken` 也可 `retry-initial`，初次尝试之外最多重试 3 次；已有分片交付但没有检查点时不得整段重试。有检查点则丢弃未提交尾段并从检查点重连，同一检查点无进展也最多重试 3 次。**首个检查点之前实时 `yield`，不把整段输出全部缓存到检查点。**
+4. **仅思考 STOP 自愈**：一跳只有思考、没有可见回答或工具调用，却以 `STOP` 结束时，最多追加一次 `thinking-dropout-heal`。有可用 token 则用 token 续写；没有则保留原思考与签名，追加 `model` 思考内容及 `user` 消息 `Continue and provide the final response or tool call.`。被安全规则阻止的回答不因此绕过限制；第二次仅思考结束不再循环。
+
+正常 `CONTINUATION` 仍需携带有效的新 token 才进入下一跳。重试、自愈与正常续写共用总跳数上限，沿用请求的输出预算配置；不额外承诺跨重试实际总用量封顶。
+
+## Argon Inspector：Debug 与 Operations
+
+从右侧栏 **Argon**、对话主视图 **Argon Inspector** 或单条回复顶部图标进入。诊断通过 [request-association.js](<request-association.js>) 绑定到最终 `messageId` 与 `settlementSeq`；未确认的关联不会猜测绑定。
+
+### Debug：围绕一条请求看证据
+
+- 范围可选 **This Conversation**、**Selected Answer**、**All Recent**；通过 `listRequests` 取得请求列表，不依赖范围聚合服务。
+- **请求摘要**：请求 ID、路由、协议、思考档位、结果、失败类别、耗时、最终结束原因与关联状态。Antigravity 依据 `model` 单独显示。
+- **紧凑 Token 水位**：`In / Cache / Out / Think / Total`；多跳时附 `Billed In / Billed Total`。这是计数，不是费用。
+- **逐跳轨迹**：`hopIndex`、`trigger`、`status`、`streamErrorStatus`、`errorPhase`、`backoffDelayMs`、`chunkCount`、`hasCheckpoint`、`finishReason`、`errorCodes`、`durationMs` 共 11 列。
+- **原始响应**：显示捕获状态，通过 `ResponsePage` 按帧、按字符分页读取。
+- **完整 JSON**：折叠展示 `locator` 与 `record`，保留排障所需的原始诊断字段。
+
+请求级 `tokenUsage` 只保留 11 个基本字段：
+
+```text
+reportedInputTokens, reportedCacheTokens, outputTokens, thoughtsTokens, totalTokens,
+billedOutputTokens, billedThoughtsTokens, billedToolTokens,
+billedPromptTokens, billedCachedTokens, billedTotalTokens
 ```
 
----
+每跳仅保留五项 Token 计数：`promptTokens`、`cachedTokens`、`outputTokens`、`thoughtsTokens`、`totalTokens`。输入水位与跨跳累计用量分开：前者用于宿主上下文判断，后者保留各次上游尝试的观测计数，不混作上下文长度或价格。未知用量可为 `null`。
 
-## 📊 Argon Inspector 检视器、模态用量账本与成本估算
+### Operations：显式操作、独立权限
 
-v1.5.0 内置完整的 **Argon Inspector** 可观测套件，前后端共享同一套宿主服务（`inspector-service.js`）：
+- **云端 Interaction ID 查询**：使用所选路由的当前凭据执行单次只读 `GET`，不恢复生成、不取消任务、不执行返回的工具调用。查询路由仍只有 **Gemini API / Vertex AI**，本轮不新增代理云 ID 查询。
+- **后台恢复锁管理**：查看全局本地恢复状态；未知 `creating` 状态只能在用户明确确认后释放。释放本地锁不等于取消远端任务。
+- 会话诊断、原始响应、云端查询、查询结果读取和全局锁管理各自检查权限；切换范围或卸载组件后，过期异步结果不得回写新视图。
 
-### 1. 三大图形化入口与范围联动
-- **右侧边栏（Right Sidebar → `Argon`）**：在当前对话旁实时检视请求时间线与单次回复详情。
-- **对话主视图标签页（Conversation View → `Argon Inspector`）**：提供宽屏双栏仪表盘视图。
-- **单条回复顶部快捷图标（Message Header Argon Button）**：依托 `request-association.js` 对 `llm/stream`、`agent/assistant-stream` 与 `session/event` 的精确关联，点击任意 Argon 回复右上角的图标即可直接锁定该条回复（`Selected Answer` 范围）打开对应请求账本。
+### 只读 Agent 工具 `argon_inspect`
 
-### 2. 固定范围概览（Current Scope Overview）与四维详情抽屉
-- **三档范围切换**：支持 **`This Conversation`（当前会话）**、**`Selected Answer`（当前选中回复）** 与 **`All Recent`（全局最近 200 条记录）**。
-- **顶部固定概览卡片**：实时聚合当前范围内的请求总数、完成状态分布、模态 Token 汇总（输入、缓存命中、输出、思考、工具）以及公开价格估算总计。
-- **单请求四维明细**：
-  - **Overview**：通道、模型、协议、API 版本、区域分类（`global` / `non-global`）、请求与实测服务层级、关联 `messageId`。
-  - **Hops & Usage**：逐跳耗时、HTTP 状态、触发原因（`initial` / `continuation` / `checkpoint-reconnect`）、水位线 Token 与分模态（`TEXT` / `IMAGE` / `AUDIO` / `VIDEO` / `DOCUMENT`）账本。
-  - **Cost Estimate**：基于公开价格快照 `argon-public-2026-10-18` 的逐跳与汇总 USD 估算（明确标注非账单发票，区分促销期与 Vertex 非 `global` `1.1x` 系数）。
-  - **Raw Response**：当开启 `retainRawResponses` 时，支持按帧、按字符偏移分页查阅解析后的上游 JSON 响应；可能包含正文、签名以及尚未提交或重放的帧，并非已脱敏正文或可恢复检查点。
-- **Operations 运维标签页**：
-  - **Cloud Interaction ID 只读查询**：输入任意已知的云端 Interaction ID 与通道，执行单次只读 `interactions.get(id)` 查询并分页检视返回内容（绝不恢复生成、不取消云端任务、不执行返回的工具调用）。
-  - **Background Recovery 锁管理**：查看当前持久化后台任务状态，并在出现未知创建中断（`creating`）时由用户确认后手动释放锁。
+实现见 [inspector-tool.js](<inspector-tool.js>)，默认延迟加载。本地诊断只限当前执行会话；工具不能改配置或释放锁。
 
-### 3. 只读 Agent 诊断工具 `argon_inspect`
-插件向宿主注册延迟加载的并发安全只读工具 `argon_inspect`（`deferLoading: true`），供 Agent 在当前会话内自查诊断与成本：
-
-| `action` | 作用说明 | 关键参数 |
+| `action` | 作用 | 关键参数 |
 |---|---|---|
-| `overview` | 聚合当前会话（或指定 `messageId`）在保留窗口内的用量、成本与覆盖率概览 | `messageId?`, `limit?` (1–100) |
-| `list` | 列出当前会话（或指定 `messageId`）的本地诊断请求摘要与 `requestId` | `messageId?`, `limit?` (1–50) |
-| `detail` | 分页读取指定 `requestId` 的完整诊断记录、逐跳账本、模态用量与成本明细 | `requestId`, `offset?`, `limit?` (1–10) |
-| `response` | 按字符偏移分页读取指定 `requestId` 已捕获的上游 JSON 响应帧 | `requestId`, `index?`, `offset?`, `length?` |
-| `query` | 使用当前配置凭据对已知 Cloud Interaction ID 执行单次只读 `GET` 查询 | `route`, `id` |
-| `query-response` | 分页读取 `query` 返回的临时云端 Interaction 响应内容 | `queryId`, `offset?`, `length?` |
+| `list` | 列出当前会话请求摘要 | `messageId?`、`limit?`（1–50） |
+| `detail` | 分页读取完整诊断与逐跳记录 | `requestId`、`offset?`、`limit?`（1–10） |
+| `response` | 分页读取已捕获上游 JSON 帧 | `requestId`、`index?`、`offset?`、`length?` |
+| `query` | 对已知云端 ID 发起一次只读查询 | `route`、`id` |
+| `query-response` | 读取 `query` 返回的临时结果 | `queryId`、`offset?`、`length?` |
 
----
+`query-response` 是读取云端查询结果所必需的动作，不能因诊断精简而删除。
 
-## 🎚️ 服务层级（Service Tiers）与 Vertex PayGo 能力矩阵
+## 存储与隐私
 
-`service-level.js` 在发起任何网络请求前严格校验通道与协议组合能力；若配置了未验证组合，立即以 `ARGON_SERVICE_TIER_UNVERIFIED` 拒绝发包，**绝不静默降级或自动切换到更高单价层级**：
+- `vertex_argon_diagnostics`：最近 200 条结构化请求诊断；不保存正文或密钥。新写入严格限定字段，读取旧记录时仅兼容剔除已退役的 `usageDetails` / `regionClass`，**不迁移、不重写旧磁盘记录**。
+- `vertex_argon_responses`：默认不捕获。显式开启后最多保留 20 条响应记录、总计 64 MiB、单条 16 MiB；关闭仅停止新的捕获。上游 JSON 可能包含正文、签名、未提交尾段或重放内容，不是脱敏正文、HTTP 原始字节或恢复检查点。
+- `vertex_argon_interactions`：后台任务的创建锁与恢复游标。
 
-| 路由通道 | 协议引擎 | 支持的服务层级 (`Service Tier`) | 支持 `vertexPaygoOnly`? | 底层协议传递方式 |
-|---|---|---|---|---|
-| `google-generative-ai` | `generate-content` | `standard` · `flex` · `priority` | 不适用（自动忽略） | 请求体 `serviceTier` 字段 |
-| `google-generative-ai` | `interactions` | `standard` · `flex` · `priority` | 不适用（自动忽略） | 请求体 `service_tier` 字段 |
-| `google-vertex` | `generate-content` | `standard` · `priority` | **支持**（注入 `X-Vertex-AI-LLM-Request-Type: shared`） | 请求头 `X-Vertex-AI-LLM-Shared-Request-Type: priority` |
-| `google-vertex` | `interactions` | 仅 `standard` | **不支持**（发包前 Fail-Closed 拒绝） | 默认标准队列 |
+诊断与捕获实现见 [diagnostics.js](<diagnostics.js>)、[diagnostic-store.js](<diagnostic-store.js>)、[response-store.js](<response-store.js>)。原始响应一律视为不可信数据。
 
----
+## 历史实测：奥德赛七号全年舰长日志
 
-## 🚀 安装方法
+> 以下是 **v1.5.0 历史云端实测**，保留用于说明长解码已有依据；**不是 v1.6.0 本轮新增 live 验证，也不能证明 Antigravity 或新增恢复分支已在云端验证**。本轮验证状态见 [验证账本](<docs/implementation/STATUS.md>)。
 
-### 方式 1：在 DSH 对话框中一键安装（推荐）
+历史任务要求单回合连续输出 `DAY 001` 至 `DAY 365` 的全年日志，保持每日状态、每周维护、月末报告以及第 100/200/215/300/365 天的长期事件。原记录记载全年日志与状态台账完成；本文未重新运行或逐篇复核内容。
 
-直接向当前 DSH 会话发送：
+诊断 ID：`f911d0c5-fe7a-43ca-b205-5d2202105a41`。
+
+| 历史指标 | 记录值 |
+|---|---|
+| 路由 / 模型 / 协议 | `google-vertex` / `gemini-4-argon` / `generate-content`，`v1beta1` |
+| 思考 / 输出预算 | `LOW` / `131072`，开启长解码 |
+| 请求 / 观测服务层级 | `priority` → `standard`，来源 `traffic-type` |
+| 第一跳 | HTTP `200`；`961,781 ms`；`1,291` 块；输入 `52,737`，输出 `65,536`；`CONTINUATION` |
+| 第二跳 | HTTP `200`；`476,132 ms`；输入 `118,274`，输出 `33,449`；`STOP` |
+| 单回合输出 / 总耗时 | **98,985 tokens** / **1,437,917 ms**（约 23 分 58 秒） |
+| 输入水位 / 累计输入 / 累计总量 | `52,737` / `171,011` / `269,996` |
+| 跳数 / 重连次数 | `2` / `0` |
+
+## 安装与本地开发
+
+安装是单独的用户操作，不是查看或修改本地工程的必要步骤。需要安装已发布版本时，可在 DSH 中明确请求：
 
 ```text
 请用 plugin_manager 的 install_bundle 安装 dsh-vertex-argon
 ```
 
-> 若本机默认配置了尚未同步新包的镜像源，可发送：
-> `请用 plugin_manager 的 install_bundle 从 https://registry.npmjs.org/ 安装 dsh-vertex-argon`
-
-### 方式 2：使用 DSH CLI 安装
+也可使用宿主 CLI：
 
 ```sh
 dsh plugin --profile desktop add dsh-vertex-argon
-# 或针对 Web profile：
-dsh plugin --profile web add dsh-vertex-argon
 ```
 
----
+本仓开发只复用已有依赖，不修改宿主源码、已安装归档或 profile；不为了验证本地变更自动安装。架构边界见 [实现架构](<docs/implementation/README.md>)，维护约束见 [AGENTS.md](<AGENTS.md>)。
 
-## 🔑 双通道凭据配置
-
-插件严格按照 **DSH 凭据存储（`credentials`） → 启动环境（`launchEnvironment`） → 进程环境变量（`process.env`）** 的顺序解析凭据。若 DSH 凭据存储服务自身抛出异常，插件立即 Fail-Closed 报错终止，绝不静默回退到环境变量中的旧密钥。
-
-### 通道 A：Google Vertex AI（对应模型 `gemini-4-argon`）
-
-支持 **标准 ADC 服务账号模式** 与 **Express API Key 模式**：
-
-1. **标准 ADC 服务账号模式**（同时提供 Project 与 Location 时启用）：
-   | 变量 / 凭据名 | 填写示例 | 说明 |
-   |---|---|---|
-   | `GOOGLE_APPLICATION_CREDENTIALS` | `C:\Keys\vertex-sa.json` | 服务账号 JSON 密钥文件绝对路径（具备 `roles/aiplatform.user` 权限） |
-   | `GOOGLE_CLOUD_PROJECT` | `my-gcp-project-id` | Google Cloud **项目 ID**（支持别名 `GCLOUD_PROJECT`） |
-   | `GOOGLE_CLOUD_LOCATION` | `global` | 调用区域，默认并推荐 `global`（非 `global` 区域公开定价有 `1.1x` 溢价） |
-2. **Vertex Express API Key 模式**（未配置 Project/Location 时启用）：
-   - 配置 `GOOGLE_CLOUD_API_KEY` 即可通过 Vertex Express 端点直接调用。
-
-### 通道 B：Google Gemini Developer API（对应模型 `gemini-4-argon-google`）
-
-- 在 DSH **设置 → 凭据** 或环境变量中配置 `GOOGLE_API_KEY`（或 `GEMINI_API_KEY`）。
-- 插件会自动检测可用凭据并在模型选择器的 **`Vertex Argon`** 分组下展示对应通道模型。
-
----
-
-## ⚙️ 设置页面与完整配置项参考
-
-打开左下角 **设置 → Vertex Argon**，所有配置项均支持实时热更新（`volatile`），分为四大功能组共 **13 项配置**：
-
-| 分组 | 配置字段 | 默认值 | 可选值 / 范围 | 说明 |
-|---|---|---|---|---|
-| **基础与生成** | `showInModelPicker` | `true` | `boolean` | 是否在会话模型选择器中展示 `Vertex Argon` 模型 |
-| | `reasoning` | `"medium"` | `"low" \| "medium" \| "high"` | 默认思考档位（当收到宿主 `max` 请求时自动收敛为 `high`） |
-| | `maxTokens` | `65536` | `1` – `1048576` | 单回合最大输出 Token 预算（超过 `65,536` 时须在 `generate-content` 下开启 `longDecode`） |
-| | `contextWindow` | `1048576` | `1` – `1048576` | 模型总上下文窗口大小（默认 1M tokens） |
-| | `longDecode` | `true` | `boolean` | 启用 `GenerateContent` `v1beta1` 跨 64K 多跳自动续传与断流检查点恢复 |
-| **协议与服务层级** | `googleProtocol` | `"generate-content"` | `"generate-content" \| "interactions"` | Gemini Developer API (`gemini-4-argon-google`) 使用的底层协议 |
-| | `vertexProtocol` | `"generate-content"` | `"generate-content" \| "interactions"` | Vertex AI (`gemini-4-argon`) 使用的底层协议 |
-| | `googleServiceTier` | `"standard"` | `"standard" \| "flex" \| "priority"` | Gemini Developer API 请求的服务层级 |
-| | `vertexServiceTier` | `"standard"` | `"standard" \| "flex" \| "priority"` | Vertex AI 请求的服务层级（注：Vertex 仅验证 `standard` 与 `generate-content` 下的 `priority`） |
-| | `vertexPaygoOnly` | `false` | `boolean` | Vertex `generate-content` 请求固定附带 `X-Vertex-AI-LLM-Request-Type: shared` |
-| **Interactions 后台模式** | `interactionsBackground` | `false` | `boolean` | 在 `interactions` 协议下启用云端持久化后台执行（须同时开启 `allowInteractionStorage`） |
-| | `allowInteractionStorage` | `false` | `boolean` | 允许向 `interactions` 请求发送 `store: true` 以支持断线恢复与 ID 查询 |
-| **诊断与高级** | `retainRawResponses` | `false` | `boolean` | 显式开启后，在本地 `vertex_argon_responses` 存储域保留最多 20 条响应记录，总量 64 MiB、单条 16 MiB；关闭仅停止新请求捕获，不清空已有记录 |
-
----
-
-## 🗂️ 架构模块图谱与持久化存储域
-
-项目根目录包含 **27 个正式生产 JS 模块**，职责边界清晰，零冗余依赖：
-
-| 模块分类 | 核心文件 | 职责说明 |
-|---|---|---|
-| **插件入口与运行时** | `index.js`, `client.js`, `runtime.js` | Host 插件入口、Web 设置页与 Inspector UI 入口、宿主 Peer 依赖解析桥 |
-| **适配器、连接与服务层级** | `adapter.js`, `google-connection.js`, `service-level.js` | 双通道适配器、SDK 与自定义 SSE 传输层构建、服务层级与 PayGo 校验矩阵 |
-| **GenerateContent 与签名引擎** | `generate-content.js`, `google-signatures.js` | 多跳 `continuationToken` 续传、检查点退避重连、SSE 内联错误拦截、空 `Part` 签名回放 |
-| **Interactions 与后台恢复引擎** | `interactions.js`, `interaction-adapter.js`, `interactions-input.js`, `interaction-image.js`, `interaction-transport.js`, `interaction-state.js`, `interaction-lifecycle.js`, `interaction-query.js` | `Interactions` 流式状态机、请求与多模态图片转换、`creating` 预写锁、`last_event_id` 游标续读、只读云端 ID 查询 |
-| **结构化输出底层辅助** | `structured-output.js`, `bounded-json.js` | 基于 `ajv/dist/2020.js` 的严格 JSON Schema 校验、深度/字节边界守卫与双协议格式转换 |
-| **诊断、定价与 Inspector** | `diagnostics.js`, `diagnostic-store.js`, `usage-details.js`, `pricing.js`, `response-store.js`, `request-association.js`, `inspector-service.js`, `inspector-overview.js`, `inspector-tool.js` | 双轨 Token 诊断追踪、模态拆解、公开价格 USD 估算、请求-消息精确绑定、Inspector 宿主服务与 `argon_inspect` 工具 |
-
-### 本地持久化存储域（Storage Domains）
-- `vertex_argon_diagnostics`：保存最近 **200 条**结构化请求诊断记录（自动脱敏，不含正文或密钥）。
-- `vertex_argon_responses`：仅当 `retainRawResponses: true` 时捕获上游 JSON 响应，最多保留 **20 条响应记录**、**64 MiB 总量**、**16 MiB 单条**；按最旧记录淘汰，超出单条限制的后续帧记为省略。关闭开关仅停止新请求捕获，**不会清空已有记录**。响应可能包含正文、签名及未提交或重放的帧；不保存 HTTP 头、请求体或凭据。
-- `vertex_argon_interactions`：保存后台 `Interactions` 任务的创建锁与 `last_event_id` 恢复游标。
-
----
-
-## 🧪 离线零网络测试套件
-
-仓库内置 **37 个自动化测试文件**（`test/*.test.mjs`）。`npm test` 会先加载 [offline-guard.mjs](<test/offline-guard.mjs>) 零外网守卫，再加载 [host-loader.mjs](<test/host-loader.mjs>) 复用本机已有依赖；仅允许测试进程自行创建的临时 IPv4 回环服务，不访问外网或产生云端费用：
+### 离线测试
 
 ```bash
 npm test
-# 需要指定已有宿主依赖时：
+# 显式指定已有宿主依赖：
 DSH_TEST_HOST_ROOT=/path/to/deepseek-harness npm test
 ```
 
-默认模块解析失败后，测试加载器依次尝试显式 `DSH_TEST_HOST_ROOT`、相对仓库根的 `../../deepseek-harness`（也兼容 `../deepseek-harness` 相邻布局）、本机 `~/.dsh/profiles/desktop/node_modules`，以及 Windows 上的 `O:/DeepSeekHarness/resources/app.asar.unpacked/dsh/node_modules`；只使用存在的路径。可显式指定源码根、已解包宿主根或其 `node_modules`，并沿真实包路径解析 pnpm 嵌套依赖。加载器不下载依赖、不修改宿主或桌面 profile。若仍缺少依赖，最后尝试本机 `O:/DeepSeekHarness/resources/app.asar`：Electron 可直接读取时复用归档；普通 Node 则只读解出实际请求的包及其包内文件，缓存到仓库 `.tmp/test-host/<归档指纹>/node_modules`。缓存校验路径、链接、文件偏移及归档提供的完整性摘要，写完后原子发布以供并行测试复用；宿主归档变化会使用新缓存。
+[offline-guard.mjs](<test/offline-guard.mjs>) 必须先于 [host-loader.mjs](<test/host-loader.mjs>) 加载；测试仅允许自身创建的临时 IPv4 回环服务，不调用真实上游。加载器先按 Node 正常规则解析，再使用显式宿主根、相邻源码树、desktop profile 或已有桌面依赖；普通 Node 必要时只读解出已有 ASAR 的包到仓库缓存，校验路径、归档边界及完整性，不联网下载。
 
-客户端回归通过 [host-internals.mjs](<test/host-internals.mjs>) 加载真实宿主控制器：有源码时直接导入，否则读取发行工厂并仅附加内部符号导出，不替换实现或行为断言。服务端渲染需要版本完全匹配的真实 `react` / `react-dom`，优先复用显式源码树及本地依赖；本机也可只读复用 `O:/AI/kt/outdoor-gear-landing/node_modules` 中的 19.2.8。缺少真实依赖时明确失败，不联网下载或改用模拟控制器。
+[host-internals.mjs](<test/host-internals.mjs>) 复用真实宿主工厂和匹配版本的 React/ReactDOM，不替换为模拟实现。测试数量与通过结果由最终实际运行得出，统一记录到 [验证账本](<docs/implementation/STATUS.md>)，不预填固定测试总数。
 
----
+## 与 billion-context 配合使用
 
-## ⚠️ 与 `billion-context` 配合使用的兼容性说明
+旧代理版本可能修改消息顺序或丢弃独立签名，相关历史问题见 [Issue #3159](<https://github.com/ranxianglei/billion-context/issues/3159>) / [PR #3167](<https://github.com/ranxianglei/billion-context/pull/3167>)、[Issue #3158](<https://github.com/ranxianglei/billion-context/issues/3158>) / [PR #3162](<https://github.com/ranxianglei/billion-context/pull/3162>)。可按代理自身文档对目标上游配置透传；这不改变本插件三路由的密钥隔离规则。
 
-在旧版 `billion-context` 代理环境下启用 Google 通道时，若遇到代理注入压缩提醒导致的 `user.parts` 顺序校验报错（[Issue #3159](https://github.com/ranxianglei/billion-context/issues/3159) / [PR #3167](https://github.com/ranxianglei/billion-context/pull/3167)）或流式独立签名过滤问题（[Issue #3158](https://github.com/ranxianglei/billion-context/issues/3158) / [PR #3162](https://github.com/ranxianglei/billion-context/pull/3162)），可在 `billion-context` 配置中对目标上游域名开启透传：
+## License
 
-```json
-{
-  "providers": {
-    "https://aiplatform.googleapis.com": { "passthrough": true },
-    "https://generativelanguage.googleapis.com": { "passthrough": true }
-  }
-}
-```
+[MIT](<LICENSE>) © [hgk](<https://github.com/higekibaka>)
 
----
-
-## 📄 License
-
-[MIT](./LICENSE) © [hgk](https://github.com/higekibaka)
-
-[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
+[![powered by dsh](<https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white>)](<https://github.com/deepseek-ai/deepseek-harness>)

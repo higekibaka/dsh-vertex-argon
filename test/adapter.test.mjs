@@ -434,6 +434,9 @@ test('abort, config validation, legacy max listener migration and scoped registr
   assert.equal(Config({}).maxTokens.get(), MAX_SINGLE_CALL_TOKENS)
   assert.equal(Config({ maxTokens: MAX_LONG_DECODE_TOKENS }).maxTokens.get(), MAX_LONG_DECODE_TOKENS)
   assert.equal(Config({}).contextWindow.get(), 1048576)
+  assert.equal(Config({}).proxyEnabled.get(), false)
+  assert.equal(Config({}).proxyBaseUrl.get(), 'http://127.0.0.1:8045/v1beta')
+  assert.equal(Config({}).proxyApiKey.get(), '')
   assert.throws(() => Config({ reasoning: 'max' }))
   assert.throws(() => Config({ maxTokens: MAX_LONG_DECODE_TOKENS + 1 }))
   let cleanup

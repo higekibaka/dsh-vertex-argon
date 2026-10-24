@@ -133,8 +133,8 @@ test('reset restores both protocols and revokes background/storage options',asyn
   const resets=r.all.filter(x=>x.type==='button'&&x.children.includes(r.dictionary.resetDefaults))
   assert.equal(resets.length,1)
   await resets[0].props.onClick()
-  assert.equal(r.writes.length,13)
-  assert.deepEqual(Object.fromEntries(r.writes),{showInModelPicker:true,reasoning:'medium',longDecode:true,maxTokens:65536,contextWindow:1048576,googleProtocol:'generate-content',vertexProtocol:'generate-content',interactionsBackground:false,allowInteractionStorage:false,retainRawResponses:false,googleServiceTier:'standard',vertexServiceTier:'standard',vertexPaygoOnly:false})
+  assert.equal(r.writes.length,16)
+  assert.deepEqual(Object.fromEntries(r.writes),{showInModelPicker:true,reasoning:'medium',longDecode:true,maxTokens:65536,contextWindow:1048576,googleProtocol:'generate-content',vertexProtocol:'generate-content',interactionsBackground:false,allowInteractionStorage:false,retainRawResponses:false,googleServiceTier:'standard',vertexServiceTier:'standard',vertexPaygoOnly:false,proxyEnabled:false,proxyBaseUrl:'http://127.0.0.1:8045/v1beta',proxyApiKey:''})
   await r.close()
 })
 test('incompatible Vertex budget is visibly warned, never silently clamped',async()=>{
@@ -165,7 +165,7 @@ test('raw retention consent is off by default, only user-writable, and reset rev
   await initial.close()
   const enabled=render({retainRawResponses:true})
   await enabled.all.find(x=>x.type==='button'&&x.children.includes(enabled.dictionary.resetDefaults)).props.onClick()
-  assert.deepEqual(enabled.writes.at(-1),['retainRawResponses',false])
+  assert.deepEqual(enabled.writes.find(([key])=>key==='retainRawResponses'),['retainRawResponses',false])
   await enabled.close()
 })
 
@@ -307,6 +307,23 @@ test('tier writes use the real revision-fenced ConfigFormController and Host sch
     assert.equal(controller.getSnapshot().value.vertexServiceTier,'priority')
     assert.equal(controller.getSnapshot().value.vertexPaygoOnly,true)
     assert.deepEqual(resolveServicePolicy(controller.getSnapshot().value,'google-vertex','generate-content').headers,{'X-Vertex-AI-LLM-Shared-Request-Type':'priority','X-Vertex-AI-LLM-Request-Type':'shared'})
+    const panel=r.settingsPanel()
+    try {
+      let view=await panel.mount()
+      await view.nodes.find(node=>node.props['aria-labelledby']==='argon-proxy-enabled').props.onClick()
+      view=panel.draw();view.nodes.find(node=>node.props.name==='proxyBaseUrl').props.onChange({target:{value:'https://proxy.example/v1beta'}})
+      await button(panel.draw(),r.dictionary.proxySaveBaseUrl).props.onClick()
+      view=panel.draw();view.nodes.find(node=>node.props.name==='proxyApiKey').props.onChange({target:{value:'dedicated-proxy-key'}})
+      await view.nodes.find(node=>node.props.name==='proxyApiKey').props.onBlur()
+      assert.deepEqual(calls.slice(3).map(call=>call.ops),[
+        [{op:'set',path:['proxyEnabled'],value:true}],
+        [{op:'set',path:['proxyBaseUrl'],value:'https://proxy.example/v1beta'}],
+        [{op:'set',path:['proxyApiKey'],value:'dedicated-proxy-key'}],
+      ])
+      assert.deepEqual(calls.slice(3).map(call=>call.revision),[10,11,12])
+      assert.equal(controller.getSnapshot().value.proxyApiKey,'dedicated-proxy-key')
+    } finally { panel.close() }
+
   }finally{await r.close();await controller.dispose()}
 })
 
@@ -401,7 +418,7 @@ test('budget conflict names only affected routes and sits beside protocol choice
     await r.close()
   }
 })
-test('diagnosis exposes request ceiling, omitted details and termination beside honest usage evidence',async()=>{
+test('diagnosis exposes request ceiling, omitted details and termination with token watermark',async()=>{
   const {fixture,button:findButton,selectRequest,detail,row}=await import('./client-inspector-fixture.mjs')
   for(const language of ['zh','en']){
     const f=fixture({language})
@@ -410,8 +427,8 @@ test('diagnosis exposes request ceiling, omitted details and termination beside 
       let view=await f.settle()
       await selectRequest(view).props.onChange({target:{value:row().id}});view=await f.settle()
       assert.ok(view.text.includes('98304'));assert.ok(view.text.includes('hopsDropped'));assert.ok(view.text.includes('confirmed'))
-      assert.ok(view.text.includes(f.dictionary.inspectorRequestSummary));assert.ok(view.text.includes(f.dictionary.inspectorUsage))
-      assert.ok(view.text.includes(f.dictionary.inspectorEstimate+': '+f.dictionary.inspectorUnknown))
+      assert.ok(view.text.includes(f.dictionary.inspectorRequestSummary));assert.ok(view.nodes.some(node=>node.props['aria-label']===f.dictionary.inspectorTokenWatermark))
+      assert.ok(view.text.includes('In: — · Cache: —'))
       assert.equal(findButton(view,f.dictionary.inspectorRaw).props['aria-expanded'],false)
       assert.equal(f.calls.some(x=>x.method==='readResponse'),false)
     }finally{await f.close()}
@@ -425,7 +442,7 @@ test('diagnosis refresh remains read-only and reports failure instead of empty s
     await findButton(f.draw(),f.dictionary.inspectorRefresh).props.onClick()
     const view=await f.settle()
     assert.ok(view.nodes.some(x=>x.props.role==='alert'&&x.children.includes(f.dictionary.inspectorError)))
-    assert.deepEqual(f.calls.map(x=>x.method),['getOverview','getOverview'])
+    assert.deepEqual(f.calls.map(x=>x.method),['listRequests','listRequests'])
     assert.ok(!view.text.includes(f.dictionary.inspectorEmpty))
   }finally{await f.close()}
 })
@@ -652,7 +669,7 @@ test('typed recovery descriptors mount once, validate contracts, unwrap envelope
     assert.equal(calls.mounts.length,1)
     const spec=calls.mounts[0]
     assert.equal(spec.package,'dsh-vertex-argon')
-    assert.deepEqual(Array.from(spec.descriptors,x=>x.method),['listRecent','listRecovery','releaseUnknown','listRequests','getOverview','getRequest','readResponse','queryInteraction','readQueryResponse'])
+    assert.deepEqual(Array.from(spec.descriptors,x=>x.method),['listRecovery','releaseUnknown','listRequests','getRequest','readResponse','queryInteraction','readQueryResponse'])
     for(const method of ['listRecovery','releaseUnknown']){
       const descriptor=spec.descriptors.find(x=>x.method===method)
       assert.equal(descriptor.id,'dsh-vertex-argon#vertexArgonDiagnostics/'+method)
@@ -688,45 +705,84 @@ test('one cached Intl formatter per module replaces per-value formatter construc
   const r=render({maxTokens:1048576},true,{intl:spy})
   const panel=r.settingsPanel()
   try{
-    assert.equal(calls.date.length,1,'the module builds exactly one DateTimeFormat')
+    assert.equal(calls.date.length,0,'Debug does not allocate an unused time formatter')
     assert.equal(calls.number.length,1,'the module builds exactly one NumberFormat')
     const view=await panel.mount()
     panel.draw();panel.draw()
-    assert.equal(calls.date.length,1,'a rerender must reuse the cached time formatter')
+    assert.equal(calls.date.length,0,'rerenders never allocate an unused time formatter')
     assert.equal(calls.number.length,1,'a rerender must reuse the cached number formatter')
     for(const text of ['786,432','1,048,576','917,504'])assert.ok(view.text.includes(text),text)
   }finally{panel.close();await r.close()}
 })
 
-test('the cached time formatter keeps the previous toLocaleTimeString output in every locale',async()=>{
-  const calls=[]
-  const spy=Object.create(Intl)
-  spy.DateTimeFormat=function(...args){calls.push(args);return new Intl.DateTimeFormat(...args)}
-  const r=render({},true,{intl:spy})
-  try{
-    assert.equal(calls.length,1)
-    const [locale,options]=calls[0]
-    assert.equal(locale,undefined)
-    assert.deepEqual({...options},{hour:'numeric',minute:'numeric',second:'numeric',hour12:false})
-    const cached=new Intl.DateTimeFormat(locale,options)
-    for(const iso of ['2026-10-18T00:15:05.000Z','2026-10-18T09:07:05.000Z','2026-10-18T23:59:59.000Z']){
-      const d=new Date(iso)
-      assert.equal(cached.format(d),d.toLocaleTimeString([], {hour12:false}),iso)
-    }
-    // numeric hour/minute/second with hour12:false never rewrites a locale's own pattern.
-    for(const tag of ['en-US','en-GB','zh-CN','ja-JP','ko-KR','de-DE','ar-EG','ru-RU']){
-      const localized=new Intl.DateTimeFormat(tag,options)
-      for(const iso of ['2026-10-18T00:15:05.000Z','2026-10-18T09:07:05.000Z','2026-10-18T12:00:00.000Z']){
-        const d=new Date(iso)
-        assert.equal(localized.format(d),d.toLocaleTimeString(tag,{hour12:false}),tag+' '+iso)
-      }
-    }
-  }finally{await r.close()}
-})
 
 test('client formatting never falls back to a per-call locale constructor',async()=>{
-  assert.equal(source.includes('.toLocaleTimeString('),false,'formatTimeShort must use the cached formatter')
+  assert.equal(source.includes('.toLocaleTimeString('),false,'retired short-time helper must remain absent')
   assert.equal(source.match(/\.toLocaleString\(\)/g)?.length,3,'only the three Date#toLocaleString recovery timestamps remain')
-  assert.equal(source.match(/timeFormatter\.format\(/g)?.length,1)
-  assert.equal(source.match(/numberFormatter\.format\(/g)?.length,3,'diagnostics items, token text and the budget formatter share one formatter')
+  assert.equal(source.match(/timeFormatter\.format\(/g)?.length,undefined)
+  assert.equal(source.match(/numberFormatter\.format\(/g)?.length,2,'token text and budget share one formatter')
+})
+const proxyInput = (view, key) => view.nodes.find(node => node.type === 'input' && node.props.name === key)
+for (const language of ['zh','en']) test('proxy settings default off, isolate password input and save only on blur/button: '+language,async()=>{
+  const r=render({},true,{language}), panel=r.settingsPanel()
+  try{
+    let view=await panel.mount()
+    const toggle=view.nodes.find(node=>node.props['aria-labelledby']==='argon-proxy-enabled')
+    assert.equal(toggle.props['aria-checked'],false)
+    assert.equal(proxyInput(view,'proxyBaseUrl').props.value,'http://127.0.0.1:8045/v1beta')
+    assert.equal(proxyInput(view,'proxyApiKey').props.value,'')
+    assert.equal(proxyInput(view,'proxyApiKey').props.type,'password')
+    assert.equal(proxyInput(view,'proxyApiKey').props.placeholder,'sk-... / ANTIGRAVITY_API_KEY')
+    assert.equal(r.writes.length,0)
+    assert.ok(view.text.includes(r.dictionary.proxyHint));assert.ok(view.text.includes(r.dictionary.proxySaveHint))
+    await toggle.props.onClick();assert.deepEqual(r.writes,[['proxyEnabled',true]])
+    view=panel.draw();proxyInput(view,'proxyBaseUrl').props.onChange({target:{value:'https://proxy.example/v1beta'}})
+    assert.equal(r.writes.length,1,'typing never writes')
+    await proxyInput(panel.draw(),'proxyBaseUrl').props.onBlur()
+    assert.deepEqual(r.writes.at(-1),['proxyBaseUrl','https://proxy.example/v1beta'])
+    view=panel.draw();proxyInput(view,'proxyApiKey').props.onChange({target:{value:'proxy-key'}})
+    await button(panel.draw(),r.dictionary.proxySaveApiKey).props.onClick()
+    assert.deepEqual(r.writes.at(-1),['proxyApiKey','proxy-key'])
+    const count=r.writes.length;await proxyInput(panel.draw(),'proxyApiKey').props.onBlur();assert.equal(r.writes.length,count,'successful save clears dirty state')
+    assert.ok(!panel.draw().text.includes('proxy-key'),'key is never echoed as plain text')
+  }finally{panel.close();await r.close()}
+})
+
+for(const state of [{status:'ready',writable:false},{status:'loading',writable:true},{status:'unavailable',writable:true}])test('proxy draft and retained save are denied by current form state '+JSON.stringify(state),async()=>{
+  const r=render(),panel=r.settingsPanel()
+  try{
+    let view=await panel.mount();proxyInput(view,'proxyApiKey').props.onChange({target:{value:'draft-key'}})
+    const save=button(panel.draw(),r.dictionary.proxySaveApiKey).props.onClick
+    const blur=proxyInput(panel.draw(),'proxyApiKey').props.onBlur
+    r.setForm(state);view=panel.draw()
+    assert.equal(proxyInput(view,'proxyApiKey').props.disabled,true)
+    await save();await blur();assert.equal(r.writes.length,0)
+    panel.close();await save();assert.equal(r.writes.length,0)
+  }finally{panel.close();await r.close()}
+})
+
+test('proxy save failure retains draft, blocks duplicate blur and never echoes the key in the error',async()=>{
+  let resolve;const pending=new Promise(r=>{resolve=r}),writes=[]
+  const form={getSnapshot:()=>({status:'ready',writable:true,value:{}}),subscribe:()=>()=>{},set:(key,value)=>{writes.push([key,value]);return pending}}
+  const r=render({},true,{formController:form}),panel=r.settingsPanel()
+  try{
+    let view=await panel.mount();proxyInput(view,'proxyApiKey').props.onChange({target:{value:'private-draft'}})
+    const blur=proxyInput(panel.draw(),'proxyApiKey').props.onBlur
+    const work=blur();await blur();await button(panel.draw(),r.dictionary.proxySaveApiKey).props.onClick()
+    assert.equal(writes.length,1)
+    resolve(false);await work;view=panel.draw()
+    assert.equal(proxyInput(view,'proxyApiKey').props.value,'private-draft');assert.ok(view.text.includes(r.dictionary.error));assert.ok(!view.text.includes('private-draft'))
+  }finally{resolve(false);panel.close();await r.close()}
+})
+
+test('proxy reset clears dedicated key and dirty fields without touching foreign credentials',async()=>{
+  let snapshot={status:'ready',writable:true,value:{proxyEnabled:true,proxyBaseUrl:'https://custom.example',proxyApiKey:'stored-key',googleApiKey:'foreign-key'}}
+  const writes=[],form={getSnapshot:()=>snapshot,subscribe:()=>()=>{},set:async(key,value)=>{writes.push([key,value]);snapshot={...snapshot,value:{...snapshot.value,[key]:value}};return true}}
+  const r=render({},true,{formController:form}),panel=r.settingsPanel()
+  try{
+    let view=await panel.mount();proxyInput(view,'proxyApiKey').props.onChange({target:{value:'dirty-key'}})
+    await button(panel.draw(),r.dictionary.resetDefaults).props.onClick();view=panel.draw()
+    assert.deepEqual(writes.filter(([key])=>key.startsWith('proxy')),[['proxyEnabled',false],['proxyBaseUrl','http://127.0.0.1:8045/v1beta'],['proxyApiKey','']])
+    assert.equal(proxyInput(view,'proxyApiKey').props.value,'');assert.equal(snapshot.value.googleApiKey,'foreign-key')
+  }finally{panel.close();await r.close()}
 })

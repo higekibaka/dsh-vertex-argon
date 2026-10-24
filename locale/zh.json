@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Vertex Argon",
-    "description": "Gemini API 与 Vertex AI 长解码、显式协议与服务等级设置、响应/用量/费用估算检查器。"
+    "description": "Gemini API、Vertex AI 与独立 Antigravity 模型，支持韧性长解码、显式协议与服务层级，以及请求诊断和原始响应检查。"
   }
 }

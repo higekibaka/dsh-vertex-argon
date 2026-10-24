@@ -44,11 +44,13 @@ test('observed usage of a dropped hop is retained separately from committed outp
  const out=await run([[first,dropped,new Error('drop')],[last]],{tracker})
  assert.equal(out.text,'AB');assert.equal(out.usage.candidatesTokenCount,15)
  tracker.finishStream({outcome:'done'})
- const rows=diagnostic.usageDetails.rows
- assert.equal(rows.length,2);assert.equal(rows[0].usage.outputTokens,15);assert.equal(rows[1].usage.outputTokens,5)
- assert.equal(rows[0].complete,false);assert.equal(rows[1].complete,true)
- assert.deepEqual(rows[0].usage.inputByModality,[{modality:'text',tokens:100}])
- assert.equal(rows[0].observedServiceTier,'priority');assert.equal(rows[1].observedServiceTier,'standard')
+ const rows=diagnostic.hops
+ assert.equal(rows.length,2);assert.equal(rows[0].outputTokens,15);assert.equal(rows[1].outputTokens,5)
+ assert.equal(rows[0].outcome,'dropped');assert.equal(rows[1].outcome,'done')
+ assert.equal(diagnostic.tokenUsage.outputTokens,15)
+ assert.equal(diagnostic.tokenUsage.billedOutputTokens,20)
+ assert.equal(diagnostic.tokenUsage.billedTotalTokens,220)
+ assert.equal(diagnostic.usageDetails,undefined)
  assert.equal(diagnostic.serviceTier.observed,'mixed')
 })
 
@@ -62,7 +64,7 @@ for (const vertex of [true, false]) {
     assert.equal(out.usage.cachedContentTokenCount, 0, 'later-hop cache must not replace first-hop cache')
     assert.equal(out.usage.promptTokenCount, 100)
     assert.equal(out.usage.billedPromptTokenCount, 210)
-    assert.equal(out.usage.billedTotalTokenCount, 225)
+    assert.equal(out.usage.billedTotalTokenCount, 230)
     const { continuationToken, ...rest } = JSON.parse(out.requests[1].body)
     assert.equal(continuationToken, 'cp')
     assert.deepEqual(rest, out.base)
@@ -170,10 +172,11 @@ for (const status of [400, 401, 403]) test('does not retry API rejection ' + sta
   assert.equal(out.error.status, status)
   assert.equal(out.requests.length, 1)
 })
-for (const status of [429, 503]) test('pre-checkpoint transient ' + status + ' surfaces to host while post-checkpoint retries', async () => {
+for (const status of [429, 503]) test('pre-commit transient ' + status + ' retries both initial and checkpoint hops', async () => {
   const initial = await run([apiError(status), [row('ok', { finish: 'STOP' })]])
-  assert.equal(initial.error?.status, status)
-  assert.equal(initial.requests.length, 1)
+  assert.equal(initial.error, undefined)
+  assert.equal(initial.text, 'ok')
+  assert.equal(initial.requests.length, 2)
   const resumed = await run([[row('A', { token: 'cp', finish: 'CONTINUATION' })], apiError(status), [row('B', { finish: 'STOP' })]])
   assert.equal(resumed.error, undefined)
   assert.equal(resumed.text, 'AB')
@@ -273,10 +276,10 @@ test('explicit error after STOP is not hidden and never retries committed output
   assert.equal(out.requests.length, 1)
   assert.equal(out.text, 'A')
 })
-test('in-band error is not overwritten by missing CONTINUATION token', async () => {
+test('in-band error is not overwritten by missing CONTINUATION token and pre-commit retry is bounded', async () => {
   const out = await run(() => [row('', { finish: 'CONTINUATION' }), errorFrame()])
   assert.equal(out.error?.code, 'ARGON_STREAM_ERROR')
   assert.equal(out.error.status, 503)
-  assert.equal(out.requests.length, 1)
+  assert.equal(out.requests.length, 4)
 })
 
