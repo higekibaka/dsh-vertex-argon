@@ -2,14 +2,13 @@ name: Publish to npm
 
 on:
   push:
-    branches:
-      - main
     tags:
       - 'v*'
-  release:
-    types:
-      - published
-  workflow_dispatch:
+
+# All versions share a lock; never interrupt an upload that npm may have accepted.
+concurrency:
+  group: npm-publish-${{ github.repository }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -19,6 +18,7 @@ jobs:
   publish:
     name: Publish package to npm
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -33,13 +33,4 @@ jobs:
         run: npm install -g npm@latest
 
       - name: Publish to npm if version is new
-        run: |
-          PKG_NAME=$(node -p "require('./package.json').name")
-          LOCAL_VER=$(node -p "require('./package.json').version")
-          REMOTE_VER=$(npm view "$PKG_NAME@$LOCAL_VER" version --registry=https://registry.npmjs.org/ 2>/dev/null || true)
-          if [ "$LOCAL_VER" = "$REMOTE_VER" ]; then
-            echo "Version $LOCAL_VER is already published on npm. Skipping."
-            exit 0
-          fi
-          echo "Publishing $PKG_NAME@$LOCAL_VER via OIDC Trusted Publisher..."
-          npm publish --provenance --access public --registry=https://registry.npmjs.org/
+        run: node .github/scripts/publish.mjs
