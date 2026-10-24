@@ -2,6 +2,16 @@
 
 All notable changes to `dsh-vertex-argon` are documented in this file.
 
+## [1.5.3] - 2026-10-24
+
+### Fixed
+- **Pre-Checkpoint Real-Time Streaming & Fast-Fail Outer Retry Handoff (`generate-content.js`)**:
+  - Streamed incoming `GenerateContent` SSE chunks in real time before the first 32,768-token `continuationToken` checkpoint is acquired (`!token`), eliminating buffering delay on thought summaries, text, and tool calls for `< 32K` turns when `longDecode` is enabled.
+  - Surfaced pre-checkpoint stream drops and errors immediately to the DSH outer retry handler on the first hop instead of silently looping 4 internal hops without a checkpoint token, while preserving `pending` checkpoint buffering and internal `continuationToken` resume once a 32K+ checkpoint is active.
+- **Inspector Usage Ledger, Cache Coverage & Hop Accounting (`usage-details.js`, `pricing.js`, `inspector-overview.js`, `client.js`, `generate-content.js`)**:
+  - Added `selectGcUsageRows` to strip contiguous unanswered pre-progress `retry-original` hops when a subsequent hop completes, keeping cost and token completeness accurate across historical and multi-hop records.
+  - Computed weighted cache-hit percentage across requests with complete valid cache/input counts and recorded `hopTracker.onChunk({ status: 200 })` before throwing on malformed or non-JSON SSE chunks.
+
 ## [1.5.2] - 2026-10-22
 
 ### Fixed

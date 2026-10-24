@@ -1,6 +1,6 @@
 {
   "name": "dsh-vertex-argon",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "description": "Gemini API and Vertex AI Argon for DSH: long decode, explicit service tiers, response and usage inspection, and estimated costs.",
   "license": "MIT",
   "repository": {
