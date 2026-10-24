@@ -52,3 +52,16 @@ test('historical missing bases and empty usage stay incomplete in both protocols
   ])assert.equal(estimateDiagnosticCost(r).estimatedUsd,null)
  }
 })
+test('GC cost strips pre-progress unanswered retry hops when a subsequent retry-original hop completes',()=>{
+ const r={...record,route:'google-vertex',regionClass:'global',protocol:'generate-content',hopCount:2,hopsDropped:0,hops:[
+  {hopIndex:1,trigger:'initial',usedContinuationToken:false,chunkCount:0,hasCheckpoint:false,outcome:'transport-error'},
+  {hopIndex:2,trigger:'retry-original',usedContinuationToken:false,chunkCount:2,hasCheckpoint:true,outcome:'completed'},
+ ],serviceTier:{requested:'standard',observed:'standard'},usageDetails:{aggregate:null,aggregateComplete:false,omittedRows:0,rows:[
+  {kind:'gc-hop',index:1,usage:null,complete:false,observedServiceTier:null},
+  {kind:'gc-hop',index:2,usage,complete:true,observedServiceTier:'standard'},
+ ]}}
+ const c=estimateDiagnosticCost(r)
+ assert.equal(c.estimatedUsd,3);assert.equal(c.rows.length,1);assert.deepEqual(c.missing,[])
+ const withChunk={...r,hops:[{...r.hops[0],chunkCount:1},r.hops[1]]}
+ assert.equal(estimateDiagnosticCost(withChunk).estimatedUsd,null)
+})

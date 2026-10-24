@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { createUsageDetails, normalizeUsageDetails, resolveUsageCounts, MAX_USAGE_ROWS } from '../usage-details.js'
+import { createUsageDetails, normalizeUsageDetails, resolveUsageCounts, selectGcUsageRows, MAX_USAGE_ROWS } from '../usage-details.js'
 import { createArgonDiagnosticTracker } from '../diagnostics.js'
 import { recordSchema, diagnosticDomain } from '../diagnostic-store.js'
 import { mergeServiceHeaders, resolveServicePolicy, serviceTierFromTraffic } from '../service-level.js'
@@ -70,4 +70,31 @@ test('invalid-count provenance survives diagnostic schema and JSON roundtrip',()
  const stored=recordSchema.parse(JSON.parse(JSON.stringify(record)))
  assert.deepEqual(stored.usageDetails.rows[0].usage.invalidCounts,['toolTokens'])
  assert.equal(stored.usageDetails.rows[0].usage.toolTokens,null)
+})
+test('selectGcUsageRows strips only contiguous pre-progress unanswered retry-original hops on final outcomes',()=>{
+ let record
+ const tracker=createArgonDiagnosticTracker({protocol:'generate-content'},r=>{record=r})
+ const h1=tracker.beginHop({hopIndex:1,trigger:'initial',usedContinuationToken:false})
+ tracker.recordUsageRow('gc-hop',1,'generate-content',undefined,false)
+ h1.finish({error:new Error('fetch failed')})
+ const h2=tracker.beginHop({hopIndex:2,trigger:'retry-original',usedContinuationToken:false})
+ tracker.recordUsageRow('gc-hop',2,'generate-content',undefined,false)
+ h2.finish({error:Object.assign(new Error('503'),{status:503})})
+ const h3=tracker.beginHop({hopIndex:3,trigger:'retry-original',usedContinuationToken:false})
+ tracker.recordUsageRow('gc-hop',3,'generate-content',{promptTokenCount:100,candidatesTokenCount:10,totalTokenCount:110},true)
+ h3.finish({finishReason:'STOP'})
+ tracker.finishStream({outcome:'done'})
+ const selected=selectGcUsageRows(record)
+ assert.equal(selected.ledgerValid,true);assert.deepEqual(selected.rows.map(r=>r.index),[3])
+ for(const [mutate,expectedIndices] of [
+  [r=>{r.outcome='error'},[1,2,3]],
+  [r=>{r.hopsDropped=1},[1,2,3]],
+  [r=>{r.hops[0].chunkCount=1},[1,2,3]],
+  [r=>{r.hops[2].trigger='continuation';r.hops[2].usedContinuationToken=true},[2,3]],
+ ]){
+  const copy=structuredClone(record);mutate(copy)
+  const res=selectGcUsageRows(copy)
+  assert.deepEqual(res.rows.map(r=>r.index),expectedIndices)
+  assert.equal(res.rows.every(r=>r.complete),false)
+ }
 })

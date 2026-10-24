@@ -614,7 +614,7 @@ window.__ModuleLoader__.load({
       inspectorOverviewCoverage: '已记录请求', inspectorOverviewCoverageComplete: '完整请求', inspectorOverviewPartial: '部分记录；不是完整总量',
       inspectorOverviewDenied: '无总览读取权限；请求列表仍可单独查看。', inspectorOverviewWindow: '当前本地保留窗口，非全历史或云账单；最多扫描最近 200 条，再按当前范围取最多 100 条。',
       inspectorOverviewLimited: '当前范围匹配记录超过显示上限，较早记录不含在内。', inspectorOverviewDates: '记录时间范围',
-      inspectorOverviewCache: '按输入 Token 加权；仅全部请求的缓存与输入均完整有效时展示。',
+      inspectorOverviewCache: '按完整有效请求的输入 Token 加权计算。',
       inspectorOverviewCost: '已知费用小计（USD）', inspectorOverviewCostComplete: '完整费用估算（USD）',
       inspectorOverviewFields: '各项 Token 合计',
     })
@@ -652,7 +652,7 @@ window.__ModuleLoader__.load({
       inspectorOverviewCoverage: 'Reported requests', inspectorOverviewCoverageComplete: 'Complete requests', inspectorOverviewPartial: 'Partial records; not a complete total',
       inspectorOverviewDenied: 'No permission to read the overview; individual requests remain available in the list.', inspectorOverviewWindow: 'Current local retained window, not all history or cloud billing; scans at most the latest 200 records, then takes up to 100 for this scope.',
       inspectorOverviewLimited: 'Matching retained records exceed the display limit; earlier records are excluded.', inspectorOverviewDates: 'Record time range',
-      inspectorOverviewCache: 'Weighted by input tokens; shown only when every request has complete, valid cache/input counts.',
+      inspectorOverviewCache: 'Weighted by input tokens across requests with complete, valid cache/input counts.',
       inspectorOverviewCost: 'Known cost subtotal (USD)', inspectorOverviewCostComplete: 'Complete cost estimate (USD)',
       inspectorOverviewFields: 'Token totals by field',
     })
@@ -1123,9 +1123,11 @@ window.__ModuleLoader__.load({
     const OVERVIEW_CSS = '\n.argon-inspector .ag-scope-overview{margin:14px 0}.argon-inspector .ag-scope-overview .ag-overview{grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));margin:12px 0}.argon-inspector .ag-overview-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,140px),1fr));gap:14px;margin:12px 0}.argon-inspector .ag-overview-fields dd{margin:4px 0;font-variant-numeric:tabular-nums;font-size:17px}.argon-inspector .ag-overview-fields small{display:block;font-size:11px;color:var(--dsw-alias-label-secondary)}'
     function ScopeOverview({ overview, t, metric, busy, allowed }) {
       const coverage = value => t('inspectorOverviewCoverage') + ': ' + (value?.reportedRequests ?? 0) + '/' + overview.requestCount + ' · ' + t('inspectorOverviewCoverageComplete') + ': ' + (value?.completeRequests ?? 0) + '/' + overview.requestCount
-      const total = overview?.tokens?.totalTokens, cost = overview?.cost
+      const cacheCoverage = () => t('inspectorOverviewCoverageComplete') + ': ' + (overview?.cache?.completeRequests ?? 0) + '/' + overview.requestCount + ' · ' + t('inspectorOverviewCache')
+      const total = overview?.tokens?.totalTokens, cost = overview?.cost, cache = overview?.cache
       const money = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? '$' + value.toFixed(6) : '—'
       const completeCost = cost?.estimatedUsd != null
+      const completeCache = overview?.requestCount > 0 && cache?.completeRequests === overview.requestCount
       const fields = [['inputTokens', 'inspectorInput'], ['cachedTokens', 'inspectorTokenCached'], ['outputTokens', 'inspectorTokenOutput'], ['thoughtTokens', 'inspectorTokenReasoning'], ['toolTokens', 'inspectorTokenTool']]
       return h('section', { className: 'card ag-scope-overview', 'data-overview': true, 'aria-label': t('inspectorOverview') },
         h('h3', null, t('inspectorOverview')),
@@ -1134,7 +1136,7 @@ window.__ModuleLoader__.load({
           overview.window?.limited ? h('p', { className: 'ag-notice' }, t('inspectorOverviewLimited')) : null,
           h('div', { className: 'ag-overview' },
             metric('overview-total', t('inspectorTokenTotal') + ' · ' + t(total?.complete ? 'inspectorOverviewComplete' : 'inspectorOverviewKnown'), tokenText(total?.knownSubtotal), coverage(total)),
-            metric('overview-cache', t('inspectorCacheHitRate'), typeof overview.cache?.percent === 'number' && Number.isFinite(overview.cache.percent) ? overview.cache.percent.toFixed(1) + '%' : '—', t('inspectorOverviewCache')),
+            metric('overview-cache', t('inspectorCacheHitRate') + (typeof cache?.percent === 'number' && Number.isFinite(cache.percent) && !completeCache ? ' · ' + t('inspectorOverviewKnown') : ''), typeof cache?.percent === 'number' && Number.isFinite(cache.percent) ? cache.percent.toFixed(1) + '%' : '—', cacheCoverage()),
             metric('overview-cost', t(completeCost ? 'inspectorOverviewCostComplete' : 'inspectorOverviewCost'), money(completeCost ? cost.estimatedUsd : cost?.knownSubtotalUsd), coverage(cost))),
           h('dl', { className: 'ag-overview-fields', 'aria-label': t('inspectorOverviewFields') }, ...fields.map(([key, label]) => {
             const value = overview.tokens?.[key]
@@ -1147,27 +1149,67 @@ window.__ModuleLoader__.load({
 
     const knownTokens = value => Number.isSafeInteger(value) && value >= 0
     const tokenText = value => knownTokens(value) ? numberFormatter.format(value) : '—'
+    function resolveUsageCounts(usage, protocol) {
+      if (!inspectorObject(usage)) return null
+      const invalid = new Set(Array.isArray(usage.invalidCounts) ? usage.invalidCounts : [])
+      const keys = ['inputTokens', 'cachedTokens', 'outputTokens', 'thoughtTokens', 'toolTokens', 'totalTokens']
+      const result = Object.fromEntries(keys.map(key => [key, invalid.has(key) ? null : (knownTokens(usage[key]) ? usage[key] : null)]))
+      const absent = key => usage[key] == null && !invalid.has(key)
+      if (result.inputTokens !== null) {
+        for (const key of ['cachedTokens', 'toolTokens']) if (absent(key)) result[key] = 0
+      }
+      if (protocol === 'generate-content' && absent('outputTokens') && result.inputTokens !== null && result.totalTokens !== null && result.toolTokens !== null) {
+        const thoughts = absent('thoughtTokens') ? 0 : result.thoughtTokens
+        const accounted = thoughts === null ? null : result.inputTokens + result.toolTokens + thoughts
+        if (accounted !== null && knownTokens(accounted) && accounted === result.totalTokens) result.outputTokens = 0
+      }
+      if (result.outputTokens !== null && absent('thoughtTokens')) result.thoughtTokens = 0
+      return result
+    }
+    function selectGcUsageRows(record) {
+      const details = record?.usageDetails
+      const allRows = (details?.rows ?? []).filter(row => row?.kind === 'gc-hop')
+      const ledgerValid = allRows.length > 0 && allRows.length === record?.hopCount && !details?.omittedRows
+        && allRows.every(row => knownTokens(row.index)) && new Set(allRows.map(row => row.index)).size === allRows.length
+      if (!ledgerValid) return { rows: allRows, ledgerValid: false }
+      const sorted = [...allRows].sort((a, b) => a.index - b.index)
+      const hops = Array.isArray(record?.hops) && !record?.hopsDropped ? record.hops : []
+      const byIndex = new Map(hops.filter(inspectorObject).map(hop => [hop.hopIndex, hop]))
+      let start = 0
+      if (['done', 'max-tokens', 'tool-calls'].includes(record?.outcome) && sorted.every((row, i) => row.index === i + 1)) {
+        while (start + 1 < sorted.length) {
+          const row = sorted[start], hop = byIndex.get(row.index), next = byIndex.get(sorted[start + 1].index)
+          if (row.usage === null && row.complete === false
+            && hop && hop.trigger === (start === 0 ? 'initial' : 'retry-original')
+            && hop.usedContinuationToken === false && hop.chunkCount === 0 && hop.hasCheckpoint === false
+            && ['transport-error', 'api-error'].includes(hop.outcome)
+            && next && next.trigger === 'retry-original' && next.usedContinuationToken === false) start++
+          else break
+        }
+      }
+      return { rows: start > 0 ? sorted.slice(start) : allRows, ledgerValid: true }
+    }
     function extractTokenMix(record) {
       const details = record?.usageDetails
       const keys = ['inputTokens', 'cachedTokens', 'outputTokens', 'thoughtTokens', 'toolTokens', 'totalTokens']
       let usage = null, complete = false, sourceCacheValid = true, sourceTotalsValid = true
       if (record?.protocol === 'generate-content') {
-        const rows = (details?.rows ?? []).filter(row => row.kind === 'gc-hop')
-        const ledger = rows.length > 0 && rows.length === record.hopCount && !details.omittedRows && new Set(rows.map(row => row.index)).size === rows.length
+        const { rows, ledgerValid: ledger } = selectGcUsageRows(record)
+        const usages = rows.map(row => resolveUsageCounts(row.usage, 'generate-content'))
         usage = Object.fromEntries(keys.map(key => {
-          const values = rows.map(row => row.usage?.[key])
+          const values = usages.map(u => u?.[key])
           const sum = ledger && values.every(knownTokens) ? values.reduce((a, b) => a + b, 0) : null
           return [key, knownTokens(sum) ? sum : null]
         }))
-        sourceCacheValid = rows.every(row => knownTokens(row.usage?.inputTokens) && knownTokens(row.usage?.cachedTokens) && row.usage.cachedTokens <= row.usage.inputTokens)
-        sourceTotalsValid = rows.every(row => {
-          const parts = ['inputTokens', 'outputTokens', 'thoughtTokens', 'toolTokens'].map(key => row.usage?.[key])
-          return knownTokens(row.usage?.totalTokens) && parts.every(value => value == null || knownTokens(value))
-            && parts.filter(knownTokens).reduce((sum, value) => sum + value, 0) === row.usage.totalTokens
+        sourceCacheValid = usages.every(u => knownTokens(u?.inputTokens) && knownTokens(u?.cachedTokens) && u.cachedTokens <= u.inputTokens)
+        sourceTotalsValid = usages.every(u => {
+          const parts = ['inputTokens', 'outputTokens', 'thoughtTokens', 'toolTokens'].map(key => u?.[key])
+          return knownTokens(u?.totalTokens) && parts.every(value => value == null || knownTokens(value))
+            && parts.filter(knownTokens).reduce((sum, value) => sum + value, 0) === u.totalTokens
         })
         complete = ledger && rows.every(row => row.complete === true)
       } else if (record?.protocol === 'interactions') {
-        usage = details?.aggregate
+        usage = resolveUsageCounts(details?.aggregate, 'interactions')
         complete = details?.aggregateComplete === true
       }
       const read = key => knownTokens(usage?.[key]) ? usage[key] : null
@@ -1275,10 +1317,11 @@ window.__ModuleLoader__.load({
           h('div', { className: 'ag-subhead' }, t('inspectorStepHopTable') + ' (' + rows.length + ')'),
           h('div', { className: 'ag-hop-list' },
             ...rows.slice(0, 12).map((r, idx) => {
-              const pTok = r.usage?.inputTokens
-              const oTok = r.usage?.outputTokens
-              const tTok = r.usage?.thoughtTokens
-              const tot = r.usage?.totalTokens
+              const resolved = resolveUsageCounts(r.usage, r.kind === 'interaction-step' ? 'interactions' : 'generate-content')
+              const pTok = resolved?.inputTokens
+              const oTok = resolved?.outputTokens
+              const tTok = resolved?.thoughtTokens
+              const tot = resolved?.totalTokens
               return h('div', { key: idx, className: 'ag-hop-row' },
                 h('span', { className: 'ag-pill ag-pill-muted' }, (r.kind ?? 'hop') + ' #' + (r.index ?? idx)),
                 h('span', { className: 'ag-hop-nums' }, t('inspectorInput') + ' ' + tokenText(pTok) + ' · ' + t('inspectorTokenOutput') + ' ' + tokenText(oTok) + ' · ' + t('inspectorTokenReasoning') + ' ' + tokenText(tTok)),

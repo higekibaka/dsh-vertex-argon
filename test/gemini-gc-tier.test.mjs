@@ -35,7 +35,7 @@ for(const status of [429,503])test('Flex '+status+' retries preserve request pol
  const tracker=createArgonDiagnosticTracker({route:'google-generative-ai',model:'gemini-4-argon',protocol:'generate-content',requestedServiceTier:'flex'},r=>diagnostic=r)
  const client={isVertexAI:()=>false}
  const original=async req=>{requests.push(JSON.parse(req.body));throw Object.assign(new Error('fixture'),{status})}
- const stream=await continueArgonRequestStream(client,original,{body:JSON.stringify({contents:[],generationConfig:{maxOutputTokens:131072}})},{serviceTier:'flex',tracker,reconnectBackoff:{initialDelayMs:0}})
+ const stream=await continueArgonRequestStream(client,original,{body:JSON.stringify({contents:[],continuationToken:'cp',generationConfig:{maxOutputTokens:131072}})},{serviceTier:'flex',tracker,reconnectBackoff:{initialDelayMs:0}})
  await assert.rejects(async()=>{for await(const chunk of stream){} })
  assert.equal(requests.length,4);for(const req of requests)assert.deepEqual(req,requests[0])
  assert.equal(requests[0].service_tier,'flex');tracker.finishStream({outcome:'error'})

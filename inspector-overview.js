@@ -1,5 +1,5 @@
 import {estimateDiagnosticCost} from './pricing.js'
-import {USAGE_COUNT_KEYS,resolveUsageCounts} from './usage-details.js'
+import {USAGE_COUNT_KEYS,resolveUsageCounts,selectGcUsageRows} from './usage-details.js'
 
 const knownCount=value=>Number.isSafeInteger(value)&&value>=0
 const knownMoney=value=>typeof value==='number'&&Number.isFinite(value)&&value>=0&&value<=Number.MAX_SAFE_INTEGER
@@ -18,9 +18,8 @@ function requestSources(record) {
  const details=record.usageDetails
  if(!details)return {rows:[],complete:false}
  if(record.protocol==='generate-content') {
-  const rows=(details.rows??[]).filter(row=>row.kind==='gc-hop')
-  const complete=finalOutcome(record.outcome)&&rows.length>0&&rows.length===record.hopCount&&details.omittedRows===0
-   &&rows.every(row=>row.complete===true&&knownCount(row.index))&&new Set(rows.map(row=>row.index)).size===rows.length
+  const {rows,ledgerValid}=selectGcUsageRows(record)
+  const complete=finalOutcome(record.outcome)&&ledgerValid&&rows.every(row=>row.complete===true)
   return {rows,complete}
  }
  if(record.protocol==='interactions')return {rows:[{usage:details.aggregate}],complete:finalOutcome(record.outcome)&&details.aggregateComplete===true}
@@ -35,12 +34,12 @@ function requestSummary(record) {
   const subtotal=sumKnown(known,knownCount)
   return [key,{subtotal,reported:known.length>0,complete:complete&&known.length===rows.length&&subtotal!==null}]
  }))
- const cacheComplete=tokens.inputTokens.complete&&tokens.cachedTokens.complete
-  &&usages.every(usage=>usage.cachedTokens<=usage.inputTokens)
+ const cacheInvalid=usages.some(usage=>knownCount(usage?.inputTokens)&&knownCount(usage?.cachedTokens)&&usage.cachedTokens>usage.inputTokens)
+ const cacheComplete=tokens.inputTokens.complete&&tokens.cachedTokens.complete&&!cacheInvalid
  // Keep pricing in one place; a duplicate/invalid hop ledger still cannot be
  // promoted to a complete estimate even if its individual rows are priced.
  const cost=['generate-content','interactions'].includes(record.protocol)?estimateDiagnosticCost(record):null
- return {tokens,cacheComplete,cost, costComplete:complete&&knownMoney(cost?.estimatedUsd)}
+ return {tokens,cacheInvalid,cacheComplete,cost, costComplete:complete&&knownMoney(cost?.estimatedUsd)}
 }
 
 // The caller supplies filtered, bounded records, verified when answer-scoped.
@@ -53,9 +52,13 @@ export function summarizeRequestOverview(records,window={limit:20,limited:false}
   const completeRequests=requests.filter(request=>request.tokens[key].complete).length
   return [key,{knownSubtotal,reportedRequests:reported.length,completeRequests,complete:requestCount>0&&completeRequests===requestCount&&knownSubtotal!==null}]
  }))
- const cacheCompleteRequests=requests.filter(request=>request.cacheComplete).length
- const percent=requestCount>0&&cacheCompleteRequests===requestCount&&tokens.inputTokens.complete&&tokens.cachedTokens.complete&&tokens.inputTokens.knownSubtotal>0
-  ?tokens.cachedTokens.knownSubtotal/tokens.inputTokens.knownSubtotal*100:null
+ const eligibleCache=requests.filter(request=>request.cacheComplete)
+ const cacheCompleteRequests=eligibleCache.length
+ const eligibleInput=sumKnown(eligibleCache.map(request=>request.tokens.inputTokens.subtotal),knownCount)
+ const eligibleCached=sumKnown(eligibleCache.map(request=>request.tokens.cachedTokens.subtotal),knownCount)
+ const cacheOverflow=requests.some(request=>(request.tokens.inputTokens.reported&&request.tokens.inputTokens.subtotal===null)||(request.tokens.cachedTokens.reported&&request.tokens.cachedTokens.subtotal===null))
+ const percent=cacheCompleteRequests>0&&!requests.some(request=>request.cacheInvalid)&&!cacheOverflow&&eligibleInput!==null&&eligibleCached!==null&&eligibleInput>0
+  ?eligibleCached/eligibleInput*100:null
  const reportedCosts=requests.filter(request=>knownMoney(request.cost?.knownSubtotalUsd))
  const costSum=sumKnown(reportedCosts.map(request=>request.cost.knownSubtotalUsd),knownMoney)
  // A numeric but unrepresentable source cost must not silently disappear.

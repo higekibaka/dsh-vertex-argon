@@ -27,6 +27,30 @@ export function resolveUsageCounts(usage, protocol) {
   return result
 }
 
+export function selectGcUsageRows(record) {
+  const details = record?.usageDetails
+  const allRows = (details?.rows ?? []).filter(row => row?.kind === 'gc-hop')
+  const ledgerValid = allRows.length > 0 && allRows.length === record?.hopCount && details?.omittedRows === 0
+    && allRows.every(row => count(row.index) !== null) && new Set(allRows.map(row => row.index)).size === allRows.length
+  if (!ledgerValid) return { rows: allRows, ledgerValid: false }
+  const sorted = [...allRows].sort((a, b) => a.index - b.index)
+  const hops = Array.isArray(record?.hops) && !record?.hopsDropped ? record.hops : []
+  const byIndex = new Map(hops.filter(object).map(hop => [hop.hopIndex, hop]))
+  let start = 0
+  if (['done', 'max-tokens', 'tool-calls'].includes(record?.outcome) && sorted.every((row, i) => row.index === i + 1)) {
+    while (start + 1 < sorted.length) {
+      const row = sorted[start], hop = byIndex.get(row.index), next = byIndex.get(sorted[start + 1].index)
+      if (row.usage === null && row.complete === false
+        && hop && hop.trigger === (start === 0 ? 'initial' : 'retry-original')
+        && hop.usedContinuationToken === false && hop.chunkCount === 0 && hop.hasCheckpoint === false
+        && ['transport-error', 'api-error'].includes(hop.outcome)
+        && next && next.trigger === 'retry-original' && next.usedContinuationToken === false) start++
+      else break
+    }
+  }
+  return { rows: start > 0 ? sorted.slice(start) : allRows, ledgerValid: true }
+}
+
 function modalities(raw, protocol) {
   if (!Array.isArray(raw) || raw.length > USAGE_MODALITIES.length) return null
   const result = [], seen = new Set()

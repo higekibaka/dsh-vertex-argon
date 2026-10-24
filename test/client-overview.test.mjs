@@ -81,19 +81,19 @@ for (const language of ['en', 'zh']) test('overview ' + language + ' stays scope
   } finally { await f.close() }
 })
 
-for (const language of ['en', 'zh']) test('overview ' + language + ' labels partial coverage and never substitutes zero or an incomplete cache ratio', async () => {
+for (const language of ['en', 'zh']) test('overview ' + language + ' labels partial coverage on known subtotals and cache hit rate from cache-complete requests', async () => {
   const f = fixture({ language }), values = [record(requestId), { ...row(secondId), protocol: 'interactions' }], result = await snapshot(values)
   installSnapshot(f, result)
   try {
     const view = await f.settle(), text = overviewText(view)
     assert.equal(result.overview.tokens.totalTokens.knownSubtotal, 140)
     assert.equal(metric(view, 'overview-total'), '140')
-    assert.equal(metric(view, 'overview-cache'), '—')
+    assert.equal(metric(view, 'overview-cache'), '20.0%')
     assert.equal(metric(view, 'overview-cost'), money(result.overview.cost.knownSubtotalUsd))
     assert.ok(text.includes(language === 'zh' ? '已知小计' : 'Known subtotal'))
     assert.ok(text.includes('1/2') || text.includes('1 / 2'))
     assert.equal(result.overview.cost.estimatedUsd, null)
-    assert.equal(result.overview.cache.percent, null)
+    assert.deepEqual(result.overview.cache, { percent: 20, completeRequests: 1 })
     for (const key of tokenKeys.filter(key => key !== 'totalTokens')) {
       const field = view.nodes.find(node => node.type === 'dd' && node.props['data-metric'] === 'overview-' + key)
       assert.ok(field, key)
@@ -102,6 +102,12 @@ for (const language of ['en', 'zh']) test('overview ' + language + ' labels part
       assert.ok(textOf(line).includes('1/2') || textOf(line).includes('1 / 2'), key + ' partial coverage')
     }
   } finally { await f.close() }
+  const fNone = fixture({ language })
+  installSnapshot(fNone, await snapshot([{ ...row(requestId), protocol: 'interactions' }]))
+  try {
+    const viewNone = await fNone.settle()
+    assert.equal(metric(viewNone, 'overview-cache'), '—')
+  } finally { await fNone.close() }
 })
 
 for (const language of ['en', 'zh']) test('overview ' + language + ' empty retained scope is unknown rather than a zero bill', async () => {

@@ -42,21 +42,22 @@ for (const model of [MODEL, GOOGLE_API_MODEL]) {
     legacy.hops[0].errorCodes = []
     assert.equal(recordSchema.parse(legacy).hops[0].streamErrorStatus, undefined)
   })
-  test(model + ': SDK preserves proxy-shaped 503 after bounded retries without committing content', async () => {
+  test(model + ': SDK preserves proxy-shaped 503 after bounded post-checkpoint retries without committing tail content', async () => {
     const before = wire.length
     let diagnostic
     responder = () => sse([
+      ...(wire.length - before === 1 ? [{ candidates: [{ content: { role: 'model', parts: [{ text: 'COMMITTED_CHECKPOINT' }] }, continuationToken: 'cp' }] }] : []),
       { candidates: [{ content: { role: 'model', parts: [{ text: 'UNCOMMITTED_OUTPUT' }] } }] },
       { error: { code: 503, status: 'UNAVAILABLE', message: 'PRIVATE_ERROR_DETAIL', meta: { cause: 'read-error', upstreamStatus: 200 } } },
     ])
     const chunks = await collect(createArgonAdapter(ctx, config(), undefined, undefined, record => diagnostic = record).stream(request(model)))
-    assert.equal(wire.length - before, 4)
+    assert.equal(wire.length - before, 5)
     assert.equal(chunks.at(-1).reason.kind, 'error')
     assert.match(chunks.at(-1).reason.failure.message, /in-band.*503.*UNAVAILABLE/)
     assert.ok(!JSON.stringify(chunks).includes('UNCOMMITTED_OUTPUT'))
     assert.ok(!JSON.stringify({ chunks, diagnostic }).includes('PRIVATE_ERROR_DETAIL'))
     assert.ok(diagnostic.hops.every(hop => hop.status === 200 && hop.streamErrorStatus === 503))
-    assert.equal(recordSchema.parse(diagnostic).hops.length, 4)
+    assert.equal(recordSchema.parse(diagnostic).hops.length, 5)
   })
 }
 

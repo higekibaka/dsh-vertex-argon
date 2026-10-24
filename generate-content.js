@@ -1,8 +1,8 @@
 // GenerateContent manual continuation contract (reviewed 2026-10-16):
 // https://ai.google.dev/gemini-api/docs/generate-content/long-decode#option-2-loop
 // https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-argon
-// Only checkpoint-confirmed chunks may escape a resumable stream. Never append
-// partial output to the request, decrease its total budget, or retry committed text.
+// Stream chunks directly before the first 32K checkpoint token; once a checkpoint
+// is active, only checkpoint-confirmed chunks escape. Never append partial output.
 import { SERVICE_TIERS, serviceTierFromHeader, serviceTierFromTraffic } from './service-level.js'
 import { classifyRequestRegion } from './pricing.js'
 export const MAX_CONTINUATION_HOPS = 32
@@ -184,9 +184,18 @@ export async function continueArgonRequestStream(apiClient, original, request, m
         const stream = await original.call(apiClient, { ...request, body, httpOptions })
         for await (const chunk of stream) {
           throwIfAborted(request.abortSignal)
-          const raw = await chunk.json()
+          let raw
+          try {
+            raw = await chunk.json()
+          } catch (error) {
+            hopTracker?.onChunk({ status: 200 })
+            throw error
+          }
           tracker?.observeResponse?.('gc-chunk', hop, raw)
-          if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw streamError('Invalid Argon stream response.', 'ARGON_INVALID_RESPONSE')
+          if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+            hopTracker?.onChunk({ status: 200 })
+            throw streamError('Invalid Argon stream response.', 'ARGON_INVALID_RESPONSE')
+          }
           if (Object.hasOwn(raw, 'error')) {
             hopTracker?.onChunk({ status: 200 })
             throw inBandStreamError(raw.error)
@@ -213,6 +222,11 @@ export async function continueArgonRequestStream(apiClient, original, request, m
           }
           if (!enabled) {
             committedUsage = latestUsage
+            refreshOriginalUsage()
+            yield wrap(raw, chunk.headers, latestUsage)
+            continue
+          }
+          if (!token && !newCheckpoint && !terminal && candidate?.finishReason !== 'CONTINUATION') {
             refreshOriginalUsage()
             yield wrap(raw, chunk.headers, latestUsage)
             continue
@@ -269,9 +283,9 @@ export async function continueArgonRequestStream(apiClient, original, request, m
       if (!failure && finishReason === 'CONTINUATION' && (!token || token === startToken)) {
         failure = streamError('Argon CONTINUATION did not provide a new checkpoint token.', 'ARGON_INVALID_CONTINUATION')
       }
-      if (failure && !retryable(failure)) {
+      if (!token || (failure && !retryable(failure))) {
         hopTracker?.finish({ error: failure, aborted: false, finishReason, continued: false })
-        throw failure
+        throw failure ?? streamError('Argon stream ended without a terminal finishReason.')
       }
       const progress = token !== startToken
       const cleanContinuation = finishReason === 'CONTINUATION' && !failure && progress

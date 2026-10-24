@@ -69,13 +69,18 @@ for (const vertex of [true, false]) {
     assert.equal(out.requests[0].httpOptions.timeout, STREAM_READ_TIMEOUT_MS)
     assert.equal(out.requests[0].httpOptions.apiVersion, vertex ? 'v1beta1' : undefined)
   })
-  test(route + ': silent EOF before first checkpoint retries original without leaking text', async () => {
-    const out = await run([[row('discard')], [row('answer', { finish: 'STOP', output: 6 })]], { vertex })
+  test(route + ': pre-checkpoint chunks stream in real time and silent EOF fails fast on first hop', async () => {
+    let secondAllowed = false
+    const out = await run([[row('live', { output: 2 }), () => { secondAllowed = true }, row('tail', { finish: 'STOP', output: 6 })]], { vertex })
+    assert.equal(secondAllowed, true)
     assert.equal(out.error, undefined)
-    assert.equal(out.text, 'answer')
-    assert.deepEqual(JSON.parse(out.requests[1].body), out.base)
+    assert.equal(out.text, 'livetail')
     assert.equal(out.usage.candidatesTokenCount, 6)
     assert.equal(out.usage.billedPromptTokenCount, 100)
+    const eof = await run([[row('partial')]], { vertex })
+    assert.equal(eof.requests.length, 1)
+    assert.equal(eof.text, 'partial')
+    assert.equal(eof.error?.code, 'ARGON_INCOMPLETE_STREAM')
   })
   test(route + ': empty thought-only continuation is real progress', async () => {
     const out = await run([[row('', { token: 'cp', finish: 'CONTINUATION', output: 65536, thought: true })], [row('answer', { finish: 'STOP', output: 2, prompt: 65636 })]], { vertex })
@@ -86,10 +91,10 @@ for (const vertex of [true, false]) {
     assert.ok(!out.chunks.some(x => x.candidates?.[0]?.finishReason === 'CONTINUATION'))
   })
 }
-test('repeated EOF terminates with error rather than successful truncation', async () => {
-  const out = await run(() => [row('discard')])
-  assert.equal(out.requests.length, 4)
-  assert.equal(out.text, '')
+test('repeated EOF after checkpoint terminates with error rather than successful truncation', async () => {
+  const out = await run(n => n === 1 ? [row('A', { token: 'cp' })] : [row('discard')])
+  assert.equal(out.requests.length, 5)
+  assert.equal(out.text, 'A')
   assert.equal(out.error.code, 'ARGON_INCOMPLETE_STREAM')
 })
 test('drop after replaying pending tool content retries same checkpoint safely', async () => {
@@ -165,10 +170,14 @@ for (const status of [400, 401, 403]) test('does not retry API rejection ' + sta
   assert.equal(out.error.status, status)
   assert.equal(out.requests.length, 1)
 })
-for (const status of [429, 503]) test('bounded initial retry for transient ' + status, async () => {
-  const out = await run([apiError(status), [row('ok', { finish: 'STOP' })]])
-  assert.equal(out.error, undefined)
-  assert.equal(out.text, 'ok')
+for (const status of [429, 503]) test('pre-checkpoint transient ' + status + ' surfaces to host while post-checkpoint retries', async () => {
+  const initial = await run([apiError(status), [row('ok', { finish: 'STOP' })]])
+  assert.equal(initial.error?.status, status)
+  assert.equal(initial.requests.length, 1)
+  const resumed = await run([[row('A', { token: 'cp', finish: 'CONTINUATION' })], apiError(status), [row('B', { finish: 'STOP' })]])
+  assert.equal(resumed.error, undefined)
+  assert.equal(resumed.text, 'AB')
+  assert.equal(resumed.requests.length, 3)
 })
 test('pre-abort performs no request and abort does not trigger a retry', async () => {
   const c = new AbortController(); c.abort()
@@ -176,9 +185,9 @@ test('pre-abort performs no request and abort does not trigger a retry', async (
   assert.equal(out.error.name, 'AbortError')
   assert.equal(out.requests.length, 0)
   const mid = new AbortController()
-  const interrupted = await run([[row('discard'), () => mid.abort(), row('later')]], { signal: mid.signal })
+  const interrupted = await run([[row('A', { token: 'cp' }), row('discard'), () => mid.abort(), row('later')]], { signal: mid.signal })
   assert.equal(interrupted.error.name, 'AbortError')
-  assert.equal(interrupted.text, '')
+  assert.equal(interrupted.text, 'A')
   assert.equal(interrupted.requests.length, 1)
 })
 test('backoff is abortable even for a zero delay', async () => {
@@ -200,17 +209,17 @@ test('disabled continuation preserves low-latency stream but rejects unterminate
 // HTTP 200 can carry an error frame from the service or an intermediary.
 const errorFrame = (code = 503, status = 'UNAVAILABLE') => ({ error: { code, status, message: 'PRIVATE_PROVIDER_DETAIL', details: [{ secret: 'PRIVATE_PROVIDER_DETAIL' }] } })
 for (const vertex of [true, false]) {
-  test((vertex ? 'Vertex' : 'Gemini API') + ': in-band errors retain their identity after bounded retries', async () => {
+  test((vertex ? 'Vertex' : 'Gemini API') + ': in-band errors retain their identity after bounded post-checkpoint retries', async () => {
     let diagnostic
     const tracker = createArgonDiagnosticTracker({ route: vertex ? 'google-vertex' : 'google-generative-ai' }, r => diagnostic = r)
-    const out = await run(() => [row('discard'), errorFrame()], { vertex, tracker })
+    const out = await run(n => n === 1 ? [row('A', { token: 'cp' }), row('discard'), errorFrame()] : [row('discard'), errorFrame()], { vertex, tracker })
     tracker.finishStream({ outcome: 'error', error: out.error })
     assert.equal(out.error?.code, 'ARGON_STREAM_ERROR')
     assert.equal(out.error.status, 503)
     assert.match(out.error.message, /in-band.*503.*UNAVAILABLE/)
     assert.ok(!JSON.stringify({ message: out.error.message, diagnostic }).includes('PRIVATE_PROVIDER_DETAIL'))
-    assert.equal(out.requests.length, 4)
-    assert.equal(out.text, '')
+    assert.equal(out.requests.length, 5)
+    assert.equal(out.text, 'A')
     for (const hop of diagnostic.hops) {
       assert.equal(hop.status, 200, 'in-band status must not replace HTTP status')
       assert.equal(hop.streamErrorStatus, 503)
@@ -226,12 +235,12 @@ for (const status of [400, 401, 403]) test('in-band rejection does not retry ' +
   assert.equal(out.error.status, status)
   assert.equal(out.requests.length, 1)
 })
-test('transient in-band errors retry original without committing partial output', async () => {
-  const out = await run([[row('discard'), errorFrame(429, 'RESOURCE_EXHAUSTED')], [row('answer', { finish: 'STOP' })]])
-  assert.equal(out.error, undefined)
-  assert.equal(out.text, 'answer')
-  assert.equal(out.requests.length, 2)
-  assert.deepEqual(JSON.parse(out.requests[1].body), out.base)
+test('pre-checkpoint transient in-band errors fail fast on first hop without internal retry', async () => {
+  const out = await run([[row('live'), errorFrame(429, 'RESOURCE_EXHAUSTED')], [row('answer', { finish: 'STOP' })]])
+  assert.equal(out.error?.code, 'ARGON_STREAM_ERROR')
+  assert.equal(out.error.status, 429)
+  assert.equal(out.text, 'live')
+  assert.equal(out.requests.length, 1)
 })
 test('in-band failure resumes only the last checkpoint and discards pending tools', async () => {
   const tool = { candidates: [{ content: { role: 'model', parts: [{ functionCall: { name: 'add', args: {} } }] } }] }
@@ -268,6 +277,6 @@ test('in-band error is not overwritten by missing CONTINUATION token', async () 
   const out = await run(() => [row('', { finish: 'CONTINUATION' }), errorFrame()])
   assert.equal(out.error?.code, 'ARGON_STREAM_ERROR')
   assert.equal(out.error.status, 503)
-  assert.equal(out.requests.length, 4)
+  assert.equal(out.requests.length, 1)
 })
 

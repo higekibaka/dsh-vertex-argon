@@ -1,4 +1,4 @@
-import { resolveUsageCounts } from './usage-details.js'
+import { resolveUsageCounts, selectGcUsageRows } from './usage-details.js'
 
 // Public price snapshots, not account billing data. All amounts are USD per 1M tokens.
 export const PRICE_SNAPSHOT = Object.freeze({
@@ -74,9 +74,10 @@ export function estimateDiagnosticCost(record) {
  }
  if(!details) missing.push('usage-details')
  else if(gc) {
-  for(const row of details.rows)if(row.kind==='gc-hop')estimate(row.usage,row.complete,row.observedServiceTier,row.index)
+  const {rows:gcRows,ledgerValid}=selectGcUsageRows(record)
+  for(const row of gcRows)estimate(row.usage,row.complete,row.observedServiceTier,row.index)
   if(details.omittedRows)missing.push('omitted-usage-rows')
-  if(rows.length!==record.hopCount||rows.length===0)missing.push('incomplete-hop-ledger')
+  if(!ledgerValid||rows.length===0)missing.push('incomplete-hop-ledger')
  } else estimate(details.aggregate,details.aggregateComplete,record.serviceTier?.observed,0)
  if(!['done','max-tokens','tool-calls'].includes(record.outcome))missing.push('request-not-complete')
  for(const row of rows)for(const value of row.missing)if(!missing.includes(value))missing.push(value)

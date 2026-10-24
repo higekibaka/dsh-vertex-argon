@@ -127,13 +127,13 @@ for (const [protocol, factory, fields] of [
 
 const screenshotRaw = () => gcRaw({ promptTokenCount: 116679, cachedContentTokenCount: 111536, candidatesTokenCount: 103, thoughtsTokenCount: 567, toolUsePromptTokenCount: undefined, totalTokenCount: 117349 })
 
-test('dashboard charts recorded screenshot parts without inventing an absent tool count', () => {
-  for (const toolUsePromptTokenCount of [undefined, null]) {
+test('dashboard charts recorded screenshot parts and resolves omitted optional zero tool count while keeping explicit null unknown', () => {
+  for (const [toolUsePromptTokenCount, expectedTool, expectedPct] of [[undefined, 0, 0], [null, null, null]]) {
     const record = gcRecord([{ ...screenshotRaw(), toolUsePromptTokenCount }]), before = structuredClone(record)
     const mix = mixOf(record)
     assert.equal(mix.chartReady, true)
-    assert.deepEqual(counts(mix), { uncached: 5143, cached: 111536, output: 103, reasoning: 567, tool: null })
-    assert.equal(segment(mix, 'tool').pct, null)
+    assert.deepEqual(counts(mix), { uncached: 5143, cached: 111536, output: 103, reasoning: 567, tool: expectedTool })
+    assert.equal(segment(mix, 'tool').pct, expectedPct)
     for (const part of mix.segments.filter(part => part.count !== null)) assert.equal(part.pct, part.count / 117349 * 100)
     assert.equal(mix.cacheHitPct.toFixed(1), '95.6')
     assert.deepEqual(record, before, 'display must not fill in or mutate retained diagnostics')
@@ -164,7 +164,7 @@ test('dashboard balanced missing fields still require a complete ledger and no h
   const unfinished = gcRecord([raw]); unfinished.usageDetails.rows[0].complete = false
   const omitted = gcRecord([raw]); omitted.usageDetails.omittedRows = 1
   const missingHop = gcRecord([raw]); missingHop.hopCount = 2
-  const mixedTool = gcRecord([raw, { ...raw, toolUsePromptTokenCount: 5, totalTokenCount: 117354 }])
+  const mixedTool = gcRecord([{ ...raw, toolUsePromptTokenCount: null }, { ...raw, toolUsePromptTokenCount: 5, totalTokenCount: 117354 }])
   for (const record of [unfinished, omitted, missingHop, mixedTool, gcRecord([{ ...raw, totalTokenCount: 117350 }])]) {
     assert.equal(mixOf(record).chartReady, false)
     noPercentages(mixOf(record))
@@ -172,11 +172,11 @@ test('dashboard balanced missing fields still require a complete ledger and no h
 })
 
 for (const language of ['en', 'zh']) test('dashboard ' + language + ' displays missing labels and real SVG arcs for balanced recorded parts', async () => {
-  for (const toolUsePromptTokenCount of [undefined, 0]) {
+  for (const toolUsePromptTokenCount of [null, 0, undefined]) {
     const f = fixture({ language })
     try {
       const record = gcRecord([{ ...screenshotRaw(), toolUsePromptTokenCount }]), view = await selectedView(f, record)
-      const missing = toolUsePromptTokenCount === undefined
+      const missing = toolUsePromptTokenCount === null
       assert.equal(nodesWith(view, 'ag-donut-arc').length, 4)
       assert.deepEqual(nodesWith(view, 'ag-legend-pct').map(textOf), ['4.4%', '95.0%', '0.1%', '0.5%', missing ? '—' : '0.0%'])
       assert.equal(nodesWith(view, 'ag-legend-num').map(textOf)[4], missing ? (language === 'zh' ? '未记录' : 'Not recorded') : '0')
@@ -186,6 +186,46 @@ for (const language of ['en', 'zh']) test('dashboard ' + language + ' displays m
       arcs.forEach((arc, i) => assert.ok(Math.abs(Number(arc.props.strokeDasharray.split(' ')[0]) - values[i] / 117349 * 2 * Math.PI * 42) < 1e-9))
     } finally { await f.close() }
   }
+})
+
+test('dashboard resolves omitted cachedContentTokenCount and proven-zero GC candidatesTokenCount to 0', () => {
+  const zeroCache = gcRecord([gcRaw({ promptTokenCount: 4895, cachedContentTokenCount: undefined, candidatesTokenCount: 1256, thoughtsTokenCount: undefined, toolUsePromptTokenCount: undefined, totalTokenCount: 6151 })])
+  const mix1 = mixOf(zeroCache)
+  assert.equal(mix1.chartReady, true)
+  assert.equal(mix1.cacheHitPct, 0)
+  assert.deepEqual(counts(mix1), { uncached: 4895, cached: 0, output: 1256, reasoning: 0, tool: 0 })
+  const zeroCandidates = gcRecord([gcRaw({ promptTokenCount: 100, cachedContentTokenCount: undefined, candidatesTokenCount: undefined, thoughtsTokenCount: 20, toolUsePromptTokenCount: undefined, totalTokenCount: 120 })])
+  const mix2 = mixOf(zeroCandidates)
+  assert.equal(mix2.chartReady, true)
+  assert.equal(mix2.cacheHitPct, 0)
+  assert.deepEqual(counts(mix2), { uncached: 100, cached: 0, output: 0, reasoning: 20, tool: 0 })
+})
+
+test('dashboard strips unanswered pre-progress retry hops while keeping mid-stream failures incomplete', async () => {
+  let recovered
+  const tracker = createArgonDiagnosticTracker({ protocol: 'generate-content', route: 'google-vertex', regionClass: 'global', requestedServiceTier: 'standard' }, value => { recovered = value })
+  const hop1 = tracker.beginHop({ hopIndex: 1, trigger: 'initial', usedContinuationToken: false })
+  tracker.recordUsageRow('gc-hop', 1, 'generate-content', undefined, false)
+  hop1.finish({ error: new Error('fetch failed') })
+  const hop2 = tracker.beginHop({ hopIndex: 2, trigger: 'retry-original', usedContinuationToken: false })
+  tracker.recordUsageRow('gc-hop', 2, 'generate-content', screenshotRaw(), true, 'standard')
+  hop2.finish({ finishReason: 'STOP' })
+  tracker.finishStream({ outcome: 'done' })
+  const mix = mixOf(recovered)
+  assert.equal(mix.chartReady, true)
+  assert.equal(mix.total, 117349)
+  assert.equal(mix.cacheHitPct.toFixed(1), '95.6')
+  const f = fixture()
+  try {
+    const view = await selectedView(f, recovered)
+    assert.equal(kpi(view, 'total'), (117349).toLocaleString())
+    assert.equal(kpi(view, 'cache'), '95.6%')
+    assert.equal(kpi(view, 'cost'), '$' + estimateDiagnosticCost(recovered).estimatedUsd.toFixed(6))
+  } finally { await f.close() }
+  const progressedBeforeFail = structuredClone(recovered)
+  progressedBeforeFail.hops[0].chunkCount = 1
+  assert.equal(mixOf(progressedBeforeFail).total, null)
+  assert.equal(mixOf(progressedBeforeFail).cacheHitPct, null)
 })
 
 test('dashboard invalid per-hop relationships cannot cancel out when summed', () => {
