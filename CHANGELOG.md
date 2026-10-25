@@ -2,6 +2,23 @@
 
 All notable changes to `dsh-vertex-argon` are documented in this file.
 
+## [1.6.2] - 2026-10-26
+
+### Fixed
+- **Interactions `2026-05-20` Lifecycle Events, Terminal Guards & `user_input` Replay (`interactions.js`, `interaction-lifecycle.js`, `inspector-service.js`)**:
+  - Supported dedicated `2026-05-20` lifecycle events (`interaction.in_progress`, `interaction.requires_action`, `interaction.failed`, `interaction.cancelled`, `interaction.incomplete`, `interaction.budget_exceeded`) and `budget_exceeded` terminal mapping (`max-tokens`).
+  - Finalized streams at EOF when `interaction.status_update` carries `failed`, `cancelled`, or `budget_exceeded`, enforced monotonic terminal-state guards against late non-terminal notices, ignored unknown `interaction.*` notices without cancelling paid cloud tasks, and safely skipped structural `user_input` steps during replay.
+  - Normalized in-stream `error` event codes case-insensitively and prioritized `remote-error` over simultaneous local aborts so terminal provider errors never trigger redundant `/cancel` requests or leave `cancel-failed` locks.
+- **Background Recovery Zombie-Lock Reconciliation & Conservative Error Probes (`interaction-state.js`)**:
+  - Reconciled historical same-session `accepted` handles via a bounded non-streaming `GET` probe when the user submits a changed prompt: automatically dropped dead records (`failed`, `cancelled`, or HTTP `404`), retained un-replayed terminal handles (`completed`, `requires_action`, `incomplete`, `budget_exceeded`) for cold resume by their original `requestKey` while releasing session-wide exclusivity for the new prompt, and kept conservative blocks when the remote task is still `in_progress` / `queued` or the probe fails with non-404 errors.
+  - Verified cloud state via a bounded non-streaming probe before dropping recovery handles on unrecoverable in-stream `error` frames, and hardened post-ID persistence retry on initial save failure.
+- **Interactions `Retry-After` Backoff & First-Hop Input Watermark Window (`interaction-transport.js`, `interactions.js`, `interaction-adapter.js`)**:
+  - Extracted `Retry-After` delays from non-2xx Interactions response headers without reading error bodies, failed fast above `60s`, and recorded reconnect `backoffDelayMs` on the subsequent `interaction-resume` hop.
+  - Kept the first-hop input watermark window open across same-hop `function_call` steps and trailing `interaction.completed` / `interaction.requires_action` events until a second `model_output` step (64K hop boundary) begins; suppressed host `usage` chunks and kept `reportedInputTokens: null` whenever first-hop input tokens were never reported rather than leaking cumulative multi-hop inputs or fabricating `0`.
+- **GenerateContent Watchdog Pseudo-Progress Hardening & Snake-Case Signature Replay (`generate-content.js`, `google-signatures.js`, `test/host-internals.mjs`)**:
+  - Prevented empty heartbeat frames `{}`, empty thought frames `{ thought: true, text: '' }`, nameless `{ functionCall: {} }` parts, alternating empty frames, repeated `continuationToken` / `finishReason` values, and repeated `thoughtSignature` values (deduplicated per hop via a bounded 8,192-entry `seenSignatures` set) from renewing phase timeout budgets.
+  - Supported snake_case `thought_signature` parts in `createGoogleSignatureBridge` and relaxed the `dshDesktopBoot` minifier identifier match in `test/host-internals.mjs` for `0.2.1-rc.3` compatibility.
+
 ## [1.6.1] - 2026-10-25
 
 ### Changed

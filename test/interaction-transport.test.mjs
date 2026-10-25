@@ -72,6 +72,16 @@ test('does not retry POST or leak provider error bodies', async () => {
   await assert.rejects(t.create({ input: 'synthetic' }), e => e.status === 503 && !e.message.includes('SECRET'))
   assert.equal(calls, 1)
 })
+test('provider retry hints are bounded and never read from the error body', async () => {
+  let calls = 0
+  const t = fixture(async () => { calls++; return new Response('{"error":{"message":"PRIVATE_PROVIDER_TEXT"}}', { status: 503, headers: { 'Retry-After': '2' } }) })
+  await assert.rejects(t.create({ input: 'synthetic' }), e => e.status === 503 && e.code === 'SERVER' && e.phase === 'fetch' && e.retryDelayMs === 2200 && !e.message.includes('PRIVATE'))
+  assert.equal(calls, 1)
+})
+test('absent provider retry hints leave the transport error unchanged', async () => {
+  const t = fixture(async () => new Response('', { status: 503 }))
+  await assert.rejects(t.create({}), e => e.status === 503 && !('retryDelayMs' in e))
+})
 test('HTTP 402 uses safe billing guidance without reading provider bodies or retrying POST', async () => {
   for (const stream of [false, true]) {
     let calls = 0, bodyReads = 0, cancellations = 0

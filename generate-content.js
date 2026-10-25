@@ -132,18 +132,40 @@ function createHopWatchdog(userSignal, overrides = {}) {
     return [phase, Number.isFinite(proposed) && proposed > 0 ? proposed : fallback]
   }))
   let phase = 'initial-ttft', remaining = timeouts[phase]
+  let enteredThinking = false, enteredTransition = false
+  // Adjacent-only dedupe would let A/B/A/B alternation or a repeated two-signature
+  // frame look like fresh output. Remember every signature seen in this hop, with a
+  // bound so a hostile stream cannot grow the set without limit.
+  const seenSignatures = new Set()
   let timeoutError
   const userAbort = () => controller.abort(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }))
   userSignal?.addEventListener('abort', userAbort, { once: true })
   if (userSignal?.aborted) userAbort()
   return {
     signal: controller.signal,
-    update(parts) {
-      const visible = parts.some(part => part.functionCall || (!part.thought && typeof part.text === 'string' && part.text.length > 0))
-      if (visible || phase === 'streaming') phase = 'streaming'
-      else if (parts.some(part => part.thought === true)) phase = 'thinking'
-      else phase = 'transition'
-      remaining = timeouts[phase]
+    update(parts, hasProgress = false) {
+      // A named function call or non-empty text is real output. An empty
+      // {} functionCall, an empty thought frame and a re-used thought signature
+      // are all pseudo progress that must never renew the idle budget.
+      const visible = parts.some(part => (part.functionCall && typeof part.functionCall === 'object' && typeof part.functionCall.name === 'string' && part.functionCall.name.length > 0) || (!part.thought && typeof part.text === 'string' && part.text.length > 0))
+      const anyThought = parts.some(part => part.thought === true)
+      const productiveThought = parts.some(part => part.thought === true && typeof part.text === 'string' && part.text.length > 0)
+      let newSignature = false
+      for (const part of parts) {
+        const sig = part.thoughtSignature ?? part.thought_signature
+        if (typeof sig === 'string' && sig.length > 0 && !seenSignatures.has(sig) && seenSignatures.size < 8192) {
+          seenSignatures.add(sig)
+          newSignature = true
+        }
+      }
+      const nextPhase = (visible || phase === 'streaming') ? 'streaming' : anyThought ? 'thinking' : 'transition'
+      phase = nextPhase
+      // Entering a phase counts once, so alternating empty frames cannot ping-pong
+      // between thinking and transition and keep resetting the budget.
+      const firstEntry = (nextPhase === 'thinking' && !enteredThinking) || (nextPhase === 'transition' && !enteredTransition)
+      if (nextPhase === 'thinking') enteredThinking = true
+      if (nextPhase === 'transition') enteredTransition = true
+      if (firstEntry || visible || productiveThought || newSignature || hasProgress) remaining = timeouts[phase]
     },
     async run(operation) {
       throwIfAborted(userSignal)
@@ -327,7 +349,6 @@ export async function continueArgonRequestStream(apiClient, original, request, m
           }
           const candidate = raw.candidates?.[0]
           const parts = candidate?.content?.parts ?? []
-          watchdog.update(parts)
           hopSawThought ||= parts.some(part => part.thought === true)
           hopSawVisibleOrTool ||= parts.some(part => part.functionCall || (!part.thought && typeof part.text === 'string' && part.text.length > 0))
           if (hopSawVisibleOrTool) { thoughtParts = []; thoughtBytes = 0 }
@@ -343,6 +364,10 @@ export async function continueArgonRequestStream(apiClient, original, request, m
           const hasToken = typeof nextToken === 'string' && nextToken.length > 0
           if (hasToken) hopToken = nextToken
           const newCheckpoint = hasToken && nextToken !== token
+          // Renew the idle budget only for genuinely new progress: a repeated
+          // continuation token, a repeated finishReason or an empty thought frame
+          // must never extend a stalled hop.
+          watchdog.update(parts, Boolean(newCheckpoint || (candidate?.finishReason !== undefined && candidate.finishReason !== finishReason) || (!blocked && raw.promptFeedback?.blockReason)))
           if (candidate?.finishReason !== undefined) finishReason = candidate.finishReason
           blocked ||= Boolean(raw.promptFeedback?.blockReason)
           terminal ||= blocked || (finishReason !== undefined && finishReason !== 'CONTINUATION')

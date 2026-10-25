@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { shared } from './runtime.js'
-import { HOST_SHUTDOWN_CODE, interactionExitReason, cancelsRemoteInteraction } from './interaction-lifecycle.js'
+import { HOST_SHUTDOWN_CODE, interactionExitReason, cancelsRemoteInteraction, isRecoverableStreamErrorCode } from './interaction-lifecycle.js'
 const { z } = await shared('zod')
 const hash = value => createHash('sha256').update(value).digest('hex')
 const digest = z.string().regex(/^[a-f0-9]{64}$/)
@@ -97,10 +97,12 @@ export function durableInteractionTransport(base, hub, identity, { signal, onEve
   let task = hub.get(identity.key)
   if (task?.releasedAt) throw new Error('This attempt was released by the user; obtain a fresh request identity before creating another.')
   let terminal = false
+  let terminalStatus
   let lastEventId = task?.lastEventId ?? null
   let stopped = false
   let cancelPromise
-  const isTerminal = status => ['completed', 'requires_action', 'incomplete', 'failed', 'cancelled'].includes(status)
+  let sawUnrecoverableError = false
+  const isTerminal = status => ['completed', 'requires_action', 'incomplete', 'failed', 'cancelled', 'budget_exceeded'].includes(status)
   async function save(stage = 'accepted') {
     task = await hub.put(identity, { stage, interactionId: task?.interactionId ?? null, lastEventId })
   }
@@ -110,8 +112,20 @@ export function durableInteractionTransport(base, hub, identity, { signal, onEve
     for await (const event of source) {
       const id = event.interaction?.id ?? event.interaction_id
       if (id && task?.interactionId && id !== task.interactionId) throw Object.assign(new Error('Interaction ID changed during recovery.'), { code: 'ARGON_INTERACTIONS_PROTOCOL' })
-      const status = event.interaction?.status ?? event.status
-      if (isTerminal(status)) terminal = true
+      // A dedicated 2026-05-20 terminal lifecycle event carries its own state.
+      const type = event.event_type ?? event.type
+      const status = event.interaction?.status ?? event.status ?? (
+        type === 'interaction.completed' ? 'completed' :
+        type === 'interaction.requires_action' ? 'requires_action' :
+        type === 'interaction.failed' ? 'failed' :
+        type === 'interaction.cancelled' ? 'cancelled' :
+        type === 'interaction.incomplete' ? 'incomplete' :
+        type === 'interaction.budget_exceeded' ? 'budget_exceeded' : undefined
+      )
+      if (isTerminal(status)) { terminal = true; terminalStatus = status }
+      // Only an unclassified error event claims a remote terminal state; the
+      // cloud task itself is re-probed before any recovery handle is dropped.
+      if (type === 'error' && !isRecoverableStreamErrorCode(event.error?.code)) sawUnrecoverableError = true
       if (event.event_id && event.event_id !== lastEventId) {
         lastEventId = event.event_id
         await save()
@@ -126,7 +140,7 @@ export function durableInteractionTransport(base, hub, identity, { signal, onEve
     async create(body) {
       signal?.throwIfAborted()
       if (task) {
-        if (!task.interactionId) throw new Error('A previous background creation has an unknown outcome; refusing a duplicate billable POST. Open Vertex Argon settings > Background recovery to review and explicitly release the local block.')
+        if (!task.interactionId) throw new Error('A previous background creation has an unknown outcome; refusing a duplicate billable POST. Open Argon Inspector > Operations > Background Task Recovery to review and explicitly release the local block.')
         if (task.stage === 'cancel-failed') {
           await this.cancel(task.interactionId)
           throw new Error('The previous background task is now cancelled. Start the request again explicitly if still needed.')
@@ -138,6 +152,37 @@ export function durableInteractionTransport(base, hub, identity, { signal, onEve
         if (previous.releasedAt || previous.key === identity.key || previous.sessionHash !== identity.sessionHash) continue
         if (hub.isActive(previous.key) || !previous.interactionId) throw new Error('This session has an active or unknown-outcome background task; resolve it before creating another.')
         if (previous.endpointHash !== identity.endpointHash || previous.principalHash !== identity.principalHash) throw new Error('This session has an outstanding task on another route or credential; cancel it with its original configuration first.')
+        if (typeof base.get === 'function') {
+          // Reconcile the zombie lock against the cloud first: a task the provider
+          // already finished or dropped must not block this session forever. The
+          // prompt has already changed, so this old body is never replayed here.
+          let remote, remoteGone = false
+          // The probe is a final network read, so it is bounded like the
+          // cancellation confirmation instead of stalling the new prompt.
+          const probeSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(REMOTE_CANCEL_TIMEOUT_MS)]) : AbortSignal.timeout(REMOTE_CANCEL_TIMEOUT_MS)
+          try {
+            const probe = await base.get(previous.interactionId, { stream: false, signal: probeSignal })
+            if (probe && typeof probe === 'object' && typeof probe[Symbol.asyncIterator] !== 'function') remote = probe
+            else try { await probe?.return?.() } catch {}
+          } catch (error) {
+            // A 404 proves the remote task no longer exists. Every other failure
+            // (401/403/5xx/network) leaves cloud state unverified and keeps the lock.
+            if (error?.status === 404) remoteGone = true
+          }
+          if (remoteGone || (remote && ['failed', 'cancelled'].includes(remote.status))) {
+            // The cloud task is gone or already failed/cancelled: nothing is left
+            // to recover, so the dead record is dropped.
+            await hub.remove(previous.key)
+            continue
+          }
+          if (remote && isTerminal(remote.status)) {
+            // A completed / requires_action / incomplete / budget_exceeded task
+            // still owns un-replayed output. Keep its handle addressable by its own
+            // requestKey for a cold resume, but release the session-wide
+            // exclusivity so the new prompt may proceed.
+            continue
+          }
+        }
         throw new Error('This session has an outstanding remote task for another request; explicitly resolve it before creating another.')
       }
       // Persist intent before POST. Fetch cancellation is shielded only after dispatch,
@@ -171,11 +216,19 @@ export function durableInteractionTransport(base, hub, identity, { signal, onEve
         if (task?.interactionId) {
           // Keep a known ID recoverable even if persisting/consuming the first event failed.
           if (signal?.aborted && cancelsRemoteInteraction(interactionExitReason(signal.reason, signal))) { try { await this.cancel(task.interactionId) } catch {} }
+          // The remote task exists but its ID never reached an accepted record;
+          // retry the write once and cancel the cloud task if the disk still lags.
+          // A record already removed by a confirmed cancellation is not resurrected.
+          let persisted
+          try { persisted = hub.get(identity.key) } catch {}
+          if (persisted && persisted.interactionId !== task.interactionId) {
+            try { await save('accepted') } catch { try { await this.cancel(task.interactionId) } catch {} }
+          }
         } else if (error.requestSubmitted === false || [400, 401, 402, 403, 404, 405, 413, 415, 422, 429].includes(error.status)) {
           await hub.remove(identity.key); task = undefined
         } else {
           await save('unknown')
-          error.message += ' Background creation outcome is unknown. Open Vertex Argon settings > Background recovery to review this record; no automatic resubmission was made.'
+          error.message += ' Background creation outcome is unknown. Open Argon Inspector > Operations > Background Task Recovery to review this record; no automatic resubmission was made.'
           error.code = 'ARGON_BACKGROUND_UNKNOWN'
         }
         throw error
@@ -213,7 +266,39 @@ export function durableInteractionTransport(base, hub, identity, { signal, onEve
     },
     async finish({ complete = false, reason = 'consumer-abandoned' } = {}) {
       if (stopped || !task) return
-      if (complete && terminal) { await hub.remove(identity.key); return }
+      // A remote failure, cancellation or unrecoverable error stream is already
+      // terminal in the cloud: the local lock must go even when the local replay
+      // never completed. Completed, requires_action, incomplete and budget-exceeded
+      // results stay retained so an interrupted replay needs no new billable POST.
+      if ((complete && terminal) || ['failed','cancelled'].includes(terminalStatus)) { await hub.remove(identity.key); return }
+      // A local error frame is not proof of a remote terminal state. Verify the
+      // cloud task before dropping the recovery handle: a still-running task keeps
+      // its handle, a finished (or 404) one releases it.
+      if (reason === 'remote-error' || sawUnrecoverableError) {
+        // Without an addressable ID or a readable transport the cloud state stays
+        // unverified: retain the handle instead of dropping un-replayed output.
+        if (!task.interactionId || typeof base.get !== 'function') return
+        let probe
+        // The probe is a final network read, so it is bounded exactly like the
+        // cancellation confirmation instead of stalling the host turn.
+        try { probe = await base.get(task.interactionId, { stream: false, signal: AbortSignal.timeout(REMOTE_CANCEL_TIMEOUT_MS) }) } catch (error) {
+          if (error?.status === 404) await hub.remove(identity.key)
+          // Any other probe failure leaves cloud state unverified: keep the handle.
+          return
+        }
+        if (probe && typeof probe === 'object' && typeof probe[Symbol.asyncIterator] !== 'function') {
+          // Only a confirmed failed/cancelled cloud task proves the remote work is
+          // over. Completed, requires_action, incomplete, budget_exceeded, running
+          // and unknown states all keep their handle: an un-replayed result must
+          // never be discarded because of a local error frame.
+          if (['failed', 'cancelled'].includes(probe.status)) await hub.remove(identity.key)
+          return
+        }
+        // A streamed or non-object probe carries no authoritative status: close it
+        // and keep the handle rather than deciding on an unverified cloud state.
+        try { Promise.resolve(probe?.return?.()).catch(() => {}) } catch {}
+        return
+      }
       if (task.interactionId && !terminal && cancelsRemoteInteraction(reason)) await this.cancel(task.interactionId)
       // A completed remote task with an interrupted local replay is retained:
       // the next attempt can replay its missing output without another POST.

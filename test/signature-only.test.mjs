@@ -99,3 +99,46 @@ for(const change of ['body-edit','history-edit','model-change','malformed-codec'
   assert.ok(!JSON.stringify(sent[1]).includes(S1))
  }finally{globalThis.fetch=originalFetch}
 })
+
+test('snake_case signature-only parts are captured into the versioned codec', async () => {
+ const bridge=createGoogleSignatureBridge({messages:[]},{api:'google-generative-ai',provider:PROVIDER,id:GOOGLE_API_MODEL})
+ bridge.observe({candidates:[{content:{parts:[{thought_signature:S1}]}}]})
+ const source={async *[Symbol.asyncIterator](){yield{type:'start'};yield{type:'done',message:{role:'assistant',content:[]}}}}
+ const events=[]
+ for await(const event of bridge.stream(source))events.push(event)
+ const content=events.at(-1).message.content
+ assert.equal(content.length,1);assert.equal(content[0].text,'')
+ const codec=JSON.parse(content[0].textSignature)
+ assert.equal(codec.dshGoogleSignatureOnly,1);assert.equal(codec.signature,S1);assert.ok(codec.contentDigest)
+})
+
+test('snake_case thought_signature survives a serialized restore at its original position',async()=>{
+ const sent=[];let calls=0
+ globalThis.fetch=async(_url,init)=>{sent.push(JSON.parse(init.body));return sse(++calls===1?[{text:'A'},{thought_signature:S1}]:[{text:'next'}])}
+ try{
+  const adapter=createArgonAdapter(ctx,config),user=createUserMessage({content:[{type:'text',text:'fixture'}],source:{kind:'user'}})
+  const {message}=await generation(adapter,GOOGLE_API_MODEL,[user])
+  assert.equal(message.content.filter(b=>b.type==='text').map(b=>b.text).join(''),'A')
+  await generation(adapter,GOOGLE_API_MODEL,[user,message,createUserMessage({content:[{type:'text',text:'next'}],source:{kind:'user'}})])
+  assert.deepEqual(sent[1].contents.find(c=>c.role==='model').parts,[{text:'A'},{thoughtSignature:S1}])
+  assert.ok(!JSON.stringify(sent[1]).includes('thought_signature'))
+ }finally{globalThis.fetch=originalFetch}
+})
+
+// Opaque replay metadata must survive snake_case wire spellings next to real
+// content, and always leave the plugin as the camelCase Part spelling.
+for (const [name, wireParts, expected] of [
+ ['text', [{ text: 'A' }, { thought_signature: S1 }], [{ text: 'A' }, { thoughtSignature: S1 }]],
+ ['thought', [{ text: 'plan', thought: true }, { thought_signature: S1 }, { text: 'answer' }], [{ text: 'plan', thought: true }, { thoughtSignature: S1 }, { text: 'answer' }]],
+ ['function call', [{ functionCall: { id: 'call', name: 'echo', args: { value: 'x' } }, thought_signature: T }], [{ functionCall: { id: 'call', name: 'echo', args: { value: 'x' } }, thoughtSignature: T }]],
+]) test('snake_case thought_signature beside ' + name + ' round-trips to the camelCase wire part', async () => {
+ const sent = []; let calls = 0
+ globalThis.fetch = async (_url, init) => { sent.push(JSON.parse(init.body)); return sse(++calls === 1 ? wireParts : [{ text: 'next' }]) }
+ try {
+  const adapter = createArgonAdapter(ctx, config), user = createUserMessage({ content: [{ type: 'text', text: 'fixture' }], source: { kind: 'user' } })
+  const { message } = await generation(adapter, GOOGLE_API_MODEL, [user])
+  await generation(adapter, GOOGLE_API_MODEL, [user, message, createUserMessage({ content: [{ type: 'text', text: 'next' }], source: { kind: 'user' } })])
+  assert.deepEqual(sent[1].contents.find(c => c.role === 'model').parts, expected)
+  assert.ok(!JSON.stringify(sent[1]).includes('thought_signature'))
+ } finally { globalThis.fetch = originalFetch }
+})

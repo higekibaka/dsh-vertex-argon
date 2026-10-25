@@ -87,7 +87,7 @@ export function createInspectorOperations(hub,{responseHub,query,readEvent}={}) 
     capture.observe('interaction-object',1,result.interaction)
     const retained=capture.finish('done')
     const status=result.interaction.status
-    return {ok:true,queryId,capturedAt,identity:result.identity,remoteStatus:['in_progress','completed','requires_action','incomplete','failed','cancelled'].includes(status)?status:null,readOnly:true,retention:'memory-only',capture:retained}
+    return {ok:true,queryId,capturedAt,identity:result.identity,remoteStatus:['in_progress','completed','requires_action','incomplete','failed','cancelled','budget_exceeded'].includes(status)?status:null,readOnly:true,retention:'memory-only',capture:retained}
    }catch(error){return interactionQueryErrorResult(error,signal)}
   },
   readQueryResponse(request){return invoke('readQueryResponse',request,({queryId,...page})=>({ok:true,page:queries.read({id:queryId,sessionHash:null,...page})}))},

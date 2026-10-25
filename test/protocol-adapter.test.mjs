@@ -192,4 +192,94 @@ test('actual Vertex SDK express request retains debug metadata without pricing f
  let diagnostic;const adapter=createArgonAdapter(ctx,cfg(),undefined,undefined,d=>diagnostic=d)
  await collect(adapter.stream(req(MODEL)));assert.equal('regionClass' in diagnostic,false);assert.equal('costEstimate' in diagnostic,false);recordSchema.parse(diagnostic)
 })
+const toolRequest = model => ({ ...req(model), tools: [{ name: 'add', description: 'sum', parameters: { type: 'object', properties: { a: { type: 'number' } } } }] })
+test('a single-hop tool call keeps its one and only usage through the whole adapter',async()=>{
+ let diagnostic
+ const events=[
+  {event_type:'interaction.created',event_id:'t1',interaction:{id:'remote',status:'in_progress'}},
+  {event_type:'step.start',event_id:'t2',index:0,step:{type:'model_output'}},
+  {event_type:'step.delta',event_id:'t3',index:0,delta:{type:'text',text:'checking'}},
+  {event_type:'step.stop',event_id:'t4',index:0},
+  {event_type:'step.start',event_id:'t5',index:1,step:{type:'function_call',id:'call-1',name:'add'}},
+  {event_type:'step.delta',event_id:'t6',index:1,delta:{type:'arguments_delta',arguments:'{"a":1}'}},
+  {event_type:'step.stop',event_id:'t7',index:1},
+  {event_type:'interaction.requires_action',event_id:'t8',interaction:{id:'remote',usage:{total_input_tokens:40,total_cached_tokens:10,total_output_tokens:5,total_thought_tokens:2,total_tokens:47}}},
+ ]
+ responder=()=>sse(events)
+ try{
+  const out=await collect(createArgonAdapter(ctx,cfg(),undefined,undefined,d=>diagnostic=d).stream(toolRequest(GOOGLE_API_MODEL)))
+  assert.equal(out.at(-1).reason.kind,'tool-calls')
+  // The function_call step of the same hop must not close the first-hop
+  // watermark, or requires_action's single usage chunk would be dropped.
+  const usageChunks=out.filter(c=>c.type==='usage')
+  assert.equal(usageChunks.length,1)
+  assert.deepEqual(usageChunks[0].usage,{inputTokens:30,cacheReadTokens:10,outputTokens:7,reasoningTokens:2,totalTokens:47})
+  assert.equal(diagnostic.tokenUsage.reportedInputTokens,40)
+  assert.equal(diagnostic.tokenUsage.reportedCacheTokens,10)
+  assert.equal(diagnostic.tokenUsage.billedPromptTokens,40)
+ }finally{responder=undefined}
+})
+test('a single-hop output-only usage never fabricates a zero input watermark',async()=>{
+ let diagnostic
+ const events=[
+  {event_type:'interaction.created',event_id:'u1',interaction:{id:'remote',status:'in_progress'}},
+  {event_type:'step.start',event_id:'u2',index:0,step:{type:'function_call',id:'call-1',name:'add'}},
+  {event_type:'step.delta',event_id:'u3',index:0,delta:{type:'arguments_delta',arguments:'{"a":1}'}},
+  {event_type:'step.stop',event_id:'u4',index:0},
+  {event_type:'interaction.requires_action',event_id:'u5',interaction:{id:'remote',usage:{total_output_tokens:5,total_thought_tokens:2}}},
+ ]
+ responder=()=>sse(events)
+ try{
+  const out=await collect(createArgonAdapter(ctx,cfg(),undefined,undefined,d=>diagnostic=d).stream(toolRequest(GOOGLE_API_MODEL)))
+  assert.equal(out.at(-1).reason.kind,'tool-calls')
+  // An unknown input is not a known zero: no distorted usage chunk escapes.
+  assert.equal(out.some(c=>c.type==='usage'),false)
+  assert.equal(diagnostic.tokenUsage.reportedInputTokens,null)
+  assert.equal(diagnostic.tokenUsage.reportedCacheTokens,null)
+  assert.equal(diagnostic.tokenUsage.billedOutputTokens,5)
+  assert.equal(diagnostic.tokenUsage.billedThoughtsTokens,2)
+ }finally{responder=undefined}
+})
+test('a later hop cannot overwrite the first-hop input watermark',async()=>{
+ const rows=new Map(),hub=createInteractionStateHub()
+ hub.attach({table:()=>({get:k=>rows.get(k),get size(){return rows.size},entries:()=>rows.entries(),put:async(k,v)=>rows.set(k,v),delete:async k=>rows.delete(k)}),close:async()=>{}})
+ const before=wire.length
+ let diagnostic,gets=0
+ responder=entry=>{
+  if(entry.method==='POST')return sse([{event_type:'interaction.created',event_id:'e0',interaction:{id:'remote',status:'in_progress'}}])
+  // The first resume hop drops, so the reconnect hint must reach the next hop.
+  if(++gets===1)return new Response('{}',{status:503})
+  return sse([{event_type:'step.start',event_id:'e2',index:0,step:{type:'model_output'}},
+   {event_type:'step.delta',event_id:'e3',index:0,delta:{type:'text',text:'A'}},
+   {event_type:'step.stop',event_id:'e4',index:0},
+   {event_type:'step.start',event_id:'e5',index:1,step:{type:'model_output'}},
+   {event_type:'step.delta',event_id:'e6',index:1,delta:{type:'text',text:'B'}},
+   {event_type:'step.stop',event_id:'e7',index:1,usage:{total_input_tokens:270,total_output_tokens:15,total_thought_tokens:30}},
+   {event_type:'interaction.completed',event_id:'e8',interaction:{id:'remote',status:'completed',usage:{total_input_tokens:270,total_output_tokens:15,total_thought_tokens:30,total_tokens:315}}}])
+ }
+ try{
+  const out=await collect(createArgonAdapter(ctx,{...cfg(),interactionsBackground:true,allowInteractionStorage:true},undefined,undefined,d=>diagnostic=d,hub).stream(req(GOOGLE_API_MODEL)))
+  assert.equal(out.at(-1).reason.kind,'stop')
+  // No first-hop usage was ever observable, so no usage chunk may escape: the
+  // cumulative 270 must never be handed to the host as a context watermark, and
+  // a fabricated zero is equally forbidden.
+  assert.equal(out.some(c=>c.type==='usage'),false)
+  assert.equal(diagnostic.tokenUsage.reportedInputTokens,null)
+  assert.equal(diagnostic.tokenUsage.billedPromptTokens,270)
+  assert.equal(diagnostic.tokenUsage.billedOutputTokens,15)
+  assert.equal(diagnostic.tokenUsage.billedThoughtsTokens,30)
+  assert.equal(diagnostic.hops.every(h=>h.outcome!=='pending'),true)
+  // The background create hop carries the first GET, so its drop is recorded
+  // there and the reconnect hint becomes the following resume hop's backoff.
+  const create=diagnostic.hops.find(h=>h.trigger==='interaction-create')
+  const resumes=diagnostic.hops.filter(h=>h.trigger==='interaction-resume')
+  assert.equal(create.backoffDelayMs,0)
+  assert.equal(create.status,503)
+  assert.equal(create.outcome,'api-error')
+  assert.equal(resumes.length,1)
+  assert.ok(resumes[0].backoffDelayMs>0,JSON.stringify(diagnostic.hops))
+  assert.equal(wire.slice(before).filter(x=>x.method==='POST').length,1)
+  assert.equal(rows.size,0)
+ }finally{responder=undefined;await hub.close()}
+})
 process.on('exit',()=>{globalThis.fetch=originalFetch})

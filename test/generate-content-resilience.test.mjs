@@ -320,3 +320,135 @@ test('consumer return within a checkpoint flush accounts only the rows actually 
   assert.equal(out.usage.at(-1).billedOutputTokens, 3)
 })
 
+// An empty heartbeat frame carries no text, thought, checkpoint or finish
+// reason; it must never renew the idle budget of the phase it is stuck in.
+async function emptyHeartbeatRun(prefix = []) {
+  let index = 0
+  const controller = new AbortController()
+  const out = await setup(() => ({
+    [Symbol.asyncIterator]() { return this },
+    next() {
+      if (index < prefix.length) return Promise.resolve({ value: wire(prefix[index++]), done: false })
+      index++
+      return sleep(2).then(() => ({ value: wire({}), done: false }))
+    },
+    return() { return Promise.resolve({ done: true }) },
+  }), { signal: controller.signal, meta: { phaseTimeouts: { initialTtft: 40, thinking: 40, transition: 40, streaming: 40 } } })
+  out.hearted = 0
+  const consume = (async () => {
+    try { for await (const chunk of out.stream) { out.hearted++; void chunk } } catch (error) { out.error = error }
+  })()
+  try {
+    await Promise.race([consume, sleep(3000).then(() => { throw new Error('empty heartbeat frames kept the watchdog alive') })])
+  } finally {
+    // Never leave a regressed watchdog looping in the runner.
+    controller.abort()
+    await consume.catch(() => {})
+  }
+  return out
+}
+for (const [label, prefix] of [['initial-ttft', []], ['thinking then transition', [row(thought)]]]) {
+  test(label + ' empty heartbeat frames cannot extend the phase timeout', async () => {
+    const out = await emptyHeartbeatRun(prefix)
+    assert.equal(out.error?.code, 'STREAM_PHASE_TIMEOUT')
+    assert.equal(out.requests.length, 1)
+    assert.ok(out.hearted > 1, 'the stream kept receiving heartbeat frames before the timeout')
+  })
+}
+test('empty heartbeat frames time out in the transition phase they entered', async () => {
+  const out = await emptyHeartbeatRun()
+  assert.equal(out.error?.code, 'STREAM_PHASE_TIMEOUT')
+  assert.match(out.error.message, /transition/)
+})
+
+
+// Long-decode checkpoints renew the idle budget only when the token is new; a
+// repeated token is a stall, not progress.
+async function stalledFrameRun(frameFor, phaseTimeouts) {
+ let index = 0
+ const controller = new AbortController()
+ const out = await setup(() => ({
+  [Symbol.asyncIterator]() { return this },
+  next() { return sleep(2).then(() => ({ value: wire(frameFor(index++)), done: false })) },
+  return() { return Promise.resolve({ done: true }) },
+ }), { signal: controller.signal, meta: { phaseTimeouts } })
+ out.frames = 0
+ const consume = (async () => { try { for await (const chunk of out.stream) { out.frames++; void chunk } } catch (error) { out.error = error } })()
+ try {
+  await Promise.race([consume, sleep(3000).then(() => { throw new Error('stalled frames kept the watchdog alive') })])
+ } finally {
+  // Never leave a regressed watchdog looping in the runner.
+  controller.abort()
+  await consume.catch(() => {})
+ }
+ return out
+}
+test('a repeated continuation token cannot renew the watchdog', async () => {
+ const out = await stalledFrameRun(() => ({ candidates: [{ content: { role: 'model', parts: [] }, continuationToken: 'cp' }] }), { initialTtft: 60, thinking: 60, transition: 60, streaming: 60 })
+ assert.equal(out.error?.code, 'STREAM_PHASE_TIMEOUT')
+ assert.match(out.error.message, /transition/)
+ // A repeated token never renews the idle budget, so every hop stalls the same
+ // way and the existing bounded same-token retry budget ends the stream.
+ assert.ok(out.requests.length > 1 && out.requests.length <= 5, String(out.requests.length))
+ assert.ok(out.events.every(event => event.finished))
+})
+test('an empty thought frame cannot renew the watchdog', async () => {
+ const out = await stalledFrameRun(() => ({ candidates: [{ content: { role: 'model', parts: [{ thought: true, text: '' }] } }] }), { initialTtft: 60, thinking: 40, transition: 40, streaming: 40 })
+ assert.equal(out.error?.code, 'STREAM_PHASE_TIMEOUT')
+ assert.match(out.error.message, /thinking/)
+ assert.equal(out.requests.length, 1)
+ assert.ok(out.frames > 1, 'the stream kept receiving empty thought frames before the timeout')
+})
+// Pseudo progress must never renew the idle budget: alternating empty frames
+// cannot ping-pong between phases, and a re-used signature or an empty
+// {} functionCall is not output.
+test('alternating empty and empty-thought frames cannot renew the watchdog', async () => {
+ const out = await stalledFrameRun(index => index % 2
+  ? { candidates: [{ content: { role: 'model', parts: [{ thought: true, text: '' }] } }] }
+  : {}, { initialTtft: 60, thinking: 40, transition: 40, streaming: 40 })
+ assert.equal(out.error?.code, 'STREAM_PHASE_TIMEOUT')
+ assert.equal(out.requests.length, 1)
+ assert.ok(out.frames > 2, 'the stream kept receiving alternating empty frames before the timeout')
+})
+// Every signature already delivered in this hop is remembered, so neither an
+// A/B/A/B alternation nor a frame carrying the same two signatures can pass for
+// fresh output. Only a genuinely unseen signature renews the idle budget.
+const repeatedSignatureFrames = [
+ ['a single repeated signature', () => ({ candidates: [{ content: { role: 'model', parts: [{ thought: true, text: '', thoughtSignature: 'same-signature' }] } }] })],
+ ['two alternating signatures', index => ({ candidates: [{ content: { role: 'model', parts: [{ thought: true, text: '', thoughtSignature: index % 2 ? 'sig-a' : 'sig-b' }] } }] })],
+ ['a two-signature frame', () => ({ candidates: [{ content: { role: 'model', parts: [{ thought: true, text: '', thoughtSignature: 'sig-a' }, { thought: true, text: '', thoughtSignature: 'sig-b' }] } }] })],
+]
+for (const [label, frameFor] of repeatedSignatureFrames) {
+ test('a repeated thought signature cannot renew the watchdog: ' + label, async () => {
+  const out = await stalledFrameRun(frameFor, { initialTtft: 60, thinking: 40, transition: 40, streaming: 40 })
+  assert.equal(out.error?.code, 'STREAM_PHASE_TIMEOUT')
+  assert.match(out.error.message, /thinking/)
+  assert.equal(out.requests.length, 1)
+  assert.ok(out.frames > 1, 'the stream kept receiving known signatures before the timeout')
+ })
+}
+test('an empty functionCall frame cannot renew the watchdog', async () => {
+ const out = await stalledFrameRun(() => ({ candidates: [{ content: { role: 'model', parts: [{ functionCall: {} }] } }] }), { initialTtft: 60, thinking: 40, transition: 40, streaming: 40 })
+ assert.equal(out.error?.code, 'STREAM_PHASE_TIMEOUT')
+ assert.match(out.error.message, /transition/)
+ assert.equal(out.requests.length, 1)
+ assert.ok(out.frames > 1, 'the stream kept receiving empty functionCall frames before the timeout')
+})
+test('a newly signed thought frame renews the watchdog', async () => {
+ let index = 0, ended = false
+ const out = await run(() => ({
+  [Symbol.asyncIterator]() { return this },
+  next() {
+   const n = index++
+   if (n < 30) return sleep(2).then(() => ({ value: wire({ candidates: [{ content: { role: 'model', parts: [{ thought: true, text: '', thoughtSignature: 'sig-' + n }] } }] }), done: false }))
+   if (ended) return Promise.resolve({ done: true })
+   ended = true
+   return Promise.resolve({ value: wire(done), done: false })
+  },
+  return() { return Promise.resolve({ done: true }) },
+ }), { meta: { phaseTimeouts: { initialTtft: 500, thinking: 40, transition: 40, streaming: 40 } } })
+ assert.equal(out.error, undefined)
+ assert.equal(out.requests.length, 1)
+ assert.ok(out.parts.length >= 30, 'every signed frame is delivered')
+})
+

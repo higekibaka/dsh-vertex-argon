@@ -94,14 +94,16 @@ export function createGoogleSignatureBridge(context, model) {
       for (const part of chunk.candidates?.[0]?.content?.parts ?? []) {
         bytes += Buffer.byteLength(JSON.stringify(part))
         if (bytes > 64 * 1024 * 1024) throw failure('Google response exceeded the bounded signature replay buffer.')
-        const onlySignature = typeof part.thoughtSignature === 'string' && Object.keys(part).filter(key => part[key] !== undefined).every(key => key === 'thoughtSignature' || key === 'thought')
+        // A Part may serialize the signature in either wire spelling.
+        const sig = part.thoughtSignature ?? part.thought_signature
+        const onlySignature = typeof sig === 'string' && Object.keys(part).filter(key => part[key] !== undefined).every(key => key === 'thoughtSignature' || key === 'thought_signature' || key === 'thought')
         if (onlySignature) {
-          if (!part.thoughtSignature || (part.thought !== undefined && typeof part.thought !== 'boolean')) throw failure('Google returned an invalid standalone signature.')
+          if (!sig || (part.thought !== undefined && typeof part.thought !== 'boolean')) throw failure('Google returned an invalid standalone signature.')
           bytes += 320 // Include the local versioned codec and content binding in the retention bound.
           if (bytes > 64 * 1024 * 1024) throw failure('Google signature replay metadata exceeded the bounded response buffer.')
           close()
           const block = { type: 'text', text: '' }, index = start(block)
-          standalone.set(index, { signature: part.thoughtSignature, ...(part.thought === undefined ? {} : { thought: part.thought }) })
+          standalone.set(index, { signature: sig, ...(part.thought === undefined ? {} : { thought: part.thought }) })
           emit({ type: 'text_start', contentIndex: index }); emit({ type: 'text_end', contentIndex: index, content: '' })
           continue
         }
@@ -114,7 +116,7 @@ export function createGoogleSignatureBridge(context, model) {
           }
           const key = type === 'text' ? 'text' : 'thinking'
           current[key] += part.text
-          if (part.thoughtSignature) current[type === 'text' ? 'textSignature' : 'thinkingSignature'] = part.thoughtSignature
+          if (sig) current[type === 'text' ? 'textSignature' : 'thinkingSignature'] = sig
           emit({ type: type === 'text' ? 'text_delta' : 'thinking_delta', contentIndex: content.length - 1, delta: part.text })
         }
         if (part.functionCall) {
@@ -122,7 +124,7 @@ export function createGoogleSignatureBridge(context, model) {
           const call = part.functionCall
           const id = call.id && !usedToolIds.has(call.id) ? call.id : 'argon_' + randomUUID().replaceAll('-', '')
           usedToolIds.add(id)
-          const block = { type: 'toolCall', id, name: call.name || '', arguments: call.args ?? {}, ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}) }
+          const block = { type: 'toolCall', id, name: call.name || '', arguments: call.args ?? {}, ...(sig ? { thoughtSignature: sig } : {}) }
           const index = start(block)
           emit({ type: 'toolcall_start', contentIndex: index })
           emit({ type: 'toolcall_delta', contentIndex: index, delta: JSON.stringify(block.arguments) })

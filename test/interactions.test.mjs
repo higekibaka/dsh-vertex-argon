@@ -119,6 +119,7 @@ test('string false cannot grant background storage consent',async()=>{
 test('failed and cancelled server statuses map distinctly',async()=>{
  assert.equal((await run([created,done('failed')])).finish.reason.kind,'error')
  assert.equal((await run([created,done('cancelled')])).finish.reason.kind,'aborted')
+ assert.equal((await run([created,done('budget_exceeded')])).finish.reason.kind,'max-tokens')
 })
 test('foreign completed tool history is transcripted, never assigned fake signatures',async()=>{
  const opts=options();opts.messages.push({role:'assistant',content:[{type:'tool-call',id:'foreign',name:'add',arguments:'{"a":1}'}],source:{provider:'other',model:'other'}},{role:'tool',toolCallId:'foreign',content:[{type:'text',text:'result'}]})
@@ -163,5 +164,117 @@ test('repeated cursor-free partial replay cannot reset the bounded recovery limi
  assert.equal(out.calls.filter(c=>c.method==='create').length,1)
  assert.equal(out.calls.filter(c=>c.method==='get').length,3)
  assert.equal(out.blocks.length,0)
+})
+
+test('2026-05-20 lifecycle events finalize the stream on their own',async()=>{
+ const out=await run([
+  event('interaction.created',{interaction:{id:'remote-1',status:'in_progress'}}),
+  event('interaction.in_progress',{interaction:{id:'remote-1'}}),
+  start(0,'model_output'),delta(0,'text',{text:'OK'}),stop(0),
+  start(1,'function_call',{id:'call-1',name:'add'}),delta(1,'arguments_delta',{arguments:'{"a":1}'}),stop(1),
+  event('interaction.requires_action',{interaction:{id:'remote-1',usage:{total_input_tokens:100,total_cached_tokens:20,total_output_tokens:5,total_thought_tokens:7,total_tokens:112}}}),
+ ])
+ assert.equal(out.text,'OK');assert.equal(out.finish.reason.kind,'tool-calls')
+ assert.equal(out.blocks.find(b=>b.type==='tool-call').arguments,'{"a":1}')
+ assert.equal(out.calls.filter(c=>c.method==='create').length,1)
+ assert.equal(out.calls.filter(c=>c.method==='cancel').length,0)
+ // A lifecycle event that carries usage still reaches the host exactly once.
+ assert.deepEqual(out.chunks.find(c=>c.type==='usage').usage,{inputTokens:80,cacheReadTokens:20,outputTokens:12,reasoningTokens:7,totalTokens:112})
+})
+
+test('unknown lifecycle notices never abort a paid task',async()=>{
+ let exit
+ const out=await run([
+  created,
+  event('interaction.custom_future_event',{interaction:{id:'remote-1',status:'in_progress'}}),
+  start(0,'model_output'),delta(0,'text',{text:'OK'}),stop(0),done(),
+ ],{settings:{store:true,background:true,onExit:reason=>{exit=reason}}})
+ assert.equal(out.text,'OK');assert.equal(out.finish.reason.kind,'stop');assert.equal(exit,'completed')
+ assert.equal(out.calls.filter(c=>c.method==='cancel').length,0)
+})
+
+test('an unrecoverable provider error event is terminal and never cancels the cloud task',async()=>{
+ let exit
+ const out=await run([
+  {...created,event_id:'e1'},{...start(0,'model_output'),event_id:'e2'},{...delta(0,'text',{text:'A'}),event_id:'e3'},
+  event('error',{event_id:'e4',error:{code:'UNAUTHENTICATED'}}),
+ ],{settings:{store:true,background:true,onExit:reason=>{exit=reason}}})
+ assert.equal(exit,'remote-error');assert.equal(out.finish.reason.kind,'error')
+ assert.match(out.finish.reason.failure.message,/UNAUTHENTICATED/)
+ assert.equal(out.calls.filter(c=>c.method==='get').length,0)
+ assert.equal(out.calls.filter(c=>c.method==='cancel').length,0)
+})
+
+test('replayed user_input steps are structural and never rendered or replayed',async()=>{
+ const out=await run([created,start(0,'user_input'),stop(0),start(1,'model_output'),delta(1,'text',{text:'OK'}),stop(1),done()])
+ assert.equal(out.text,'OK');assert.equal(out.finish.reason.kind,'stop');assert.equal(out.blocks.length,1)
+ assert.deepEqual(out.finish.replayState.response.steps.map(s=>s.type),['model_output'])
+ assert.equal(out.calls.filter(c=>c.method==='cancel').length,0)
+})
+
+test('server retry hints drive the reconnect wait and long hints fail fast',async()=>{
+ const delays=[]
+ const makeTransport=extra=>{
+  const calls=[]
+  return{calls,transport:{
+   create:async()=>stream([{...created,event_id:'e1'},{...start(0,'model_output'),event_id:'e2'},{...delta(0,'text',{text:'A'}),event_id:'e3'},Object.assign(new Error('drop'),{status:503,phase:'fetch',...extra})]),
+   get:async(id,request)=>{calls.push({id,request});return stream([{...delta(0,'text',{text:'B'}),event_id:'e4'},{...stop(0),event_id:'e5'},{...done(),event_id:'e6'}])},
+   cancel:async()=>{calls.push({method:'cancel'});return{status:'cancelled'}},
+  }}
+ }
+ const short=makeTransport({retryDelayMs:30})
+ const out=await run([],{settings:{store:true,transport:short.transport,onReconnectDelay:ms=>delays.push(ms)}})
+ assert.equal(out.text,'AB');assert.equal(out.finish.reason.kind,'stop')
+ assert.deepEqual(delays,[30])
+ assert.deepEqual(Object.keys(short.calls[0].request).sort(),['last_event_id','signal','stream'])
+ assert.equal(short.calls[0].request.last_event_id,'e3')
+ const long=makeTransport({retryDelayMs:61000})
+ const stopped=await run([],{settings:{store:true,transport:long.transport,onReconnectDelay:ms=>delays.push(ms)}})
+ assert.equal(stopped.finish.reason.kind,'error');assert.equal(long.calls.length,0)
+ assert.deepEqual(delays,[30])
+})
+
+
+for (const [status, kind] of [['failed', 'error'], ['cancelled', 'aborted'], ['budget_exceeded', 'max-tokens']]) {
+ test('a status_update carrying ' + status + ' finalizes the stream at EOF', async () => {
+  const out = await run([
+   created,
+   start(0, 'model_output'), delta(0, 'text', { text: 'partial' }), stop(0),
+   event('interaction.status_update', { interaction_id: 'remote-1', status }),
+  ])
+  assert.equal(out.finish.reason.kind, kind)
+  // The terminal status_update is itself the end of the stream: no reconnect,
+  // no protocol interruption and no remote cancellation.
+  assert.equal(out.calls.filter(c => c.method === 'get').length, 0)
+  assert.equal(out.calls.filter(c => c.method === 'cancel').length, 0)
+  assert.equal(out.finish.reason.failure?.code, kind === 'error' ? 'ARGON_INTERACTIONS_FAILED' : kind === 'aborted' ? 'ABORTED' : undefined)
+ })
+}
+test('a status_update carrying completed still waits for the dedicated completion event', async () => {
+ const out = await run([{ ...created, event_id: 'e1' }, { ...start(0, 'model_output'), event_id: 'e2' }, event('interaction.status_update', { status: 'completed', event_id: 'e3' }), new Error('drop')], { settings: { store: true }, reconnect: [{ ...delta(0, 'text', { text: 'late' }), event_id: 'e4' }, { ...stop(0), event_id: 'e5' }, { ...done(), event_id: 'e6' }] })
+ assert.equal(out.text, 'late'); assert.equal(out.finish.reason.kind, 'stop')
+ assert.equal(out.calls.filter(c => c.method === 'get').length, 1)
+})
+test('an unknown interaction event cannot roll back a confirmed completed status', async () => {
+ const out = await run([created, start(0, 'model_output'), delta(0, 'text', { text: 'OK' }), stop(0), done(), event('interaction.custom_event', { interaction: { id: 'remote-1', status: 'in_progress' } })])
+ assert.equal(out.text, 'OK'); assert.equal(out.finish.reason.kind, 'stop')
+ assert.equal(out.calls.filter(c => c.method === 'cancel').length, 0)
+})
+test('a lifecycle notice cannot roll back a confirmed completed status', async () => {
+ const out = await run([created, start(0, 'model_output'), delta(0, 'text', { text: 'OK' }), stop(0), done(), event('interaction.in_progress', { interaction: { id: 'remote-1', status: 'in_progress' } })])
+ assert.equal(out.text, 'OK'); assert.equal(out.finish.reason.kind, 'stop')
+ assert.equal(out.calls.filter(c => c.method === 'cancel').length, 0)
+})
+test('a dedicated budget_exceeded lifecycle event finalizes as max-tokens', async () => {
+ const out = await run([created, start(0, 'model_output'), delta(0, 'text', { text: 'partial' }), stop(0), event('interaction.budget_exceeded', { interaction: { id: 'remote-1' } })])
+ assert.equal(out.finish.reason.kind, 'max-tokens')
+ assert.equal(out.calls.filter(c => c.method === 'cancel').length, 0)
+ assert.equal(out.calls.filter(c => c.method === 'get').length, 0)
+})
+test('a delta after a closed user_input step is a protocol error', async () => {
+ const out = await run([created, start(0, 'user_input'), stop(0), delta(0, 'text', { text: 'late' }), done()])
+ assert.equal(out.finish.reason.kind, 'error')
+ assert.match(out.finish.reason.failure.message, /already closed/)
+ assert.equal(out.calls.filter(c => c.method === 'cancel').length, 0)
 })
 

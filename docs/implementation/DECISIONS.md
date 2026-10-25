@@ -1,4 +1,4 @@
-# dsh-vertex-argon 核心技术决定与协议合同（v1.6.0）
+# dsh-vertex-argon 核心技术决定与协议合同（v1.6.2）
 
 本文区分当前实现合同与历史实测；验证来源与本轮结果见 [STATUS.md](<STATUS.md>)。
 
@@ -55,7 +55,7 @@
 
 - 每跳创建独立 `AbortController`，超时终止当前上游工作；清理定时器、用户取消监听和旧迭代器，旧跳不能中止新跳。
 - 等待连接、流迭代及帧 JSON 解析均需受约束；不能只给 `next()` 加时间限制而放任其他等待永久阻塞。
-- 只累计等待上游工作所用时间，不在 `yield` 后让消费方处理/暂停时间消耗超时预算。
+- 只累计等待上游工作所用时间，不在 `yield` 后让消费方处理/暂停时间消耗超时预算。看门狗仅在首次进入 `thinking` / `transition` 阶段、收到非空文本、具名 `functionCall`、本跳有界集合 `seenSignatures`（上限 8,192）中未见的新签名、新检查点或首次终止信号时刷新预算；空帧、空思考帧、空 `{ functionCall: {} }`、交替空帧与重复签名不续期。
 - 用户取消立即停止，不进入自动恢复。阶段超时与用户取消必须区分；超时只能在满足安全重试条件时恢复。
 - `meta.phaseTimeouts` 的 `initialTtft`、`thinking`、`transition`、`streaming` 均以毫秒计，可在离线测试中缩短；这是内部参数，不是额外用户配置项，完整配置仍为 16 项。
 
@@ -82,7 +82,8 @@ Continue and provide the final response or tool call.
 ## 4. Interactions 状态与只读查询
 
 - [interaction-state.js](<../../interaction-state.js>) 在 `create` 前写入 `phase: creating`。若未获得云端 ID 就断网或退出，保留未知创建锁，禁止自动重复创建；用户可在 Operations 中确认释放本地锁。
-- [interactions.js](<../../interactions.js>) 用已知 `interaction.id` 与 `lastEventId` 调用 `get(id, { stream: true, last_event_id })` 续读，避免重复提交已输出内容。
+- [interactions.js](<../../interactions.js>) 用已知 `interaction.id` 与 `lastEventId` 调用 `get(id, { stream: true, last_event_id })` 续读，避免重复提交已输出内容；兼容 `2026-05-20` 独立生命周期事件（`in_progress`、`requires_action`、`failed`、`cancelled`、`incomplete`、`budget_exceeded`）与回放流 `user_input` 步骤，已确认终态不被后续通知回退，未知非内容生命周期通知不触发远端取消。
+- 同会话发起新提示词遇到历史已知 ID 锁时，[interaction-state.js](<../../interaction-state.js>) 先以有界超时执行单次非流式对账：若云端已 `failed` / `cancelled` 或返回 `404` 则移除死记录并放行；若云端已处于 `completed` / `requires_action` / `incomplete` / `budget_exceeded` 终态则保留原 `requestKey` 的未回放句柄同时解除对新提示词的排他阻塞；流内不可恢复错误同样先经非流式对账确认 `failed` / `cancelled` / `404` 后才释放句柄。
 - [interaction-query.js](<../../interaction-query.js>) 只执行已知 ID 的单次 `GET`，使用所选路由的当前凭据。查询仍仅接受 `google-vertex` / `google-generative-ai`；不能因代理共享后者就默认替换为代理查询。
 - 查询不生成、不取消、不执行返回的工具。`query-response` 必须保留，用于读取 `query` 的临时分页结果。
 
@@ -98,7 +99,7 @@ billedOutputTokens, billedThoughtsTokens, billedToolTokens,
 billedPromptTokens, billedCachedTokens, billedTotalTokens
 ```
 
-每跳基本计数为 `promptTokens`、`cachedTokens`、`outputTokens`、`thoughtsTokens`、`totalTokens`。输入水位采用首轮原始输入口径，不能用续写后的 prompt 或累计输入冒充上下文长度；跨跳累计字段保留上游各次尝试的观测用量，输出/思考/工具累计与已提交输出分开，不折算费用。
+每跳基本计数为 `promptTokens`、`cachedTokens`、`outputTokens`、`thoughtsTokens`、`totalTokens`。输入水位采用首轮原始输入口径，不能用续写后的 prompt 或累计输入冒充上下文长度；Interactions 仅在首个 `model_output` 关闭后开启下一个 `model_output` 续跳时关闭首跳水位窗口（同跳 `function_call` 不关闭），若首跳从未报告 `total_input_tokens` 则保持未知（`null`）且不向宿主交付伪造 `0` 或跨跳累计 `usage` 分片；跨跳累计字段保留上游各次尝试的观测用量，输出/思考/工具累计与已提交输出分开，不折算费用。
 
 新记录严格校验字段；旧版本读取入口仅剔除已退役的 `usageDetails`、`regionClass`，补齐缺失基本计数的兼容默认值，其余未知字段仍按严格规则校验。**读时兼容、写时严格，不改写、不迁移旧磁盘记录。**
 

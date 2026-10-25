@@ -55,7 +55,8 @@ async function clientSeeds() {
   }
   source = source.replace(importPattern, (_all, bindings, specifier) => 'const {' + bindings.replace(/\s+as\s+/g, ':') + '} = imports[' + JSON.stringify(specifier) + '];')
   const seed = source.match(/function\s+([\w$]+)\(\)\{return\{react:/)
-  const boot = source.indexOf('const Ms=globalThis.dshDesktopBoot')
+  // The boot boundary minifier assigns a version-specific local name.
+  const boot = source.search(/const [\w$]+=globalThis\.dshDesktopBoot\b/)
   assert.ok(seed && boot > 0, 'Recognized real host static module table and boot boundary are required')
   source = source.slice(0, boot).replaceAll('import.meta.url', JSON.stringify(url.href))
   // Only the Vite preload feature check runs; never mount or start the host application.

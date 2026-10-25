@@ -2,15 +2,19 @@
 // https://ai.google.dev/api/interactions-api#Resource:InteractionSseStreamEvent
 // https://ai.google.dev/gemini-api/docs/long-decode#stream-long-decode
 import { buildInteractionRequest, contentHash, historyHash, INTERACTIONS_REPLAY_API } from './interactions-input.js'
-import { computeReconnectDelayMs, waitWithAbort } from './generate-content.js'
+import { computeReconnectDelayMs, waitWithAbort, parseUpstreamRetryDelayMs, MAX_SERVER_RETRY_DELAY_MS } from './generate-content.js'
 import { fetchErrorCodes } from './diagnostics.js'
-import { interactionExitReason, cancelsRemoteInteraction } from './interaction-lifecycle.js'
+import { interactionExitReason, cancelsRemoteInteraction, isRecoverableStreamErrorCode, normalizeStreamErrorCode } from './interaction-lifecycle.js'
 export { buildInteractionRequest } from './interactions-input.js'
-const terminal = new Set(['completed','requires_action','incomplete','failed','cancelled'])
+const terminal = new Set(['completed','requires_action','incomplete','failed','cancelled','budget_exceeded'])
 const MAX_BYTES = 64*1024*1024
 const MAX_EVENTS = 65536
 function protocolError(message) { return Object.assign(new Error(message),{code:'ARGON_INTERACTIONS_PROTOCOL'}) }
-const retryable = e => e?.recoverableStreamError === true || !String(e?.code??'').startsWith('ARGON_') && (e?.status===undefined || e.status===408 || e.status===429 || e.status>=500 || (e.status>=200 && e.status<300 && ['stream','response-body'].includes(e.phase) && fetchErrorCodes(e).length>0))
+const retryable = e => {
+  // A server asking for a longer wait than GenerateContent allows fails fast.
+  if(parseUpstreamRetryDelayMs(e) > MAX_SERVER_RETRY_DELAY_MS)return false
+  return e?.recoverableStreamError === true || !String(e?.code??'').startsWith('ARGON_') && (e?.status===undefined || e.status===408 || e.status===429 || e.status>=500 || (e.status>=200 && e.status<300 && ['stream','response-body'].includes(e.phase) && fetchErrorCodes(e).length>0))
+}
 function validObject(value) { return value && typeof value==='object' && !Array.isArray(value) }
 function usageOf(raw) {
   const count=k=>Number.isSafeInteger(raw?.[k])&&raw[k]>=0?raw[k]:0
@@ -64,20 +68,44 @@ export async function* streamInteractions(options, settings) {
     if(id){if(interactionId&&interactionId!==id)throw protocolError('Interaction ID changed mid-stream.');interactionId=id}
     observeUsage(event)
     if(type==='interaction.created'||type==='interaction.status_update'||type==='interaction.completed'){
-      status=event.interaction?.status??event.status??(type==='interaction.completed'?'completed':status)
-      if(type==='interaction.completed')completedEvent=true
+      const nextStatus=event.interaction?.status??event.status??(type==='interaction.completed'?'completed':status)
+      // A confirmed terminal status is never rolled back by a later notice.
+      if(!terminal.has(status)||terminal.has(nextStatus))status=nextStatus
+      // A status_update carrying a failed/cancelled/over-budget state is itself the
+      // end of the stream: EOF must finalize it rather than retrying the hop.
+      // A plain completed status still waits for the dedicated completed event.
+      if(type==='interaction.completed'||(type==='interaction.status_update'&&['failed','cancelled','budget_exceeded'].includes(status)))completedEvent=true
+      return
+    }
+    // 2026-05-20 emits dedicated terminal lifecycle events instead of only
+    // interaction.completed; each one closes the stream on its own.
+    if(type==='interaction.in_progress'||type==='interaction.requires_action'||type==='interaction.failed'||type==='interaction.cancelled'||type==='interaction.incomplete'||type==='interaction.budget_exceeded'){
+      const implied=type.slice('interaction.'.length)
+      const nextStatus=event.interaction?.status??event.status??implied
+      // The same guard as status updates: a lifecycle notice for a task that has
+      // already reached a confirmed terminal state never rolls it back.
+      if(!terminal.has(status)||terminal.has(nextStatus))status=nextStatus
+      if(type!=='interaction.in_progress')completedEvent=true
       return
     }
     if(type==='error'){
-      const code=String(event.error?.code??'unknown').replace(/[^A-Za-z0-9_.-]/g,'').slice(0,64)
+      const code=normalizeStreamErrorCode(event.error?.code)
       const error=protocolError('Interactions returned an error event ('+code+').')
       // Only retry the existing stored task, never create another paid task.
-      error.recoverableStreamError=['authentication','unavailable','internal','deadline_exceeded'].includes(code)
+      error.recoverableStreamError=isRecoverableStreamErrorCode(code)
+      if(!error.recoverableStreamError){
+        // An unclassified error frame is not proof that the cloud task ended:
+        // nothing is reported as terminal until the cloud state is re-probed.
+        error.remoteTerminalError=true
+        status='failed'
+      }
       throw error
     }
     if(type==='step.start'){
       if(!Number.isSafeInteger(event.index)||event.index<0||event.index>4095||steps.has(event.index))throw protocolError('Invalid or duplicate step.start.')
       const step=event.step
+      // Replayed user-input steps are structural markers with no model output.
+      if(validObject(step)&&step.type==='user_input'){steps.set(event.index,{kind:'user_input',closed:false});progressVersion++;return}
       if(!validObject(step)||!['thought','model_output','function_call'].includes(step.type))throw protocolError('Unsupported Interactions step type; this adapter executes only DSH-declared local tools.')
       const state={kind:step.type,text:'',signature:step.signature,callId:step.id,name:step.name,argsValue:step.arguments,argsText:'',closed:false}
       steps.set(event.index,state);progressVersion++
@@ -88,6 +116,10 @@ export async function* streamInteractions(options, settings) {
     if(type==='step.delta'){
       const state=stateFor(event.index),delta=event.delta
       if(!validObject(delta))throw protocolError('Invalid step delta.')
+      if(state.kind==='user_input'){
+        if(state.closed)throw protocolError('Received a delta for an already closed step.')
+        return
+      }
       if(delta.type==='text_annotation_delta'&&state.kind==='model_output')return // additive citations; no DSH annotation block type
       if(delta.type==='text'&&state.kind==='model_output')yield*appendText(state,delta.text)
       else if(delta.type==='thought_summary'&&state.kind==='thought'){
@@ -110,6 +142,7 @@ export async function* streamInteractions(options, settings) {
       const state=stateFor(event.index)
       if(state.closed)throw protocolError('Duplicate step.stop without a replay cursor.')
       state.closed=true;progressVersion++
+      if(state.kind==='user_input')return
       if(state.kind==='function_call'){
         try{state.args=state.argsText?JSON.parse(state.argsText):(state.argsValue??{})}catch{state.invalidArguments=true}
         if(!validObject(state.args))state.invalidArguments=true
@@ -118,7 +151,12 @@ export async function* streamInteractions(options, settings) {
     }
     // Usage/status extensions may be added without rendering; unknown semantic
     // output events fail closed rather than silently losing generated content.
-    if(typeof type==='string'&&type.startsWith('interaction.'))throw protocolError('Unknown interaction lifecycle event: '+type)
+    if(typeof type==='string'&&type.startsWith('interaction.')){
+      // Future non-content lifecycle notices and heartbeats must never abort a
+      // paid task; only an explicit error event is fatal. Their payload is
+      // unknown, so it must never overwrite an already confirmed status.
+      return
+    }
     throw protocolError('Unknown Interactions stream event.')
   }
   const cancel=async()=>{
@@ -140,9 +178,12 @@ export async function* streamInteractions(options, settings) {
         if(!stream?.[Symbol.asyncIterator])throw protocolError('Interactions create/get returned no event stream.')
         for await(const event of stream){signal?.throwIfAborted();yield*handle(event)}
       }catch(e){failure=e}
-      signal?.throwIfAborted()
+      // A terminal frame or an unrecoverable failure decides the outcome before a
+      // simultaneous local abort: aborting must not rewrite it as a user stop and
+      // must not send /cancel to a remote task that already ended.
       if(!failure&&completedEvent&&terminal.has(status))break
       if(failure&&!retryable(failure))throw failure
+      signal?.throwIfAborted()
       if((!replayingWithoutCursor||lastEventId)&&progressVersion>beforeProgress)reconnects=0
       if(connections>=64||Date.now()>=deadline)throw Object.assign(new Error('Interactions recovery reached its connection or runtime bound.'),{code:'ARGON_INTERACTIONS_INTERRUPTED'})
       if(!settings.store||!interactionId||reconnects>=3)throw failure??Object.assign(new Error('Interactions stream ended without a terminal status or safe recovery cursor.'),{code:'ARGON_INTERACTIONS_INTERRUPTED'})
@@ -154,7 +195,11 @@ export async function* streamInteractions(options, settings) {
         steps.clear();blocks.clear();seenEvents.clear();emittedToolIds.clear()
         blockIndex=0;bytes=0;status=undefined;usage=undefined;completedEvent=false
       }else replayingWithoutCursor=false
-      await waitWithAbort(computeReconnectDelayMs(++reconnects,settings.reconnectBackoff),signal)
+      const delayMs=computeReconnectDelayMs(++reconnects,settings.reconnectBackoff,parseUpstreamRetryDelayMs(failure))
+      await waitWithAbort(delayMs,signal)
+      // The transport options of get() stay byte-for-byte unchanged; hops only
+      // observe the suggested wait for diagnostics.
+      settings.onReconnectDelay?.(delayMs)
       connections++
       // Reconnect even if an early status said completed: drain the replayed
       // events through EOF before finalizing, as required by the long-decode guide.
@@ -164,7 +209,7 @@ export async function* streamInteractions(options, settings) {
         stream=(async function*(){throw e})()
       }
     }
-    for(const state of steps.values())if(state.kind!=='function_call')yield*closeText(state)
+    for(const state of steps.values())if(state.kind!=='function_call'&&state.kind!=='user_input')yield*closeText(state)
     const toolStates=[...steps.values()].filter(s=>s.kind==='function_call')
     if(status==='completed'||status==='requires_action'){
       if([...steps.values()].some(state=>!state.closed))throw protocolError('Interactions completed before every step.stop was received.')
@@ -188,11 +233,12 @@ export async function* streamInteractions(options, settings) {
     const content=[...blocks.entries()].sort((a,b)=>a[0]-b[0]).map(([,block])=>block)
     const replaySteps=[]
     if(status==='completed'||status==='requires_action')for(const [,state]of [...steps.entries()].sort((a,b)=>a[0]-b[0])){
+      if(state.kind==='user_input')continue
       if(state.kind==='thought')replaySteps.push({type:'thought',...(state.signature?{signature:state.signature}:{}),...(state.text?{summary:[{type:'text',text:state.text}]}:{})})
       else if(state.kind==='model_output')replaySteps.push({type:'model_output',content:[{type:'text',text:state.text}]})
       else replaySteps.push({type:'function_call',id:state.callId,name:state.name,arguments:state.args})
     }
-    const kind=status==='requires_action'||(status==='completed'&&toolStates.length)?'tool-calls':status==='completed'?'stop':status==='incomplete'?'max-tokens':status==='cancelled'?'aborted':'error'
+    const kind=status==='requires_action'||(status==='completed'&&toolStates.length)?'tool-calls':status==='completed'?'stop':(status==='incomplete'||status==='budget_exceeded')?'max-tokens':status==='cancelled'?'aborted':'error'
     const reason=['aborted','error'].includes(kind)?{kind,failure:{code:kind==='aborted'?'ABORTED':'ARGON_INTERACTIONS_FAILED',message:'Remote interaction '+status+'.'}}:{kind}
     finishedNormally=true
     exitReason='completed'

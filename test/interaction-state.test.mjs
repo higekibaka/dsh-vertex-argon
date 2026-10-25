@@ -294,3 +294,213 @@ test('cursor-bearing GET recovery keeps thought signatures, tool arguments and u
  await durable.finish({ complete: true, reason: 'completed' });assert.equal(rows.size,0)
 })
 
+test('an already failed cloud task releases the session lock for a new prompt', async () => {
+  const { hub, identity, rows } = fixture()
+  await hub.put(identity, { stage: 'accepted', interactionId: 'remote-old', lastEventId: 'e1' })
+  const changed = hub.identity({ sessionId: 'session', endpoint: 'https://example.test/interactions', principalHash: '1'.repeat(64), body: { input: 'changed' } })
+  let posts = 0, probes = 0
+  const base = {
+    get: async (id, options) => {
+      if (options.stream) { assert.equal(id, 'remote-new'); return events([{ event_type: 'interaction.completed', interaction: { id, status: 'completed' } }]) }
+      probes++; assert.equal(id, 'remote-old'); return { id, status: 'failed' }
+    },
+    create: async () => { posts++; assert.equal(rows.has(identity.key), false); return events([{ event_type: 'interaction.created', interaction: { id: 'remote-new', status: 'in_progress' } }]) },
+  }
+  const durable = durableInteractionTransport(base, hub, changed)
+  await collect(await durable.create({ input: 'changed' }))
+  assert.equal(posts, 1); assert.equal(probes, 1)
+  assert.equal(rows.has(identity.key), false); assert.equal(rows.size, 1)
+  await durable.finish({ complete: true, reason: 'completed' })
+  assert.equal(rows.size, 0)
+})
+
+test('a zombie lock whose remote task is still live still blocks a new prompt', async () => {
+  const { hub, identity, rows } = fixture()
+  await hub.put(identity, { stage: 'accepted', interactionId: 'remote-live' })
+  const changed = hub.identity({ sessionId: 'session', endpoint: 'https://example.test/interactions', principalHash: '1'.repeat(64), body: { input: 'other' } })
+  const base = { get: async (id, options) => options.stream ? events([]) : { id, status: 'in_progress' }, create: async () => assert.fail('no duplicate paid creation') }
+  await assert.rejects(durableInteractionTransport(base, hub, changed).create({ input: 'other' }), /outstanding remote task/)
+  assert.equal(rows.size, 1)
+})
+
+test('a remote failure status releases the background lock without a duplicate cancel', async () => {
+  const { hub, identity, rows } = fixture(); let cancels = 0, exit
+  const base = {
+    create: async () => events([{ event_type: 'interaction.created', interaction: { id: 'remote', status: 'in_progress' } }]),
+    get: async () => events([{ event_type: 'interaction.failed', interaction: { id: 'remote', status: 'failed' } }]),
+    cancel: async () => { cancels++; return { status: 'cancelled' } },
+  }
+  const durable = durableInteractionTransport(base, hub, identity)
+  const chunks = await collect(streamInteractions({ provider: 'p', model: 'gemini-4-argon-google', maxTokens: 64, messages: [{ role: 'user', content: [{ type: 'text', text: 'fixture' }] }] }, { route: 'google-generative-ai', background: true, store: true, transport: durable, reconnectBackoff: { initialDelayMs: 0 }, onExit: reason => { exit = reason } }))
+  assert.equal(chunks.at(-1).reason.kind, 'error')
+  await durable.finish({ complete: false, reason: exit })
+  assert.equal(rows.size, 0); assert.equal(cancels, 0)
+})
+
+test('a dedicated budget_exceeded event is a terminal state for the durable handle', async () => {
+  const { hub, identity, rows } = fixture(); let cancels = 0, exit
+  const base = {
+    create: async () => events([{ event_type: 'interaction.created', interaction: { id: 'remote', status: 'in_progress' } }]),
+    get: async () => events([{ event_type: 'interaction.budget_exceeded', interaction: { id: 'remote' } }]),
+    cancel: async () => { cancels++; return { status: 'cancelled' } },
+  }
+  const durable = durableInteractionTransport(base, hub, identity)
+  const chunks = await collect(streamInteractions({ provider: 'p', model: 'gemini-4-argon-google', maxTokens: 64, messages: [{ role: 'user', content: [{ type: 'text', text: 'fixture' }] }] }, { route: 'google-generative-ai', background: true, store: true, transport: durable, reconnectBackoff: { initialDelayMs: 0 }, onExit: reason => { exit = reason } }))
+  assert.equal(chunks.at(-1).reason.kind, 'max-tokens')
+  await durable.finish({ complete: true, reason: exit })
+  assert.equal(rows.size, 0); assert.equal(cancels, 0)
+})
+
+// A local error frame is never proof of a remote terminal state: the cloud task
+// is probed once before its recovery handle is dropped.
+async function streamErrorRun(probe) {
+  const { hub, identity, rows } = fixture()
+  let cancels = 0, gets = 0, probes = 0, exit
+  const base = {
+    create: async () => events([{ event_type: 'interaction.created', interaction: { id: 'remote', status: 'in_progress' } }]),
+    get: async (id, options) => {
+      if (!options?.stream) { probes++; return probe(id) }
+      gets++
+      return events([
+        { event_type: 'step.start', event_id: 'e1', index: 0, step: { type: 'model_output' } },
+        { event_type: 'step.delta', event_id: 'e2', index: 0, delta: { type: 'text', text: 'partial' } },
+        { event_type: 'error', event_id: 'e3', error: { code: 'UNAUTHENTICATED' } },
+      ])
+    },
+    cancel: async () => { cancels++; return { status: 'cancelled' } },
+  }
+  const durable = durableInteractionTransport(base, hub, identity)
+  const chunks = await collect(streamInteractions({ provider: 'p', model: 'gemini-4-argon-google', maxTokens: 64, messages: [{ role: 'user', content: [{ type: 'text', text: 'fixture' }] }] }, { route: 'google-generative-ai', background: true, store: true, transport: durable, reconnectBackoff: { initialDelayMs: 0 }, onExit: reason => { exit = reason } }))
+  await durable.finish({ complete: false, reason: exit })
+  return { hub, identity, rows, chunks, exit, cancels, gets, probes }
+}
+test('an unrecoverable in-stream error event releases the background lock instead of cancelling', async () => {
+  const { rows, chunks, exit, cancels, gets, probes } = await streamErrorRun(id => ({ id, status: 'failed' }))
+  assert.equal(exit, 'remote-error'); assert.equal(chunks.at(-1).reason.kind, 'error')
+  assert.equal(rows.size, 0); assert.equal(cancels, 0); assert.equal(gets, 1); assert.equal(probes, 1)
+})
+test('an unrecoverable stream error keeps the handle while the cloud task still runs', async () => {
+  const { identity, rows, exit, cancels, probes } = await streamErrorRun(id => ({ id, status: 'in_progress' }))
+  assert.equal(exit, 'remote-error'); assert.equal(probes, 1); assert.equal(cancels, 0)
+  assert.equal(rows.size, 1); assert.equal(rows.get(identity.key).interactionId, 'remote')
+  assert.notEqual(rows.get(identity.key).stage, 'cancel-failed')
+})
+test('an unrecoverable stream error keeps the handle of an already finished cloud task', async () => {
+  const { identity, rows, exit, cancels, probes } = await streamErrorRun(id => ({ id, status: 'completed' }))
+  assert.equal(exit, 'remote-error'); assert.equal(probes, 1); assert.equal(cancels, 0)
+  // A completed task still owns un-replayed output: a local error frame must
+  // never discard its handle.
+  assert.equal(rows.size, 1); assert.equal(rows.get(identity.key).interactionId, 'remote')
+})
+test('an unrecoverable stream error keeps the handle for a streamed probe', async () => {
+  const { identity, rows, exit, cancels } = await streamErrorRun(id => events([{ event_type: 'interaction.completed', interaction: { id, status: 'completed' } }]))
+  assert.equal(exit, 'remote-error'); assert.equal(cancels, 0)
+  assert.equal(rows.size, 1); assert.equal(rows.get(identity.key).interactionId, 'remote')
+})
+test('an unrecoverable stream error keeps the handle for a non-object probe', async () => {
+  const { identity, rows, exit, cancels } = await streamErrorRun(() => undefined)
+  assert.equal(exit, 'remote-error'); assert.equal(cancels, 0)
+  assert.equal(rows.size, 1); assert.equal(rows.get(identity.key).interactionId, 'remote')
+})
+test('a 404 from the recovery probe releases the handle of a vanished cloud task', async () => {
+  const { rows, exit, cancels, probes } = await streamErrorRun(() => { throw Object.assign(new Error('gone'), { status: 404 }) })
+  assert.equal(exit, 'remote-error'); assert.equal(probes, 1); assert.equal(cancels, 0)
+  assert.equal(rows.size, 0)
+})
+test('a failed recovery probe keeps the handle instead of guessing the remote state', async () => {
+  const { identity, rows, exit, cancels } = await streamErrorRun(() => { throw Object.assign(new Error('offline'), { status: 503 }) })
+  assert.equal(exit, 'remote-error'); assert.equal(cancels, 0)
+  assert.equal(rows.size, 1); assert.equal(rows.get(identity.key).interactionId, 'remote')
+})
+
+
+// A changed prompt never replays the old body, so a zombie lock whose remote task
+// already ended must not block this session forever.
+async function reconcileRun(probe) {
+  const { hub, identity, rows } = fixture()
+  await hub.put(identity, { stage: 'accepted', interactionId: 'remote-old', lastEventId: 'e1' })
+  const changed = hub.identity({ sessionId: 'session', endpoint: 'https://example.test/interactions', principalHash: '1'.repeat(64), body: { input: 'changed' } })
+  let posts = 0
+  const base = {
+    get: async (id, options) => options.stream
+      ? events([{ event_type: 'interaction.completed', interaction: { id, status: 'completed' } }])
+      : probe(id),
+    create: async () => { posts++; return events([{ event_type: 'interaction.created', interaction: { id: 'remote-new', status: 'in_progress' } }]) },
+  }
+  const durable = durableInteractionTransport(base, hub, changed)
+  let error
+  try { await collect(await durable.create({ input: 'changed' })) } catch (caught) { error = caught }
+  if (!error) await durable.finish({ complete: true, reason: 'completed' })
+  return { rows, posts, error, identity }
+}
+// A failed or cancelled cloud task has nothing left to recover, so its dead
+// record is dropped. A finished-but-unreplayed result keeps its handle for a
+// cold resume by its own requestKey while the session-wide lock is released.
+for (const status of ['failed', 'cancelled']) {
+  test('a zombie lock whose remote task is ' + status + ' drops the dead record for a new prompt', async () => {
+    const { rows, posts, error } = await reconcileRun(id => ({ id, status }))
+    assert.equal(error, undefined)
+    assert.equal(posts, 1)
+    assert.equal(rows.size, 0)
+  })
+}
+for (const status of ['completed', 'requires_action', 'incomplete', 'budget_exceeded']) {
+  test('a zombie lock whose remote task is ' + status + ' keeps its un-replayed handle but releases the session', async () => {
+    const { rows, posts, error, identity } = await reconcileRun(id => ({ id, status }))
+    assert.equal(error, undefined)
+    assert.equal(posts, 1)
+    // The old handle stays addressable by its own requestKey; only the new
+    // prompt's record is completed away in the run's finish().
+    assert.equal(rows.size, 1)
+    assert.equal(rows.has(identity.key), true)
+    assert.equal(rows.get(identity.key).interactionId, 'remote-old')
+  })
+}
+test('a 404 reconcile probe releases a zombie lock whose remote task no longer exists', async () => {
+  const { rows, posts, error } = await reconcileRun(() => { throw Object.assign(new Error('gone'), { status: 404 }) })
+  assert.equal(error, undefined)
+  assert.equal(posts, 1)
+  assert.equal(rows.size, 0)
+})
+for (const status of [401, 403, 503]) {
+  test('a ' + status + ' reconcile probe keeps the conservative zombie lock', async () => {
+    const { rows, posts, error } = await reconcileRun(() => { throw Object.assign(new Error('probe failed'), { status }) })
+    assert.match(error.message, /outstanding remote task/)
+    assert.equal(posts, 0)
+    assert.equal(rows.size, 1)
+  })
+}
+test('a terminal error frame racing a local abort never cancels or leaves cancel-failed', async () => {
+  const { hub, identity, rows } = fixture()
+  const controller = new AbortController()
+  let cancels = 0, exit, probes = 0
+  const base = {
+    create: async () => events([{ event_type: 'interaction.created', event_id: 'e0', interaction: { id: 'remote', status: 'in_progress' } }]),
+    get: async (id, options) => {
+      if (!options?.stream) { probes++; return { id, status: 'failed' } }
+      return events([
+        { event_type: 'step.start', event_id: 'e1', index: 0, step: { type: 'model_output' } },
+        { event_type: 'step.delta', event_id: 'e2', index: 0, delta: { type: 'text', text: 'partial' } },
+        { event_type: 'error', event_id: 'e3', error: { code: 'UNAUTHENTICATED' } },
+      ])
+    },
+    cancel: async () => { cancels++; return { status: 'cancelled' } },
+  }
+  const durable = durableInteractionTransport(base, hub, identity, { signal: controller.signal })
+  const chunks = await collect(streamInteractions(
+    { provider: 'p', model: 'gemini-4-argon-google', maxTokens: 64, messages: [{ role: 'user', content: [{ type: 'text', text: 'fixture' }] }], signal: controller.signal },
+    { route: 'google-generative-ai', background: true, store: true, transport: durable, reconnectBackoff: { initialDelayMs: 0 },
+      onEvent: event => { if ((event.event_type ?? event.type) === 'error') controller.abort() },
+      onExit: reason => { exit = reason } }))
+  assert.equal(controller.signal.aborted, true)
+  // The same frame carries both a terminal error and the local abort: the exit
+  // reason stays 'remote-error', so no /cancel is attempted.
+  assert.equal(exit, 'remote-error')
+  assert.equal(chunks.at(-1).reason.kind, 'error')
+  assert.equal(chunks.at(-1).reason.failure.code, 'ARGON_INTERACTIONS_PROTOCOL')
+  await durable.finish({ complete: false, reason: exit })
+  assert.equal(cancels, 0)
+  assert.equal(probes, 1)
+  assert.equal(rows.size, 0)
+})
+

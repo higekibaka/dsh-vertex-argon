@@ -1,5 +1,6 @@
 import { shared } from './runtime.js'
 import { readBoundedJson } from './bounded-json.js'
+import { parseUpstreamRetryDelayMs } from './generate-content.js'
 const { attributionHeaders } = await shared('@deepseek-ai/dsh-llm')
 
 // Raw REST avoids stale generated Interactions schemas; auth is refreshed per call.
@@ -158,7 +159,12 @@ export function createInteractionsTransport({ endpoint, getHeaders, fetchImpl = 
         const message = status === 402
           ? 'Google Interactions request rejected for billing (HTTP 402 Payment Required). Check your Google prepaid credit balance and add credits if depleted. Do not retry automatically; requests cannot succeed until credits are added.'
           : 'Google Interactions request failed (HTTP ' + status + ').'
-        throw transportError({ name: 'ApiError', code }, 'fetch', status, message)
+        // Only the documented bounded retry hint is read; the provider body is
+        // never parsed, so an echoing error body cannot reach diagnostics.
+        const retryDelayMs = parseUpstreamRetryDelayMs({ headers: response.headers })
+        const rejected = transportError({ name: 'ApiError', code }, 'fetch', status, message)
+        if (retryDelayMs !== undefined) rejected.retryDelayMs = retryDelayMs
+        throw rejected
       }
       if (stream && !response.headers.get('content-type')?.includes('text/event-stream')) {
         try { await response.body?.cancel() } catch {}

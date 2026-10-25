@@ -4,7 +4,7 @@
 
 **为 [DeepSeek Harness](<https://github.com/deepseek-ai/deepseek-harness>) 提供 Vertex AI、Gemini API、Antigravity 三路由，以及 GenerateContent / Interactions 双协议接入。**
 
-工程版本 **1.6.0**；兼容 **DSH 0.2.1-rc.2 / 0.2.1-rc.3**，Node.js `^22.19.0 || >=24.0.0`。版本与依赖以 [package.json](<package.json>) 为准；历史变更见 [CHANGELOG.md](<CHANGELOG.md>)。本文说明本地工程，不代表已安装、已发布或已完成本轮云端实测。
+工程版本 **1.6.2**；兼容 **DSH 0.2.1-rc.2 / 0.2.1-rc.3**，Node.js `^22.19.0 || >=24.0.0`。版本与依赖以 [package.json](<package.json>) 为准；历史变更见 [CHANGELOG.md](<CHANGELOG.md>)。本文说明本地工程，不代表已安装、已发布或已完成本轮云端实测。
 
 [三路由与凭据](<#三路由与凭据>) · [完整配置](<#完整配置16-项>) · [流式恢复](<#generatecontent四项韧性机制>) · [Inspector](<#argon-inspectordebug-与-operations>) · [历史实测](<#历史实测奥德赛七号全年舰长日志>)
 
@@ -12,7 +12,7 @@
 
 - **独立第三模型**：Antigravity 使用 `gemini-4-argon-proxy`，独立地址与专属密钥，不覆盖 Gemini API 模型。
 - **GenerateContent 长解码**：单跳输出上限 `65,536`，输出预算配置最高 `1,048,576`，所有尝试共用 32 跳上限；支持检查点恢复、阶段超时、安全首包重试和仅思考结束自愈。
-- **Interactions 后台恢复**：显式启用后台与存储后，用 `creating` 预写锁防止未知创建被自动重发，以 `last_event_id` 续读已知任务。
+- **Interactions 后台恢复与状态对账**：显式启用后台与存储后，用 `creating` 预写锁防止未知创建被自动重发，以 `last_event_id` 续读已知任务；兼容 `2026-05-20` 独立生命周期事件，并在同会话发起新提示词时自动以有界非流式探针对账历史任务（清理已 `failed` / `cancelled` / `404` 死锁，保留未回放终态句柄的同时放行新提示词）。
 - **签名保真**：保留并回放仅含 `thoughtSignature` / `thought_signature` 的空 `Part`；思考档位为 `low` / `medium` / `high`，宿主传入 `max` 时收敛为 `high`。
 - **聚焦请求诊断**：只展示请求摘要、基本 Token 水位、逐跳轨迹、原始响应和完整 JSON，不再提供费用估算、模态用量或范围概览。
 
@@ -46,7 +46,7 @@ Provider ID 保持 `google-vertex-argon`，模型位于 **Vertex Argon** 分组�
 - `proxyApiKey` 先去除首尾空白；有值时使用设置值，否则只读取 `ANTIGRAVITY_API_KEY`。
 - **绝不回退到 Google/Vertex 密钥，也不把代理密钥送往 Google/Vertex。** 缺少专属密钥时应明确失败。
 - 地址和密钥使用草稿输入，失焦或点击保存后提交，重置恢复默认值。填写的 Key 保存在插件配置中，密码框仅遮挡显示；也可留空并使用 DSH 凭据中的 `ANTIGRAVITY_API_KEY`，避免直接填写配置。设置实时更新时，模型列表缓存随之失效。
-- 代理沿用 Google 协议与服务层级配置；具体端点是否支持所选能力仍取决于代理实现，不是新增的云端验证结论。
+- 选中 `gemini-4-argon-proxy` 时，插件按推理档位（`low` / `medium` / `high`）将上游模型 ID 1:1 映射为 `gemini-4-argon-low`、`gemini-4-argon-medium`、`gemini-4-argon-high`（官方 Vertex AI 与 Gemini API 路由保持 `gemini-4-argon`）。代理沿用 Google 协议与服务层级配置；具体端点是否支持所选能力仍取决于代理实现，不是新增的云端验证结论。
 
 ## 完整配置：16 项
 
@@ -89,7 +89,7 @@ Vertex GenerateContent 通过 `X-Vertex-AI-LLM-Shared-Request-Type: priority` �
 实现见 [generate-content.js](<generate-content.js>)；精确边界见 [协议合同](<docs/implementation/DECISIONS.md>)。开启 `longDecode` 后，Vertex 使用 `v1beta1`，Gemini API / Antigravity 使用 `v1beta`。关闭长解码仅禁用多跳/检查点续传与仅思考自愈，零交付初始重试和阶段超时仍可用。
 
 1. **流内错误与服务端等待建议**：HTTP `200` 的 SSE 也可能包含顶层 `{ error }`。插件单独记录流内状态，解析 `Retry-After`、Google `details` 中的重试/配额恢复延时以及消息中的等待提示，取有效建议并加 `200ms` 余量，与本地退避共同决定等待；解析后的延时超过 `60s` 立即失败，不长期占用重试。
-2. **每跳独立的阶段超时**：首包、思考、思考到可见输出的转换阶段各 `180s`，可见文本或工具流的滑动等待为 `120s`。每跳使用独立 `AbortController`；上游阻塞可终止，不把用户主动取消当作可恢复故障，也不让上一跳定时器影响下一跳。消费方暂停读取不消耗上游等待预算。
+2. **每跳独立的阶段超时**：首包、思考、思考到可见输出的转换阶段各 `180s`，可见文本或工具流的滑动等待为 `120s`。每跳使用独立 `AbortController`；仅真实进展（首次进入思考/转换阶段、非空文本、具名工具调用、本跳未见的新签名或新检查点）刷新等待预算，空帧、空思考帧、空工具对象与重复签名不续命。上游阻塞可终止，不把用户主动取消当作可恢复故障，也不让上一跳定时器影响下一跳；消费方暂停读取不消耗上游等待预算。
 3. **首包安全重试与检查点恢复**：可恢复故障发生时，若本跳尚未向调用方 `yield` 任何分片，即使没有 `continuationToken` 也可 `retry-initial`，初次尝试之外最多重试 3 次；已有分片交付但没有检查点时不得整段重试。有检查点则丢弃未提交尾段并从检查点重连，同一检查点无进展也最多重试 3 次。**首个检查点之前实时 `yield`，不把整段输出全部缓存到检查点。**
 4. **仅思考 STOP 自愈**：一跳只有思考、没有可见回答或工具调用，却以 `STOP` 结束时，最多追加一次 `thinking-dropout-heal`。有可用 token 则用 token 续写；没有则保留原思考与签名，追加 `model` 思考内容及 `user` 消息 `Continue and provide the final response or tool call.`。被安全规则阻止的回答不因此绕过限制；第二次仅思考结束不再循环。
 
@@ -116,7 +116,7 @@ billedOutputTokens, billedThoughtsTokens, billedToolTokens,
 billedPromptTokens, billedCachedTokens, billedTotalTokens
 ```
 
-每跳仅保留五项 Token 计数：`promptTokens`、`cachedTokens`、`outputTokens`、`thoughtsTokens`、`totalTokens`。输入水位与跨跳累计用量分开：前者用于宿主上下文判断，后者保留各次上游尝试的观测计数，不混作上下文长度或价格。未知用量可为 `null`。
+每跳仅保留五项 Token 计数：`promptTokens`、`cachedTokens`、`outputTokens`、`thoughtsTokens`、`totalTokens`。输入水位与跨跳累计用量分开：前者采用首跳原始输入口径（Interactions 在首个 `model_output` 结束并开启下一个 `model_output` 续跳前采集，同跳 `function_call` 不提前关闭；若首跳未报告输入则保持 `null` 且不向宿主交付伪造 `0` 或跨跳累计 `usage` 分片），后者保留各次上游尝试的观测计数，不混作上下文长度或价格。
 
 ### Operations：显式操作、独立权限
 
@@ -148,7 +148,7 @@ billedPromptTokens, billedCachedTokens, billedTotalTokens
 
 ## 历史实测：奥德赛七号全年舰长日志
 
-> 以下是 **v1.5.0 历史云端实测**，保留用于说明长解码已有依据；**不是 v1.6.0 本轮新增 live 验证，也不能证明 Antigravity 或新增恢复分支已在云端验证**。本轮验证状态见 [验证账本](<docs/implementation/STATUS.md>)。
+> 以下是 **v1.5.0 历史云端实测**，保留用于说明长解码已有依据；**不是 v1.6.2 本轮新增 live 验证，也不能证明 Antigravity 或新增恢复分支已在云端验证**。本轮验证状态见 [验证账本](<docs/implementation/STATUS.md>)。
 
 历史任务要求单回合连续输出 `DAY 001` 至 `DAY 365` 的全年日志，保持每日状态、每周维护、月末报告以及第 100/200/215/300/365 天的长期事件。原记录记载全年日志与状态台账完成；本文未重新运行或逐篇复核内容。
 
