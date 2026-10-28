@@ -1,11 +1,11 @@
-# dsh-vertex-argon 实现架构与模块边界（v1.6.2）
+# dsh-vertex-argon 实现架构与模块边界（v1.6.3）
 
 本目录描述当前本地工程；实现合同见 [DECISIONS.md](<DECISIONS.md>)，本轮验证与历史实测分开记录于 [STATUS.md](<STATUS.md>)。文档更新不表示插件已安装、已发布或新增了云端验证。
 
 ## 1. 插件与宿主边界
 
 - 包名 `dsh-vertex-argon`，Host 注册名 `local-vertex-argon`，Provider ID `google-vertex-argon`。
-- 保留用户工程版本 `1.6.2`，支持 DSH `0.2.1-rc.2 || 0.2.1-rc.3`；Node.js `^22.19.0 || >=24.0.0`。元数据以 [package.json](<../../package.json>) 为准。
+- 保留用户工程版本 `1.6.3`，支持 DSH `0.2.1-rc.2 || 0.2.1-rc.3`；Node.js `^22.19.0 || >=24.0.0`。元数据以 [package.json](<../../package.json>) 为准。
 - 仅使用宿主公开的 `llm`、`storageDomain`、`typert`、`settings`、`tools` 与 Web Client Slots，不修改宿主源码、已安装归档或 profile。
 - `installGemini4PiAiPatch` 保留对原生 `google` / `google-vertex` 的 Gemini 4 调用修正；不引入隐式辅助模型请求。
 
@@ -16,8 +16,9 @@
 | `gemini-4-argon` | Vertex AI | `google-vertex` | `vertexProtocol` / `vertexServiceTier` |
 | `gemini-4-argon-google` | Gemini API | `google-generative-ai` | `googleProtocol` / `googleServiceTier` |
 | `gemini-4-argon-proxy` | Antigravity Proxy | `google-generative-ai` | 复用 Google 协议与服务层级；独立地址/密钥 |
+| `gemini-3.8-flash-proxy` | Antigravity Proxy | `google-generative-ai` | 同上；与 Argon 共用代理地址与专属密钥 |
 
-代理由 `proxyEnabled || explicitRoutes.hasProxy` 开启，默认关闭。`PROXY_MODEL` 是独立模型 ID，不新增第三种诊断路由枚举。界面依据 `model` 显示 Antigravity；云端 ID 查询仍仅支持 Google/Vertex，不据诊断路由推断代理凭据。
+代理由 `proxyEnabled || explicitRoutes.hasProxy` 开启，默认关闭。`PROXY_MODEL` / `PROXY_FLASH_MODEL` 都是独立模型 ID，不新增第三种诊断路由枚举；`isProxyModel` 是两个代理模型的唯一判定入口。界面依据 `model` 显示 Antigravity；云端 ID 查询仍仅支持 Google/Vertex，不据诊断路由推断代理凭据。
 
 ```mermaid
 flowchart TD

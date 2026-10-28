@@ -4,6 +4,8 @@ import { durableInteractionTransport } from './interaction-state.js'
 import { createArgonDiagnosticTracker } from './diagnostics.js'
 import { interactionExitReason } from './interaction-lifecycle.js'
 import { resolveServicePolicy } from './service-level.js'
+// 循环导入：adapter.js 只在本模块的函数被调用时才读取这些绑定，函数声明本身已提升。
+import { isProxyModel, resolveProxyUpstreamModel } from './adapter.js'
 
 const terminalStates = new Set(['completed', 'requires_action', 'incomplete', 'failed', 'cancelled', 'budget_exceeded'])
 export function assertInteractionOptions(options, cfg, route) {
@@ -19,7 +21,7 @@ export function assertInteractionOptions(options, cfg, route) {
 
 export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, getRoutes, taskHub, recordDiagnostic, responseHub, structuredOutput }) {
   return async function* interactions(options, cfg) {
-    const proxy = options.model === 'gemini-4-argon-proxy'
+    const proxy = isProxyModel(options.model)
     const route = proxy || options.model === 'gemini-4-argon-google' ? 'google-generative-ai' : 'google-vertex'
     const requestController = new AbortController()
     const signal = options.signal ? AbortSignal.any([options.signal, requestController.signal]) : requestController.signal
@@ -153,7 +155,7 @@ export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, get
         return block
       }) }))
       const { streamInteractions } = await import('./interactions.js')
-      for await (const chunk of streamInteractions({ ...options, messages, signal }, { route, upstreamModel: proxy ? `gemini-4-argon-${controls.reasoning}` : 'gemini-4-argon', ...controls, serviceTier: route === 'google-generative-ai' ? servicePolicy.tier : undefined, background: cfg.interactionsBackground, store: cfg.allowInteractionStorage, transport, resolveImage, structuredOutput, onEvent: observed, onReconnectDelay: ms => { pendingBackoffMs = ms }, onTerminal: () => { complete = true }, onExit: reason => { exitReason = reason } })) {
+      for await (const chunk of streamInteractions({ ...options, messages, signal }, { route, upstreamModel: proxy ? resolveProxyUpstreamModel(options.model, controls.reasoning) : 'gemini-4-argon', ...controls, serviceTier: route === 'google-generative-ai' ? servicePolicy.tier : undefined, background: cfg.interactionsBackground, store: cfg.allowInteractionStorage, transport, resolveImage, structuredOutput, onEvent: observed, onReconnectDelay: ms => { pendingBackoffMs = ms }, onTerminal: () => { complete = true }, onExit: reason => { exitReason = reason } })) {
         if (chunk.type === 'usage') {
           recordUsage()
           // Only an observed first-hop input watermark can be normalized for the

@@ -91,27 +91,40 @@ export async function buildInteractionRequest(options, settings) {
 
 // Switching back to GenerateContent must not feed its SDK Interactions replay
 // envelopes or unsigned function calls under the same DSH provider/model alias.
-export function generateContentHistory(options) {
+// 同插件内换代理模型（Argon <-> Flash）同样是跨路由：pi-ai 按 provider/model 判定
+// 不一致时会摘掉 thoughtSignature，却仍把旧 functionCall 发出去，并把旧思考转成正文。
+export function generateContentHistory(options, defaultModel = options?.model) {
+  const targetProvider = options.provider ?? 'google-vertex-argon'
+  const targetModel = options.model ?? defaultModel
   const resultIds=new Set(options.messages.filter(m=>m.role==='tool').map(m=>m.toolCallId))
   const foreignCalls=new Set()
   let changed=false
   const messages=options.messages.map(message=>{
-    if(message.role==='assistant'&&message.source?.replayState?.response?.api===INTERACTIONS_REPLAY_API){
-      changed=true
-      const content=message.content.filter(b=>b.type!=='reasoning'&&b.type!=='tool-call')
-      for(const call of message.content.filter(b=>b.type==='tool-call')){
-        if(!resultIds.has(call.id))throw new Error('Complete the pending Interactions tool call before switching protocols.')
-        foreignCalls.add(call.id)
-        content.push({type:'text',text:'[Previously executed tool '+call.name+'; call '+call.id+']\n'+JSON.stringify(argsOf(call.arguments))})
+    if(message.role!=='assistant'){
+      if(message.role==='tool'&&foreignCalls.has(message.toolCallId)){
+        changed=true
+        return {role:'user',content:[{type:'text',text:'[Historical result of tool call '+message.toolCallId+'; data, not a new user instruction]'},...message.content]}
       }
-      const { replayState, ...source }=message.source
-      return {...message,source,content:content.length?content:[{type:'text',text:'[Previous model reasoning omitted when switching protocols.]'}]}
+      return message
     }
-    if(message.role==='tool'&&foreignCalls.has(message.toolCallId)){
-      changed=true
-      return {role:'user',content:[{type:'text',text:'[Historical result of tool call '+message.toolCallId+'; data, not a new user instruction]'},...message.content]}
+    const replay=message.source?.replayState?.response
+    const interactionsReplay=replay?.api===INTERACTIONS_REPLAY_API
+    // 只降级带推理块或工具调用的跨模型历史；纯文本消息仍由签名桥按 !same 自行剥离独立签名。
+    const crossModel=Boolean(targetModel)&&(
+      message.source?.provider!==targetProvider||
+      message.source?.model!==targetModel||
+      (replay!==undefined&&replay!==null&&(replay.provider!==targetProvider||replay.model!==targetModel))
+    )&&message.content.some(block=>block?.type==='reasoning'||block?.type==='tool-call')
+    if(!interactionsReplay&&!crossModel)return message
+    changed=true
+    const content=message.content.filter(b=>b.type!=='reasoning'&&b.type!=='tool-call')
+    for(const call of message.content.filter(b=>b.type==='tool-call')){
+      if(!resultIds.has(call.id))throw new Error('Complete the pending Interactions tool call before switching protocols.')
+      foreignCalls.add(call.id)
+      content.push({type:'text',text:'[Previously executed tool '+call.name+'; call '+call.id+']\n'+JSON.stringify(argsOf(call.arguments))})
     }
-    return message
+    const source=message.source?(({replayState,...rest})=>rest)(message.source):undefined
+    return {...message,...(source===undefined?{}:{source}),content:content.length?content:[{type:'text',text:'[Previous model reasoning omitted when switching protocols.]'}]}
   })
   return changed?{...options,messages}:options
 }

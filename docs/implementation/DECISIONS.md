@@ -1,20 +1,21 @@
-# dsh-vertex-argon 核心技术决定与协议合同（v1.6.2）
+# dsh-vertex-argon 核心技术决定与协议合同（v1.6.3）
 
 本文区分当前实现合同与历史实测；验证来源与本轮结果见 [STATUS.md](<STATUS.md>)。
 
-## 1. 三模型、凭据与服务层级
+## 1. 模型、凭据与服务层级
 
 实现入口为 [adapter.js](<../../adapter.js>)、[google-connection.js](<../../google-connection.js>)、[index.js](<../../index.js>)。
 
 ### 独立 Antigravity 模型
 
-- `MODEL = gemini-4-argon`，`GOOGLE_API_MODEL = gemini-4-argon-google`，`PROXY_MODEL = gemini-4-argon-proxy`；三者独立注册，不覆盖原有模型。
+- `MODEL = gemini-4-argon`，`GOOGLE_API_MODEL = gemini-4-argon-google`，`PROXY_MODEL = gemini-4-argon-proxy`，`PROXY_FLASH_MODEL = gemini-3.8-flash-proxy`；四者独立注册，不覆盖原有模型。两个代理模型由 `isProxyModel` 统一判定，`proxyUpstreamBaseModel` / `resolveProxyUpstreamModel` 负责上游 ID。
 - 代理启用条件是 `proxyEnabled === true || explicitRoutes.hasProxy === true`。`proxyEnabled` 默认 `false`；仅存在环境密钥不是启用条件。
 - 代理的协议/诊断路由仍是 `google-generative-ai`，界面通过 `model` 区分 Antigravity。UI 可识别兼容输入 `route: antigravity-proxy` 的显示名，但不能据此扩展后端路由枚举或云端查询入口。
 - `proxyBaseUrl` 默认 `http://127.0.0.1:8045/v1beta`；去除配置首尾空白，只接受 HTTP(S)，根路径补 `/v1beta`，非根路径移除末尾斜杠。
 - `proxyApiKey` 去除首尾空白后优先使用；为空时只读取 `ANTIGRAVITY_API_KEY`。绝不借用 `GOOGLE_API_KEY`、`GEMINI_API_KEY`、Vertex Key 或 ADC；代理 Key 也不反向进入 Google/Vertex。设置中的 Key 保存在插件配置，密码框只遮挡显示；可留空改用 DSH 的 `ANTIGRAVITY_API_KEY` 凭据。
 - 代理复用 `googleProtocol` / `googleServiceTier`，不增加协议自动选择；三个代理设置均为 `volatile`，模型配置缓存必须随设置和路由变化失效。私有环境传递标记在进入实际 SDK 环境前清除。
-- 当选中 `PROXY_MODEL`（`gemini-4-argon-proxy`）时，根据解析后的推理等级（`low` / `medium` / `high`）将发往反代的上游模型 ID 映射为 `gemini-4-argon-low`、`gemini-4-argon-medium`、`gemini-4-argon-high`，使 DSH 推理档位与 `Antigravity Tools` 的三档模型卡片一一对应；官方 Vertex AI 与 Gemini API 直连路由维持发送 `gemini-4-argon`。
+- 当选中任一代理模型时，根据解析后的推理等级（`low` / `medium` / `high`）将发往反代的上游模型 ID 映射为 `<基础 ID>-<档位>`：`gemini-4-argon-proxy` → `gemini-4-argon-low|medium|high`，`gemini-3.8-flash-proxy` → `gemini-3.8-flash-low|medium|high`，使 DSH 推理档位与 `Antigravity Tools` 的档位模型卡片一一对应；GenerateContent 与 Interactions 使用同一份映射。官方 Vertex AI 与 Gemini API 直连路由维持发送 `gemini-4-argon`。
+- GenerateContent 历史在交给 pi-ai 前先过 `generateContentHistory(options, model)`：Interactions 来源的信封，以及跨代理模型（`gemini-4-argon-proxy` ↔ `gemini-3.8-flash-proxy`、或跨 provider）且内容含 `reasoning` / `tool-call` 块的历史，一律降级为文本转录（剔除旧思考、已完成调用转 `[Previously executed tool ...]` 文本、对应结果转用户态文本、移除 `replayState`），未完成的调用直接报错。判据取 `message.source` 与 `replayState.response` 的 provider/model 双向比对；只含纯文本的跨模型消息仍交由签名桥按 `!same` 剥离独立签名。同模型历史保留原生签名回放。
 
 ### 凭据解析与能力校验
 

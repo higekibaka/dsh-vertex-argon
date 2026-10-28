@@ -1,6 +1,6 @@
 # dsh-vertex-argon 维护与发版说明
 
-维护前先读现有文档，再核对当前源码；不得仅据历史说明改实现。工程版本保持 `1.6.2`，宿主兼容 `0.2.1-rc.2 / 0.2.1-rc.3`，以 [package.json](<package.json>) 为准。依次查阅：
+维护前先读现有文档，再核对当前源码；不得仅据历史说明改实现。工程版本保持 `1.6.3`，宿主兼容 `0.2.1-rc.2 / 0.2.1-rc.3`，以 [package.json](<package.json>) 为准。依次查阅：
 
 1. [实现架构](<docs/implementation/README.md>)：三独立模型、模块边界、16 项配置与存储域。
 2. [协议合同](<docs/implementation/DECISIONS.md>)：代理凭据隔离、GenerateContent 四项韧性机制、基本诊断与读取兼容。

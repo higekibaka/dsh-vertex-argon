@@ -56,7 +56,7 @@ test('Debug uses tokenUsage watermark verbatim without summing hops or substitut
   } finally { await f.close() }
 })
 
-for (const patch of [{ route: 'google-generative-ai', model: 'gemini-4-argon-proxy' }, { route: 'antigravity-proxy' }]) test('proxy is visibly distinct while retained backend route stays unchanged: ' + JSON.stringify(patch), async () => {
+for (const patch of [{ route: 'google-generative-ai', model: 'gemini-4-argon-proxy' }, { route: 'google-generative-ai', model: 'gemini-3.8-flash-proxy' }, { route: 'antigravity-proxy' }]) test('proxy is visibly distinct while retained backend route stays unchanged: ' + JSON.stringify(patch), async () => {
   const f = fixture(), record = { ...row(), ...patch }
   const before = plain(record)
   f.handlers.listRequests = async () => ({ ok: true, records: [record] }); f.handlers.getRequest = async () => ({ ...detail(), record })

@@ -1,6 +1,6 @@
 {
   "name": "dsh-vertex-argon",
-  "version": "1.6.2",
+  "version": "1.6.3",
   "description": "Gemini API, Vertex AI and Antigravity Argon for DSH: resilient streaming, explicit service tiers and focused request diagnostics.",
   "license": "MIT",
   "repository": {

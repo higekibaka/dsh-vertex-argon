@@ -531,7 +531,7 @@ window.__ModuleLoader__.load({
       inspectorTimeline: '请求列表', inspectorThinking: '思考等级', inspectorFailure: '失败类别', inspectorDuration: '耗时',
       inspectorAssociation: '关联状态', inspectorTokenWatermark: 'Token 水位', inspectorEyebrow: 'ARGON / DEBUG',
       proxyTitle: 'Antigravity 反代通道 (Antigravity Proxy)', proxyEnabled: '启用独立代理模型', proxyBaseUrl: '代理 Base URL', proxyApiKey: '代理 API Key',
-      proxyHint: '独立模型 gemini-4-argon-proxy；共用 Gemini API 的协议与服务等级。密钥只使用此处配置或 ANTIGRAVITY_API_KEY，不复用 Google / Vertex 凭据。',
+      proxyHint: '独立模型 gemini-4-argon-proxy 与 gemini-3.8-flash-proxy；共用 Gemini API 的协议与服务等级。密钥只使用此处配置或 ANTIGRAVITY_API_KEY，不复用 Google / Vertex 凭据。',
       proxySaveHint: '开关点击即保存；地址和密钥在离开输入框或点击对应保存按钮时保存，不逐字提交。恢复默认值会关闭代理、恢复默认地址并清空专属密钥。',
       proxySaveBaseUrl: '保存代理地址', proxySaveApiKey: '保存代理密钥',
     })
@@ -539,7 +539,7 @@ window.__ModuleLoader__.load({
       inspectorTimeline: 'Requests', inspectorThinking: 'Thinking level', inspectorFailure: 'Failure category', inspectorDuration: 'Duration',
       inspectorAssociation: 'Association status', inspectorTokenWatermark: 'Token watermark', inspectorEyebrow: 'ARGON / DEBUG',
       proxyTitle: 'Antigravity Proxy', proxyEnabled: 'Enable the independent proxy model', proxyBaseUrl: 'Proxy Base URL', proxyApiKey: 'Proxy API Key',
-      proxyHint: 'Independent gemini-4-argon-proxy model; shares Gemini API protocol and service tier settings. Uses only this key or ANTIGRAVITY_API_KEY, never Google / Vertex credentials.',
+      proxyHint: 'Independent gemini-4-argon-proxy and gemini-3.8-flash-proxy models; they share Gemini API protocol and service tier settings. Uses only this key or ANTIGRAVITY_API_KEY, never Google / Vertex credentials.',
       proxySaveHint: 'The switch saves immediately. URL and key save on blur or with their Save buttons, never on each keystroke. Reset disables the proxy, restores the default URL and clears its dedicated key.',
       proxySaveBaseUrl: 'Save proxy URL', proxySaveApiKey: 'Save proxy key',
     })
@@ -1047,7 +1047,7 @@ window.__ModuleLoader__.load({
         navigate()
       }
       const association = row => t(row?.association === 'linked' ? 'inspectorAssociated' : row?.association === 'unverified' ? 'inspectorUnverified' : 'inspectorUnassociated')
-      const routeName = record => record?.model === 'gemini-4-argon-proxy' || record?.route === 'antigravity-proxy' ? 'Antigravity Proxy' : record?.route === 'google-generative-ai' ? 'Gemini API' : record?.route === 'google-vertex' ? 'Vertex AI' : (record?.route ?? t('inspectorUnknown'))
+      const routeName = record => record?.model === 'gemini-4-argon-proxy' || record?.model === 'gemini-3.8-flash-proxy' || record?.route === 'antigravity-proxy' ? 'Antigravity Proxy' : record?.route === 'google-generative-ai' ? 'Gemini API' : record?.route === 'google-vertex' ? 'Vertex AI' : (record?.route ?? t('inspectorUnknown'))
       const outcome = value => t(({ done: 'diagOutcome_done', 'tool-calls': 'diagOutcome_tool', 'max-tokens': 'diagOutcome_max', error: 'diagOutcome_error', aborted: 'diagOutcome_aborted' })[value] ?? 'diagOutcome_incomplete')
       const tone = value => value === 'done' || value === 'tool-calls' ? 'success' : value === 'error' ? 'error' : value === 'max-tokens' ? 'warn' : 'idle'
       const activeDetail = detail?.status === 'available' ? detail : null

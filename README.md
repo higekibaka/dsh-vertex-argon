@@ -4,13 +4,13 @@
 
 **为 [DeepSeek Harness](<https://github.com/deepseek-ai/deepseek-harness>) 提供 Vertex AI、Gemini API、Antigravity 三路由，以及 GenerateContent / Interactions 双协议接入。**
 
-工程版本 **1.6.2**；兼容 **DSH 0.2.1-rc.2 / 0.2.1-rc.3**，Node.js `^22.19.0 || >=24.0.0`。版本与依赖以 [package.json](<package.json>) 为准；历史变更见 [CHANGELOG.md](<CHANGELOG.md>)。本文说明本地工程，不代表已安装、已发布或已完成本轮云端实测。
+工程版本 **1.6.3**；兼容 **DSH 0.2.1-rc.2 / 0.2.1-rc.3**，Node.js `^22.19.0 || >=24.0.0`。版本与依赖以 [package.json](<package.json>) 为准；历史变更见 [CHANGELOG.md](<CHANGELOG.md>)。本文说明本地工程，不代表已安装、已发布或已完成本轮云端实测。
 
 [三路由与凭据](<#三路由与凭据>) · [完整配置](<#完整配置16-项>) · [流式恢复](<#generatecontent四项韧性机制>) · [Inspector](<#argon-inspectordebug-与-operations>) · [历史实测](<#历史实测奥德赛七号全年舰长日志>)
 
 ## 核心能力
 
-- **独立第三模型**：Antigravity 使用 `gemini-4-argon-proxy`，独立地址与专属密钥，不覆盖 Gemini API 模型。
+- **独立代理模型**：Antigravity 路由下有 `gemini-4-argon-proxy` 与 `gemini-3.8-flash-proxy` 两个独立模型，共用独立地址与专属密钥，不覆盖 Gemini API 模型。
 - **GenerateContent 长解码**：单跳输出上限 `65,536`，输出预算配置最高 `1,048,576`，所有尝试共用 32 跳上限；支持检查点恢复、阶段超时、安全首包重试和仅思考结束自愈。
 - **Interactions 后台恢复与状态对账**：显式启用后台与存储后，用 `creating` 预写锁防止未知创建被自动重发，以 `last_event_id` 续读已知任务；兼容 `2026-05-20` 独立生命周期事件，并在同会话发起新提示词时自动以有界非流式探针对账历史任务（清理已 `failed` / `cancelled` / `404` 死锁，保留未回放终态句柄的同时放行新提示词）。
 - **签名保真**：保留并回放仅含 `thoughtSignature` / `thought_signature` 的空 `Part`；思考档位为 `low` / `medium` / `high`，宿主传入 `max` 时收敛为 `high`。
@@ -25,8 +25,9 @@ Provider ID 保持 `google-vertex-argon`，模型位于 **Vertex Argon** 分组�
 | Vertex AI | `gemini-4-argon` | `google-vertex` | `vertexProtocol` / `vertexServiceTier` |
 | Gemini Developer API | `gemini-4-argon-google` | `google-generative-ai` | `googleProtocol` / `googleServiceTier` |
 | Antigravity Proxy | `gemini-4-argon-proxy` | `google-generative-ai` | 复用 `googleProtocol` / `googleServiceTier` |
+| Antigravity Proxy | `gemini-3.8-flash-proxy` | `google-generative-ai` | 同上；与 Argon 共用代理地址与专属密钥 |
 
-这里的“三路由”指三个独立模型与连接目标，**并未新增第三种诊断 `route` 值**。Inspector 根据独立 `model` 显示 **Antigravity Proxy**。代理启用条件为 `proxyEnabled === true || explicitRoutes.hasProxy === true`；默认关闭，仅配置密钥不会自动开启。
+这里的“三路由”指三个连接目标、四个独立模型 ID，**并未新增第三种诊断 `route` 值**。Inspector 根据独立 `model` 显示 **Antigravity Proxy**。代理启用条件为 `proxyEnabled === true || explicitRoutes.hasProxy === true`；默认关闭，仅配置密钥不会自动开启。
 
 ### Vertex AI
 
@@ -46,7 +47,8 @@ Provider ID 保持 `google-vertex-argon`，模型位于 **Vertex Argon** 分组�
 - `proxyApiKey` 先去除首尾空白；有值时使用设置值，否则只读取 `ANTIGRAVITY_API_KEY`。
 - **绝不回退到 Google/Vertex 密钥，也不把代理密钥送往 Google/Vertex。** 缺少专属密钥时应明确失败。
 - 地址和密钥使用草稿输入，失焦或点击保存后提交，重置恢复默认值。填写的 Key 保存在插件配置中，密码框仅遮挡显示；也可留空并使用 DSH 凭据中的 `ANTIGRAVITY_API_KEY`，避免直接填写配置。设置实时更新时，模型列表缓存随之失效。
-- 选中 `gemini-4-argon-proxy` 时，插件按推理档位（`low` / `medium` / `high`）将上游模型 ID 1:1 映射为 `gemini-4-argon-low`、`gemini-4-argon-medium`、`gemini-4-argon-high`（官方 Vertex AI 与 Gemini API 路由保持 `gemini-4-argon`）。代理沿用 Google 协议与服务层级配置；具体端点是否支持所选能力仍取决于代理实现，不是新增的云端验证结论。
+- 选中代理模型时，插件按推理档位（`low` / `medium` / `high`）把上游模型 ID 1:1 映射：`gemini-4-argon-proxy` → `gemini-4-argon-low`、`gemini-4-argon-medium`、`gemini-4-argon-high`；`gemini-3.8-flash-proxy` → `gemini-3.8-flash-low`、`gemini-3.8-flash-medium`、`gemini-3.8-flash-high`（官方 Vertex AI 与 Gemini API 路由保持 `gemini-4-argon`）。GenerateContent 与 Interactions 走同一份映射。代理沿用 Google 协议与服务层级配置；具体端点是否支持所选能力仍取决于代理实现，不是新增的云端验证结论。
+- **两个代理模型之间切换**时，旧模型的 GenerateContent 工具历史会在出站前降级成文本记录、旧思考一并剔除；未完成的工具调用直接报错。只有与当前代理模型完全一致的历史才保留原生签名回放，避免底层按 provider/model 摘掉签名后仍发出裸 `functionCall` 或孤立 `functionResponse`。
 
 ## 完整配置：16 项
 
@@ -148,7 +150,7 @@ billedPromptTokens, billedCachedTokens, billedTotalTokens
 
 ## 历史实测：奥德赛七号全年舰长日志
 
-> 以下是 **v1.5.0 历史云端实测**，保留用于说明长解码已有依据；**不是 v1.6.2 本轮新增 live 验证，也不能证明 Antigravity 或新增恢复分支已在云端验证**。本轮验证状态见 [验证账本](<docs/implementation/STATUS.md>)。
+> 以下是 **v1.5.0 历史云端实测**，保留用于说明长解码已有依据；**不是 v1.6.3 本轮新增 live 验证，也不能证明 Antigravity 或新增恢复分支已在云端验证**。本轮验证状态见 [验证账本](<docs/implementation/STATUS.md>)。
 
 历史任务要求单回合连续输出 `DAY 001` 至 `DAY 365` 的全年日志，保持每日状态、每周维护、月末报告以及第 100/200/215/300/365 天的长期事件。原记录记载全年日志与状态台账完成；本文未重新运行或逐篇复核内容。
 

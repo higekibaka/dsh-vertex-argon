@@ -2,6 +2,18 @@
 
 All notable changes to `dsh-vertex-argon` are documented in this file.
 
+## [1.6.3] - 2026-10-28
+
+### Added
+- **Gemini 3.8 Flash on the Antigravity Proxy (`adapter.js`, `interaction-adapter.js`, `client.js`)**:
+  - Added `PROXY_FLASH_MODEL = 'gemini-3.8-flash-proxy'` (`Gemini 3.8 Flash (Antigravity)`) next to `PROXY_MODEL`; both register only when `proxyEnabled || explicitRoutes.hasProxy`, share the proxy base URL and the dedicated `ANTIGRAVITY_API_KEY` / `proxyApiKey` credential, and never touch Google / Vertex credentials.
+  - Added `isProxyModel` / `proxyUpstreamBaseModel` / `resolveProxyUpstreamModel` as the single proxy-map; `gemini-3.8-flash-proxy` maps `low` / `medium` / `high` 1:1 to `gemini-3.8-flash-low` / `gemini-3.8-flash-medium` / `gemini-3.8-flash-high` across both GenerateContent and Interactions, while official Vertex AI and Gemini API routes keep `gemini-4-argon`.
+  - Inspector shows **Antigravity Proxy** for both proxy model IDs. The 16 volatile settings are unchanged.
+
+### Fixed
+- **Cross-Model GenerateContent History Downgrade (`interactions-input.js`, `adapter.js`)**:
+  - `generateContentHistory(options, model)` now also downgrades history when switching between `gemini-4-argon-proxy` and `gemini-3.8-flash-proxy` (or across providers) and the message carries `reasoning` / `tool-call` blocks: thought blocks are dropped, completed tool round-trips become explicit text, unfinished calls throw, and `replayState` is stripped. pi-ai no longer emits a signature-stripped native `functionCall` or an orphan `functionResponse` after a proxy-model switch, and old reasoning is no longer replayed as public prose. Same-model history keeps native signature replay; pure-text cross-model messages still fall through to the signature bridge.
+
 ## [1.6.2] - 2026-10-26
 
 ### Fixed

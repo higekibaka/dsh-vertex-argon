@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
 import { test, after } from 'node:test'
-import { createArgonAdapter, argonProvider, normalizeProxyBaseUrl, resolveConfigValues, detectPiAiArgonRoutes, PROVIDER, MODEL, GOOGLE_API_MODEL, PROXY_MODEL, DEFAULT_PROXY_BASE_URL } from '../adapter.js'
+import { createArgonAdapter, argonProvider, normalizeProxyBaseUrl, resolveConfigValues, detectPiAiArgonRoutes, PROVIDER, MODEL, GOOGLE_API_MODEL, PROXY_MODEL, PROXY_FLASH_MODEL, FLASH_UPSTREAM_MODEL, PROXY_MODELS, isProxyModel, proxyUpstreamBaseModel, resolveProxyUpstreamModel, DEFAULT_PROXY_BASE_URL } from '../adapter.js'
 import { Config, apply } from '../index.js'
 import { createGoogleConnection } from '../google-connection.js'
 import { shared } from '../runtime.js'
 const { GoogleGenAI } = await shared('@google/genai')
+const { BlockAssembler, createUserMessage, createToolResultMessage } = await shared('@deepseek-ai/dsh-llm')
 const protocols = ['generate-content', 'interactions']
 const keys = { GOOGLE_API_KEY: 'google-only-key', GOOGLE_CLOUD_API_KEY: 'vertex-only-key', ANTIGRAVITY_API_KEY: 'proxy-only-key' }
 const context = (values = keys, credentials) => ({ get: name => name === 'launchEnvironment' ? { get: key => values[key] ? { value: values[key] } : undefined } : name === 'credentials' ? credentials : undefined })
@@ -13,12 +14,14 @@ const request = model => ({ provider: PROVIDER, model, sessionId: 'proxy-offline
 const collect = async stream => { const chunks = []; for await (const chunk of stream) chunks.push(chunk); return chunks }
 const sse = events => new Response(events.map(e => 'data: ' + JSON.stringify(e) + String.fromCharCode(10, 10)).join(''), { headers: { 'Content-Type': 'text/event-stream' } })
 const wire = []
+// GenerateContent 的可变回复分片：默认纯文本，跨模型用例临时换成带签名的工具调用。
+let replyParts = [{ text: 'answer' }]
 const originalFetch = globalThis.fetch
 // Real host SDK and pi-ai paths; only the final fetch is mocked, never forwarded.
 globalThis.fetch = async (input, init) => {
   const entry = { url: String(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url), body: JSON.parse(init?.body ?? await input.text()), headers: new Headers(init?.headers ?? input.headers) }
   wire.push(entry)
-  if (entry.url.includes(':streamGenerateContent')) return sse([{ candidates: [{ content: { role: 'model', parts: [{ text: 'answer' }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 30, cachedContentTokenCount: 2, candidatesTokenCount: 3, thoughtsTokenCount: 1, totalTokenCount: 34 } }])
+  if (entry.url.includes(':streamGenerateContent')) return sse([{ candidates: [{ content: { role: 'model', parts: replyParts }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 30, cachedContentTokenCount: 2, candidatesTokenCount: 3, thoughtsTokenCount: 1, totalTokenCount: 34 } }])
   return sse([
     { event_type: 'interaction.created', interaction: { id: 'proxy-fixture', status: 'in_progress' } },
     { event_type: 'step.start', index: 0, step: { type: 'model_output' } },
@@ -60,10 +63,13 @@ test('proxy settings are volatile and independent of existing native provider co
   assert.equal(cfg.proxyApiKey.get(), '')
   const nativeRoutes = { hasGoogle: true, hasVertex: true, googleBaseUrl: 'https://google.invalid/v1beta', vertexBaseUrl: 'https://vertex.invalid' }
   const adapter = createArgonAdapter(context(), () => ({ ...config(), routes: nativeRoutes }))
-  assert.deepEqual((await adapter.listModels(PROVIDER)).map(m => m.id), [MODEL, GOOGLE_API_MODEL, PROXY_MODEL])
+  assert.deepEqual((await adapter.listModels(PROVIDER)).map(m => m.id), [MODEL, GOOGLE_API_MODEL, PROXY_MODEL, PROXY_FLASH_MODEL])
   const model = await adapter.resolveModel(PROVIDER, PROXY_MODEL)
   assert.equal(model.name, 'Gemini 4 Argon (Antigravity)')
   assert.deepEqual(model.reasoning.efforts.map(e => e.id), ['low', 'medium', 'high'])
+  const flash = await adapter.resolveModel(PROVIDER, PROXY_FLASH_MODEL)
+  assert.equal(flash.name, 'Gemini 3.8 Flash (Antigravity)')
+  assert.deepEqual(flash.reasoning.efforts.map(e => e.id), ['low', 'medium', 'high'])
   assert.deepEqual(nativeRoutes, { hasGoogle: true, hasVertex: true, googleBaseUrl: 'https://google.invalid/v1beta', vertexBaseUrl: 'https://vertex.invalid' })
 })
 
@@ -123,6 +129,41 @@ for (const protocol of protocols) test(protocol + ': proxy reasoning effort maps
       assert.ok(directSent.url.endsWith('/models/gemini-4-argon:streamGenerateContent?alt=sse'), directSent.url)
     }
   }
+})
+
+test('proxy model helpers keep Argon and Flash apart', () => {
+  assert.deepEqual([...PROXY_MODELS], [PROXY_MODEL, PROXY_FLASH_MODEL])
+  assert.equal(isProxyModel(PROXY_MODEL), true)
+  assert.equal(isProxyModel(PROXY_FLASH_MODEL), true)
+  for (const value of [MODEL, GOOGLE_API_MODEL, FLASH_UPSTREAM_MODEL, '', undefined, null, 42]) assert.equal(isProxyModel(value), false)
+  assert.equal(proxyUpstreamBaseModel(PROXY_MODEL), MODEL)
+  assert.equal(proxyUpstreamBaseModel(PROXY_FLASH_MODEL), FLASH_UPSTREAM_MODEL)
+  for (const level of ['low', 'medium', 'high']) {
+    assert.equal(resolveProxyUpstreamModel(PROXY_MODEL, level), `${MODEL}-${level}`)
+    assert.equal(resolveProxyUpstreamModel(PROXY_FLASH_MODEL, level), `${FLASH_UPSTREAM_MODEL}-${level}`)
+  }
+})
+
+for (const protocol of protocols) test(protocol + ': flash proxy maps 1-to-1 to gemini-3.8-flash-{low,medium,high} with its own key', async () => {
+  let diagnostic
+  const adapter = createArgonAdapter(context(), config(protocol), undefined, undefined, record => { diagnostic = record })
+  for (const level of ['low', 'medium', 'high']) {
+    const chunks = await collect(adapter.stream({ ...request(PROXY_FLASH_MODEL), reasoningEffort: level }))
+    assert.equal(chunks.at(-1)?.reason?.kind, 'stop', JSON.stringify(chunks.at(-1)))
+    const sent = wire.at(-1)
+    if (protocol === 'interactions') {
+      assert.equal(sent.body.model, `gemini-3.8-flash-${level}`)
+      assert.equal(sent.body.generation_config.thinking_level, level)
+    } else {
+      assert.ok(sent.url.endsWith(`/models/gemini-3.8-flash-${level}:streamGenerateContent?alt=sse`), sent.url)
+      assert.equal(sent.body.generationConfig.thinkingConfig.thinkingLevel, level.toUpperCase())
+    }
+    assertKey(sent, keys.ANTIGRAVITY_API_KEY)
+  }
+  assert.equal(diagnostic.model, PROXY_FLASH_MODEL)
+  assert.equal(diagnostic.route, 'google-generative-ai')
+  assert.equal(diagnostic.protocol, protocol)
+  assert.equal(JSON.stringify(diagnostic).includes(keys.ANTIGRAVITY_API_KEY), false)
 })
 
 for (const protocol of protocols) test(protocol + ': each route uses only its own key, and configuration wins only for proxy', async () => {
@@ -275,4 +316,39 @@ test('Google connection explicit key and dedicated namespace prevent all fallbac
   await assert.rejects(createGoogleConnection(GoogleGenAI, { route: 'google-generative-ai', resolveSecret: async name => { lookups.push(name); return name === 'ANTIGRAVITY_API_KEY' ? undefined : 'wrong-key' }, apiKeyEnv: 'ANTIGRAVITY_API_KEY' }), /credentials/)
   assert.deepEqual(lookups, ['ANTIGRAVITY_API_KEY'])
   await assert.rejects(createGoogleConnection(GoogleGenAI, { route: 'google-generative-ai', resolveSecret: secret, apiKey: '', apiKeyEnv: 'ANTIGRAVITY_API_KEY' }), /credentials/)
+})
+
+const crossTools = [{ name: 'echo', description: 'offline fixture only', parameters: { type: 'object', properties: { value: { type: 'string' } }, required: ['value'] } }]
+const crossSignature = Buffer.from('cross-model-tool-signature').toString('base64')
+
+for (const [from, to] of [[PROXY_FLASH_MODEL, PROXY_FLASH_MODEL], [PROXY_MODEL, PROXY_FLASH_MODEL], [PROXY_FLASH_MODEL, PROXY_MODEL]]) test('generate-content signed tool history ' + from + ' -> ' + to, async () => {
+  const adapter = createArgonAdapter(context(), config('generate-content'))
+  const user = createUserMessage({ content: [{ type: 'text', text: 'fixture' }], source: { kind: 'user' } })
+  replyParts = [{ text: 'private reasoning fixture', thought: true }, { functionCall: { id: 'cross_call', name: 'echo', args: { value: 'x' } }, thoughtSignature: crossSignature }]
+  try {
+    const assembler = new BlockAssembler()
+    for await (const chunk of adapter.stream({ ...request(from), messages: [user], tools: crossTools })) assembler.push(chunk)
+    assert.ok(['stop', 'tool-calls'].includes(assembler.finish.kind), JSON.stringify(assembler.finish))
+    const assistant = assembler.message({ provider: PROVIDER, model: from, replayState: assembler.replayState })
+    const call = assistant.content.find(block => block.type === 'tool-call')
+    assert.ok(call)
+    const result = createToolResultMessage({ callId: call.id, content: [{ type: 'text', text: 'done' }], isError: false })
+    replyParts = [{ text: 'next' }]
+    const chunks = await collect(adapter.stream({ ...request(to), messages: [user, assistant, result], tools: crossTools }))
+    assert.equal(chunks.at(-1)?.reason?.kind, 'stop', JSON.stringify(chunks.at(-1)))
+    const parts = wire.at(-1).body.contents.flatMap(row => row.parts)
+    if (from === to) {
+      // 同模型续接：签名与原生工具往返都必须保留。
+      assert.equal(parts.find(part => part.functionCall)?.thoughtSignature, crossSignature)
+      assert.equal(JSON.stringify(parts).includes('[Previously executed tool'), false)
+    } else {
+      // 跨代理模型时 pi-ai 会按 provider/model 摘掉签名：必须降级成文本，绝不发裸 functionCall。
+      assert.equal(parts.some(part => part.functionCall || part.functionResponse), false)
+      assert.equal(JSON.stringify(wire.at(-1).body).includes(crossSignature), false)
+      assert.equal(JSON.stringify(wire.at(-1).body).includes('private reasoning fixture'), false)
+      const text = parts.map(part => part.text ?? '').join('\n')
+      assert.ok(text.includes('[Previously executed tool echo; call ' + call.id + ']'))
+      assert.ok(text.includes('[Historical result of tool call ' + call.id))
+    }
+  } finally { replyParts = [{ text: 'answer' }] }
 })

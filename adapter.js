@@ -24,6 +24,26 @@ export const NATIVE_PROVIDER = 'google-vertex'
 export const MODEL = 'gemini-4-argon'
 export const GOOGLE_API_MODEL = 'gemini-4-argon-google'
 export const PROXY_MODEL = 'gemini-4-argon-proxy'
+/** Antigravity 反代暴露的 Gemini 3.8 Flash；与 Argon 共用同一份反代地址与专属密钥。 */
+export const PROXY_FLASH_MODEL = 'gemini-3.8-flash-proxy'
+export const FLASH_UPSTREAM_MODEL = 'gemini-3.8-flash'
+export const PROXY_MODELS = Object.freeze([PROXY_MODEL, PROXY_FLASH_MODEL])
+export const PROXY_MODEL_NAMES = Object.freeze({
+  [PROXY_MODEL]: 'Gemini 4 Argon (Antigravity)',
+  [PROXY_FLASH_MODEL]: 'Gemini 3.8 Flash (Antigravity)',
+})
+/** 反代模型判定：Argon 与 Flash 都走同一条 Antigravity 通道。 */
+export function isProxyModel(modelId) {
+  return typeof modelId === 'string' && PROXY_MODELS.includes(modelId)
+}
+/** 反代模型对应的上游基础 ID；档位后缀由 resolveProxyUpstreamModel 追加。 */
+export function proxyUpstreamBaseModel(modelId) {
+  return modelId === PROXY_FLASH_MODEL ? FLASH_UPSTREAM_MODEL : MODEL
+}
+/** 反代上游模型 ID：`<基础 ID>-<low|medium|high>`，与反代暴露的档位模型一一对应。 */
+export function resolveProxyUpstreamModel(modelId, level) {
+  return `${proxyUpstreamBaseModel(modelId)}-${level}`
+}
 export const PROXY_API_KEY_ENV = 'ANTIGRAVITY_API_KEY'
 export const DEFAULT_PROXY_BASE_URL = 'http://127.0.0.1:8045/v1beta'
 export const LEVELS = ['low', 'medium', 'high']
@@ -200,7 +220,7 @@ export function gemini4StreamSimple(
   const mapped = requestModel?.thinkingLevelMap?.[rawLevel] ?? rawLevel
   const level = typeof mapped === 'string' ? mapped.toLowerCase() : fallback
   if (!LEVELS.includes(level)) throw new LlmError('Gemini 4 Argon requires low, medium or high.', 'UNSUPPORTED_REASONING_EFFORT')
-  const resolvedUpstreamModelId = requestModel?.id === PROXY_MODEL ? `${MODEL}-${level}` : upstreamModelId
+  const resolvedUpstreamModelId = isProxyModel(requestModel?.id) ? resolveProxyUpstreamModel(requestModel.id, level) : upstreamModelId
   const { reasoning, thinking, thinkingBudgets, temperature, onPayload: prior, onProviderStreamEvent: priorEvent, ...rest } = options
   const requestedMaxTokens = options.maxTokens ?? requestModel.maxTokens
   const effectiveMaxTokens =
@@ -409,7 +429,7 @@ export function argonProvider(nativeVertex, models, defaultLevel = 'medium', nat
         delete cleanEnv.__ANTIGRAVITY_API_KEY__
       }
       if (configured.api === 'google-generative-ai') {
-        const proxy = configured.id === PROXY_MODEL
+        const proxy = isProxyModel(configured.id)
         const apiKey = proxy ? rawEnv?.__ANTIGRAVITY_API_KEY__ : rawEnv?.__GOOGLE_API_KEY__
         if (!apiKey) throw new LlmError(proxy ? 'Antigravity proxy requires its dedicated API key.' : 'Gemini API credentials are not configured.', 'MISSING_CREDENTIAL')
         return gemini4StreamSimple(
@@ -418,7 +438,7 @@ export function argonProvider(nativeVertex, models, defaultLevel = 'medium', nat
           context,
           { ...restOptions, ...(cleanEnv ? { env: cleanEnv } : {}), ...(apiKey ? { apiKey } : {}), maxTokens: options.maxTokens ?? configured.maxTokens },
           defaultLevel,
-          MODEL,
+          proxy ? proxyUpstreamBaseModel(configured.id) : MODEL,
           longDecode,
           recordDiagnostic,
           resolveServicePolicy(serviceConfig, 'google-generative-ai', 'generate-content'),
@@ -457,7 +477,7 @@ export class ArgonAdapter extends LlmAdapter {
   imageRequestPricing(provider, model) { return this.inner.imageRequestPricing?.(provider, model) }
   imageRequestTarget(provider, model, image) {
     const cfg = this.configSnapshot?.()
-    const protocol = (model === GOOGLE_API_MODEL || model === PROXY_MODEL) ? cfg?.googleProtocol : cfg?.vertexProtocol
+    const protocol = (model === GOOGLE_API_MODEL || isProxyModel(model)) ? cfg?.googleProtocol : cfg?.vertexProtocol
     if (provider === PROVIDER && protocol === 'interactions' && this.interactionHandler) return interactionImageRequestTarget(image)
     return this.inner.imageRequestTarget(provider, model, image)
   }
@@ -468,13 +488,13 @@ export class ArgonAdapter extends LlmAdapter {
   resolveModel(provider, model, signal) { return this.inner.resolveModel(provider, model, signal) }
   async prepareCall(provider, model, signal) {
     const cfg = this.configSnapshot?.()
-    if (provider === PROVIDER && cfg) resolveServicePolicy(cfg, (model === GOOGLE_API_MODEL || model === PROXY_MODEL) ? 'google-generative-ai' : 'google-vertex', (model === GOOGLE_API_MODEL || model === PROXY_MODEL) ? cfg.googleProtocol : cfg.vertexProtocol)
+    if (provider === PROVIDER && cfg) resolveServicePolicy(cfg, (model === GOOGLE_API_MODEL || isProxyModel(model)) ? 'google-generative-ai' : 'google-vertex', (model === GOOGLE_API_MODEL || isProxyModel(model)) ? cfg.googleProtocol : cfg.vertexProtocol)
     const prepared = await this.inner.prepareCall(provider, model, signal)
-    const protocol = (model === GOOGLE_API_MODEL || model === PROXY_MODEL) ? cfg?.googleProtocol : cfg?.vertexProtocol
+    const protocol = (model === GOOGLE_API_MODEL || isProxyModel(model)) ? cfg?.googleProtocol : cfg?.vertexProtocol
     if (provider === PROVIDER && protocol === 'interactions' && this.interactionHandler) {
       return { model: prepared.model, stream: options => this.interactionHandler(options, cfg) }
     }
-    return { ...prepared, stream: options => prepared.stream(generateContentHistory(options)) }
+    return { ...prepared, stream: options => prepared.stream(generateContentHistory(options, model)) }
   }
   async *stream(options) {
     const prepared = await this.prepareCall(options.provider, options.model, options.signal)
@@ -606,7 +626,20 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
     if (cfg.proxyEnabled || detected.hasProxy) {
       models.push({
         id: PROXY_MODEL,
-        name: 'Gemini 4 Argon (Antigravity)',
+        name: PROXY_MODEL_NAMES[PROXY_MODEL],
+        provider: PROVIDER,
+        api: 'google-generative-ai',
+        baseUrl: cfg.proxyBaseUrl,
+        reasoning: true,
+        input: ['text', 'image'],
+        contextWindow: cfg.contextWindow,
+        maxTokens: cfg.maxTokens,
+        thinkingLevelMap: { ...DEFAULT_THINKING_MAP },
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      })
+      models.push({
+        id: PROXY_FLASH_MODEL,
+        name: PROXY_MODEL_NAMES[PROXY_FLASH_MODEL],
         provider: PROVIDER,
         api: 'google-generative-ai',
         baseUrl: cfg.proxyBaseUrl,
