@@ -1,7 +1,7 @@
-# dsh-vertex-argon 发版状态与验证账本（v1.6.3）
+# dsh-vertex-argon 发版状态与验证账本（v1.6.4）
 
-- **用户工程版本**：`1.6.3`，以 [package.json](<../../package.json>) 为准。
-- **声明兼容**：DSH `0.2.1-rc.2 || 0.2.1-rc.3`；Node.js `^22.19.0 || >=24.0.0`。以 [package.json](<../../package.json>) 为准。
+- **用户工程版本**：`1.6.4`，以 [package.json](<../../package.json>) 为准。
+- **声明兼容**：DSH `>=0.2.0-rc.2`；Node.js `^22.19.0 || >=24.0.0`。以 [package.json](<../../package.json>) 为准。
 - **本轮范围**：Interactions `2026-05-20` 生命周期事件与终态守卫、同会话僵尸锁有界对账与流内错误保守探针、Interactions `Retry-After` 退避与首跳输入水位窗口、GenerateContent 看门狗伪进展防护与蛇形 `thought_signature` 兼容；不自动安装插件或修改宿主/profile。
 - **验证状态**：2026-10-26 最终合并后的离线测试与发布清单预检通过，详见下方实测记录。本轮未安装到本地 profile，未新增真实上游生成验证。
 

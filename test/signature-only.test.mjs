@@ -142,3 +142,16 @@ for (const [name, wireParts, expected] of [
   assert.ok(!JSON.stringify(sent[1]).includes('thought_signature'))
  } finally { globalThis.fetch = originalFetch }
 })
+
+test('ordinary empty-text thoughtSignature without standalone codec survives same-model replay', async () => {
+ const sent = []; let calls = 0
+ const wireParts = [{ text: '', thoughtSignature: S1 }, { functionCall: { id: 'call', name: 'echo', args: { value: 'x' } }, thoughtSignature: T }]
+ globalThis.fetch = async (_url, init) => { sent.push(JSON.parse(init.body)); return sse(++calls === 1 ? wireParts : [{ text: 'next' }]) }
+ try {
+  const adapter = createArgonAdapter(ctx, config), user = createUserMessage({ content: [{ type: 'text', text: 'fixture' }], source: { kind: 'user' } })
+  const { message } = await generation(adapter, GOOGLE_API_MODEL, [user])
+  const toolResult = createToolResultMessage({ callId: 'call', content: [{ type: 'text', text: 'ok' }], isError: false })
+  await generation(adapter, GOOGLE_API_MODEL, [user, message, toolResult, createUserMessage({ content: [{ type: 'text', text: 'next' }], source: { kind: 'user' } })])
+  assert.deepEqual(sent[1].contents.find(c => c.role === 'model').parts, wireParts)
+ } finally { globalThis.fetch = originalFetch }
+})

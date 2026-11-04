@@ -9,6 +9,8 @@ const {default:LlmRuntime}=await shared('@deepseek-ai/dsh-llm')
 const {PiAiAdapter}=await shared('@deepseek-ai/dsh-llm-pi-ai')
 const {GoogleGenAI}=await shared('@google/genai')
 const {default:ToolRuntime}=await shared('@deepseek-ai/dsh-tools')
+const NativeToolExecutor=await shared('@deepseek-ai/dsh-tool-executor-native').then(m=>m.default??m,()=>null)
+const runTool=async(ctx,spec)=>NativeToolExecutor?(await ctx.tools.execute({calls:[{type:'tool-call',id:spec.callId,name:spec.name,arguments:JSON.stringify(spec.arguments)}],agent:spec.agent,signal:spec.signal})).results[0].result:ctx.tools.execute(spec)
 const {default:SystemPrompt}=await shared('@deepseek-ai/dsh-system-prompt')
 const {estimateToolsTokens}=await shared('@deepseek-ai/dsh-token-meter/estimate')
 test('real Cordis activation/disposal preserves host services and removes adapter patches',async()=>{
@@ -36,6 +38,7 @@ test('real Cordis activation/disposal preserves host services and removes adapte
 test('inspection tool mounts, executes through real policy pipeline and disposes with its dependencies',async t=>{
  const ctx=new Context();await ctx.plugin(LlmRuntime);await ctx.plugin(SystemPrompt)
  let registry=ctx.plugin(ToolRuntime);await registry
+ let executor=NativeToolExecutor?ctx.plugin(NativeToolExecutor):null;if(executor)await executor
  const baseline=await ctx.systemPrompt.assemble()
  try{
   for(let i=0;i<2;i++){
@@ -50,12 +53,12 @@ test('inspection tool mounts, executes through real policy pipeline and disposes
      assert.ok(afterTokens>beforeTokens)
      t.diagnostic(JSON.stringify({fixture:'isolated first-turn Host assembly, no tool-search projection',method:'Host fixed heuristic, not Google CountTokens',beforeTokens,afterTokens,delta:afterTokens-beforeTokens,deferred:schema.deferLoading}))
     }
-    const result=await ctx.tools.execute({callId:'inspect-fixture',name:'argon_inspect',arguments:{action:'list'},agent:{id:'fixture-session'},signal:new AbortController().signal})
+    const result=await runTool(ctx,{callId:'inspect-fixture',name:'argon_inspect',arguments:{action:'list'},agent:{id:'fixture-session'},signal:new AbortController().signal})
     assert.equal(result.isError,false);assert.deepEqual(result.value,{ok:true,records:[]})
     const denied=ctx.tools.guard(()=> 'fixture policy denial')
-    const refused=await ctx.tools.execute({callId:'inspect-denied',name:'argon_inspect',arguments:{action:'query',route:'google-generative-ai',id:'never-dispatched'},agent:{id:'fixture-session'},signal:new AbortController().signal})
+    const refused=await runTool(ctx,{callId:'inspect-denied',name:'argon_inspect',arguments:{action:'query',route:'google-generative-ai',id:'never-dispatched'},agent:{id:'fixture-session'},signal:new AbortController().signal})
     assert.equal(refused.isError,true);denied()
-    if(i===0){await registry.dispose();registry=ctx.plugin(ToolRuntime);await registry;assert.ok(ctx.tools.get('argon_inspect'))}
+    if(i===0){if(executor)await executor.dispose();await registry.dispose();registry=ctx.plugin(ToolRuntime);await registry;if(NativeToolExecutor){executor=ctx.plugin(NativeToolExecutor);await executor}assert.ok(ctx.tools.get('argon_inspect'))}
    }finally{await fiber.dispose()}
    assert.equal(ctx.tools.get('argon_inspect'),undefined)
   }

@@ -2,6 +2,20 @@
 
 All notable changes to `dsh-vertex-argon` are documented in this file.
 
+## [1.6.4] - 2026-11-05
+
+### Fixed
+- **MALFORMED_FUNCTION_CALL & Stream-Timeout Tool-Mode Auto-Fallback (`adapter.js`)**:
+  - Added a bounded 180-second fallback map (`autoToolModeFallbacks`) keyed by session, model, and message tail so retries after `MALFORMED_FUNCTION_CALL`, transient stop reasons, or `STREAM_PHASE_TIMEOUT` automatically downgrade `toolConfig.functionCallingConfig.mode` from `VALIDATED` to `AUTO` and clear the fallback once a turn completes cleanly.
+- **Role-Safe Tool Demotion & Polluted History Scrubbing (`google-signatures.js`, `interactions-input.js`)**:
+  - Moved demoted `[Previously executed tool ...]` headers out of `role: "model"` assistant content and prepended them to the corresponding `role: "user"` tool-result message across both `createGoogleSignatureBridge` and `generateContentHistory` / `buildInteractionRequest`, preventing the model from seeing and imitating self-authored pseudo tool-call tags in assistant history.
+  - Added `scrubPollutedAssistantText` and `scrubPollutedCheckpointText` to strip leaked `[:thinking:]` / `思考过程：` prefixes and trailing forged tool-call blocks from historical assistant turns and compacted `[Checkpoint N]` summaries while preserving inline backtick diagnostic quotes and `[PASS]` replies.
+  - Preserved ordinary empty-text `thoughtSignature` parts without standalone codecs across same-model replays.
+
+### Changed
+- **Host Compatibility (`package.json`, `test/plugin-lifecycle.test.mjs`)**:
+  - Broadened `engines.dsh`, `dsh.engines.dsh`, and `@deepseek-ai/*` peer ranges to `>=0.2.0-rc.2` (and `@earendil-works/pi-ai` to `>=1.1.0`, `@google/genai` to `>=2.21.0`) for seamless compatibility with DSH `0.2.2-rc.1+`, and updated `test/plugin-lifecycle.test.mjs` to mount `@deepseek-ai/dsh-tool-executor-native` when testing against `0.2.2+` tool runtimes.
+
 ## [1.6.3] - 2026-10-28
 
 ### Added

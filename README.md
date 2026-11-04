@@ -4,7 +4,7 @@
 
 **为 [DeepSeek Harness](<https://github.com/deepseek-ai/deepseek-harness>) 提供 Vertex AI、Gemini API、Antigravity 三路由，以及 GenerateContent / Interactions 双协议接入。**
 
-工程版本 **1.6.3**；兼容 **DSH 0.2.1-rc.2 / 0.2.1-rc.3**，Node.js `^22.19.0 || >=24.0.0`。版本与依赖以 [package.json](<package.json>) 为准；历史变更见 [CHANGELOG.md](<CHANGELOG.md>)。本文说明本地工程，不代表已安装、已发布或已完成本轮云端实测。
+工程版本 **1.6.4**；兼容 **DSH >=0.2.0-rc.2**，Node.js `^22.19.0 || >=24.0.0`。版本与依赖以 [package.json](<package.json>) 为准；历史变更见 [CHANGELOG.md](<CHANGELOG.md>)。本文说明本地工程，不代表已安装、已发布或已完成本轮云端实测。
 
 [三路由与凭据](<#三路由与凭据>) · [完整配置](<#完整配置16-项>) · [流式恢复](<#generatecontent四项韧性机制>) · [Inspector](<#argon-inspectordebug-与-operations>) · [历史实测](<#历史实测奥德赛七号全年舰长日志>)
 

@@ -1,4 +1,4 @@
-# dsh-vertex-argon 核心技术决定与协议合同（v1.6.3）
+# dsh-vertex-argon 核心技术决定与协议合同（v1.6.4）
 
 本文区分当前实现合同与历史实测；验证来源与本轮结果见 [STATUS.md](<STATUS.md>)。
 

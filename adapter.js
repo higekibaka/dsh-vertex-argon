@@ -114,6 +114,34 @@ export function detectPiAiArgonRoutes(ctx, explicitRoutes) {
 }
 
 const TRANSIENT_GEMINI_STOP_RE = /(?:Unhandled stop reason:\s*(?:MALFORMED_RESPONSE|MALFORMED_FUNCTION_CALL|UNEXPECTED_TOOL_CALL|TOO_MANY_TOOL_CALLS)|Provider stopped with:\s*(?:MALFORMED_RESPONSE|MALFORMED_FUNCTION_CALL|UNEXPECTED_TOOL_CALL|OTHER|FINISH_REASON_UNSPECIFIED))/i
+const AUTO_TOOL_MODE_TTL_MS = 180_000
+const autoToolModeFallbacks = new Map()
+
+function retryKeyOf(requestModel, context, options) {
+  const tail = context?.messages?.at?.(-1)
+  const tailHint = typeof tail?.content === 'string' ? tail.content.slice(0, 160) : JSON.stringify(tail?.content ?? '').slice(0, 160)
+  return `${options?.sessionId ?? 'anon'}:${requestModel?.id ?? ''}:${context?.messages?.length ?? 0}:${tailHint}`
+}
+
+function markAutoToolModeFallback(key) {
+  if (!key) return
+  if (autoToolModeFallbacks.size >= 256) autoToolModeFallbacks.delete(autoToolModeFallbacks.keys().next().value)
+  autoToolModeFallbacks.set(key, Date.now())
+}
+
+function shouldFallbackToAutoToolMode(key) {
+  const ts = key ? autoToolModeFallbacks.get(key) : undefined
+  if (ts === undefined) return false
+  if (Date.now() - ts > AUTO_TOOL_MODE_TTL_MS) {
+    autoToolModeFallbacks.delete(key)
+    return false
+  }
+  return true
+}
+
+function clearAutoToolModeFallback(key) {
+  if (key) autoToolModeFallbacks.delete(key)
+}
 
 let apiClientProtoRef = null
 let apiClientPatch = null
@@ -154,13 +182,14 @@ export function ensureGemini4ApiClientPatch() {
   return patch.dispose
 }
 
-function wrapGemini4Stream(rawStream, tracker, signal) {
+function wrapGemini4Stream(rawStream, tracker, signal, retryKey) {
   if (!rawStream || typeof rawStream[Symbol.asyncIterator] !== 'function') return rawStream
   return {
     [Symbol.asyncIterator]: async function* () {
       try {
         for await (const event of rawStream) {
           if (event?.type === 'done') {
+            clearAutoToolModeFallback(retryKey)
             const stop = event.message?.stopReason
             const outcome = stop === 'toolUse' ? 'tool-calls' : stop === 'length' ? 'max-tokens' : 'done'
             tracker?.finishStream({ outcome })
@@ -168,6 +197,9 @@ function wrapGemini4Stream(rawStream, tracker, signal) {
             const isTransient =
               typeof event?.error?.errorMessage === 'string' &&
               TRANSIENT_GEMINI_STOP_RE.test(event.error.errorMessage)
+            if (isTransient || event?.error?.code === 'STREAM_PHASE_TIMEOUT' || /stream phase timed out/i.test(String(event?.error?.errorMessage ?? ''))) {
+              markAutoToolModeFallback(retryKey)
+            }
             tracker?.finishStream({
               outcome: signal?.aborted ? 'aborted' : 'error',
               error: event.error,
@@ -187,6 +219,9 @@ function wrapGemini4Stream(rawStream, tracker, signal) {
           yield event
         }
       } catch (error) {
+        if (error?.code === 'STREAM_PHASE_TIMEOUT' || /stream phase timed out/i.test(String(error?.message ?? ''))) {
+          markAutoToolModeFallback(retryKey)
+        }
         tracker?.finishStream({
           outcome: signal?.aborted ? 'aborted' : 'error',
           error,
@@ -242,6 +277,7 @@ export function gemini4StreamSimple(
     captureOptions,
   )
   const signatures = createGoogleSignatureBridge(context, requestModel)
+  const retryKey = retryKeyOf(requestModel, context, options)
   return wrapGemini4Stream(
     signatures.stream(nativeStream(requestModel, signatures.context, {
       ...rest,
@@ -263,6 +299,7 @@ export function gemini4StreamSimple(
           cleanConfig.httpOptions && typeof cleanConfig.httpOptions === 'object' && !Array.isArray(cleanConfig.httpOptions)
             ? cleanConfig.httpOptions
             : {}
+        const toolMode = shouldFallbackToAutoToolMode(retryKey) ? 'AUTO' : 'VALIDATED'
         return {
           ...body,
           model: resolvedUpstreamModelId,
@@ -271,7 +308,7 @@ export function gemini4StreamSimple(
             ...(cleanConfig.tools?.some(tool => tool.functionDeclarations?.length) ? {
               toolConfig: {
                 ...cleanConfig.toolConfig,
-                functionCallingConfig: { ...cleanConfig.toolConfig?.functionCallingConfig, mode: 'VALIDATED' },
+                functionCallingConfig: { ...cleanConfig.toolConfig?.functionCallingConfig, mode: toolMode },
               },
             } : {}),
             automaticContinuation: false,
@@ -291,6 +328,7 @@ export function gemini4StreamSimple(
     })),
     tracker,
     options.signal,
+    retryKey,
   )
 }
 
