@@ -6,7 +6,7 @@ import { recordSchema, storedRecordSchema, diagnosticDomain, diagnosticWriter, c
 const keys = ['reportedInputTokens','reportedCacheTokens','outputTokens','thoughtsTokens','totalTokens','billedPromptTokens','billedCachedTokens','billedOutputTokens','billedThoughtsTokens','billedToolTokens','billedTotalTokens']
 function fixture() {
  let record
- const tracker = createArgonDiagnosticTracker({ sessionId: 'debug', model: 'gemini-4-argon-proxy', route: 'google-generative-ai' }, value => { record = value })
+ const tracker = createArgonDiagnosticTracker({ sessionId: 'debug', model: 'gemini-4-argon-google', route: 'google-generative-ai' }, value => { record = value })
  return { tracker, finish() { tracker.finishStream({ outcome: 'done' }); return record } }
 }
 test('diagnostics retain exactly the basic request counters and safe per-hop metadata', () => {

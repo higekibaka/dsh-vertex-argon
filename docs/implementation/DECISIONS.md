@@ -1,4 +1,4 @@
-# dsh-vertex-argon 核心技术决定与协议合同（v1.6.4）
+# Gemini 4 Adapter（dsh-vertex-argon）核心技术决定与协议合同（v2.0.0）
 
 本文区分当前实现合同与历史实测；验证来源与本轮结果见 [STATUS.md](<STATUS.md>)。
 
@@ -6,29 +6,25 @@
 
 实现入口为 [adapter.js](<../../adapter.js>)、[google-connection.js](<../../google-connection.js>)、[index.js](<../../index.js>)。
 
-### 独立 Antigravity 模型
+### 双官方通道的四个模型 ID
 
-- `MODEL = gemini-4-argon`，`GOOGLE_API_MODEL = gemini-4-argon-google`，`PROXY_MODEL = gemini-4-argon-proxy`，`PROXY_FLASH_MODEL = gemini-3.8-flash-proxy`；四者独立注册，不覆盖原有模型。两个代理模型由 `isProxyModel` 统一判定，`proxyUpstreamBaseModel` / `resolveProxyUpstreamModel` 负责上游 ID。
-- 代理启用条件是 `proxyEnabled === true || explicitRoutes.hasProxy === true`。`proxyEnabled` 默认 `false`；仅存在环境密钥不是启用条件。
-- 代理的协议/诊断路由仍是 `google-generative-ai`，界面通过 `model` 区分 Antigravity。UI 可识别兼容输入 `route: antigravity-proxy` 的显示名，但不能据此扩展后端路由枚举或云端查询入口。
-- `proxyBaseUrl` 默认 `http://127.0.0.1:8045/v1beta`；去除配置首尾空白，只接受 HTTP(S)，根路径补 `/v1beta`，非根路径移除末尾斜杠。
-- `proxyApiKey` 去除首尾空白后优先使用；为空时只读取 `ANTIGRAVITY_API_KEY`。绝不借用 `GOOGLE_API_KEY`、`GEMINI_API_KEY`、Vertex Key 或 ADC；代理 Key 也不反向进入 Google/Vertex。设置中的 Key 保存在插件配置，密码框只遮挡显示；可留空改用 DSH 的 `ANTIGRAVITY_API_KEY` 凭据。
-- 代理复用 `googleProtocol` / `googleServiceTier`，不增加协议自动选择；三个代理设置均为 `volatile`，模型配置缓存必须随设置和路由变化失效。私有环境传递标记在进入实际 SDK 环境前清除。
-- 当选中任一代理模型时，根据解析后的推理等级（`low` / `medium` / `high`）将发往反代的上游模型 ID 映射为 `<基础 ID>-<档位>`：`gemini-4-argon-proxy` → `gemini-4-argon-low|medium|high`，`gemini-3.8-flash-proxy` → `gemini-3.8-flash-low|medium|high`，使 DSH 推理档位与 `Antigravity Tools` 的档位模型卡片一一对应；GenerateContent 与 Interactions 使用同一份映射。官方 Vertex AI 与 Gemini API 直连路由维持发送 `gemini-4-argon`。
-- GenerateContent 历史在交给 pi-ai 前先过 `generateContentHistory(options, model)`：Interactions 来源的信封，以及跨代理模型（`gemini-4-argon-proxy` ↔ `gemini-3.8-flash-proxy`、或跨 provider）且内容含 `reasoning` / `tool-call` 块的历史，一律降级为文本转录（剔除旧思考、已完成调用转 `[Previously executed tool ...]` 文本、对应结果转用户态文本、移除 `replayState`），未完成的调用直接报错。判据取 `message.source` 与 `replayState.response` 的 provider/model 双向比对；只含纯文本的跨模型消息仍交由签名桥按 `!same` 剥离独立签名。同模型历史保留原生签名回放。
+- `MODEL = gemini-4-argon`，`GOOGLE_API_MODEL = gemini-4-argon-google`，`CARBON_MODEL = gemini-4-carbon`，`GOOGLE_API_CARBON_MODEL = gemini-4-carbon-google`；四者按路由配置独立注册，不覆盖原有模型。Gemini API 模型由 `isGoogleApiModel` 判定，四个模型的上游基础 ID 统一由 `officialUpstreamModel` 映射为 `gemini-4-argon` 或 `gemini-4-carbon`；不再有反代专用通道与档位映射。
+- 官方通道只有两条：Vertex AI（`google-vertex`）与 Gemini API（`google-generative-ai`）。诊断 `route` 枚举不扩展，Inspector 直接按 `route` 显示通道名；云端 ID 查询也只覆盖这两个官方通道。
+- GenerateContent 与 Interactions 使用同一份 `officialUpstreamModel` 映射；两条通道各自遵守自己的协议与服务层级设置，缓存随设置和路由变化失效。
+- GenerateContent 历史在交给 pi-ai 前先过 `generateContentHistory(options, model)`：Interactions 来源的信封，以及跨模型（Argon ↔ Carbon、Vertex ↔ Gemini API，或跨 provider）且内容含 `reasoning` / `tool-call` 块的历史，一律降级为文本转录（剔除旧思考、已完成调用转 `[Previously executed tool ...]` 文本、对应结果转用户态文本、移除 `replayState`），未完成的调用直接报错。判据取 `message.source` 与 `replayState.response` 的 provider/model 双向比对；只含纯文本的跨模型消息仍交由签名桥按 `!same` 剥离独立签名。同模型历史保留原生签名回放。
 
 ### 凭据解析与能力校验
 
-- Google/Vertex 凭据优先级为 `credentials` → `launchEnvironment` → `process.env`。凭据服务自身抛错时直接失败，不能退回旧密钥；代理的设置优先和专属 Key 隔离另行遵守。
+- Google/Vertex 凭据优先级为 `credentials` → `launchEnvironment` → `process.env`。凭据服务自身抛错时直接失败，不能退回旧密钥。Gemini API Key（`GOOGLE_API_KEY` / `GEMINI_API_KEY` / 配置的 `apiKeyEnv`）与 Vertex Key（`GOOGLE_CLOUD_API_KEY` / ADC）各自独立解析，互不借用、互不泄漏。
 - [service-level.js](<../../service-level.js>) 保持既有能力矩阵：Google 路由两种协议支持 `standard` / `flex` / `priority`；Vertex GenerateContent 支持 `standard` / `priority` 及 `vertexPaygoOnly`；Vertex Interactions 仅允许 `standard` 且不允许 PayGo-only。
-- 不支持的组合发包前报 `ARGON_SERVICE_TIER_UNVERIFIED`，不暗中降级、升级或切换协议。代理沿用矩阵不等于代理端点已获云端实测证明。
-- 请求层级与观测层级分别保存；Vertex 用 `traffic-type`，Google 使用响应头。`max` 推理请求收敛为 `high`，可选择档位维持 `low` / `medium` / `high`。
+- 不支持的组合发包前报 `ARGON_SERVICE_TIER_UNVERIFIED`，不暗中降级、升级或切换协议。离线矩阵校验不等于对应官方端点已获云端实测证明。
+- 请求层级与观测层级分别保存；Vertex 用 `traffic-type`，Google 使用响应头。`max` 推理请求收敛为 `high`，可选择档位维持 `low` / `medium` / `high`。收敛在两处生效：宿主 `agent/request` 钩子，以及直接调用 `adapter.stream` / `prepareCall().stream` 的边界（[adapter.js](<../../adapter.js>) 的 `narrowMaxReasoning`、[interaction-adapter.js](<../../interaction-adapter.js>) 与 [interactions-input.js](<../../interactions-input.js>) 的 `reasoningEffort` 归一）；`off` / `minimal` / `xhigh` 仍在发包前拒绝。
 
 ## 2. GenerateContent 长解码不变式
 
 实现为 [generate-content.js](<../../generate-content.js>)；签名保真由 [google-signatures.js](<../../google-signatures.js>) 负责。
 
-- `longDecode: true` 时，Vertex 使用 `v1beta1`，Gemini API / 代理使用 `v1beta`；单跳输出上限 `65,536`，输出预算配置最高 `1,048,576`，所有尝试合计最多 32 跳。各跳沿用请求预算配置，不动态扣减跨重试剩余 Token，不额外承诺实际总用量封顶。
+- `longDecode: true` 时，Vertex 使用 `v1beta1`，Gemini API 使用 `v1beta`；单跳输出上限 `65,536`，输出预算配置最高 `1,048,576`，所有尝试合计最多 32 跳。各跳沿用请求预算配置，不动态扣减跨重试剩余 Token，不额外承诺实际总用量封顶。
 - 关闭 `longDecode` 只禁用多跳/检查点续传与仅思考自愈，零已交付初始重试和阶段超时独立保留。
 - 正常 `CONTINUATION` 必须带有效的新 `continuationToken` 才继续，不能以旧 token 或缺失 token 假装进展。
 - **首个检查点前逐块实时 `yield`，禁止为了恢复而全量缓存。** 有检查点后，只提交检查点确认的内容；流失败时丢弃未提交尾段，从已确认 token 续传，避免重复输出或拼接残片。
@@ -58,7 +54,7 @@
 - 等待连接、流迭代及帧 JSON 解析均需受约束；不能只给 `next()` 加时间限制而放任其他等待永久阻塞。
 - 只累计等待上游工作所用时间，不在 `yield` 后让消费方处理/暂停时间消耗超时预算。看门狗仅在首次进入 `thinking` / `transition` 阶段、收到非空文本、具名 `functionCall`、本跳有界集合 `seenSignatures`（上限 8,192）中未见的新签名、新检查点或首次终止信号时刷新预算；空帧、空思考帧、空 `{ functionCall: {} }`、交替空帧与重复签名不续期。
 - 用户取消立即停止，不进入自动恢复。阶段超时与用户取消必须区分；超时只能在满足安全重试条件时恢复。
-- `meta.phaseTimeouts` 的 `initialTtft`、`thinking`、`transition`、`streaming` 均以毫秒计，可在离线测试中缩短；这是内部参数，不是额外用户配置项，完整配置仍为 16 项。
+- `meta.phaseTimeouts` 的 `initialTtft`、`thinking`、`transition`、`streaming` 均以毫秒计，可在离线测试中缩短；这是内部参数，不是额外用户配置项，完整配置仍为 13 项。
 
 ### 3.3 零交付初始重试与检查点重连
 
@@ -82,10 +78,10 @@ Continue and provide the final response or tool call.
 
 ## 4. Interactions 状态与只读查询
 
-- [interaction-state.js](<../../interaction-state.js>) 在 `create` 前写入 `phase: creating`。若未获得云端 ID 就断网或退出，保留未知创建锁，禁止自动重复创建；用户可在 Operations 中确认释放本地锁。
+- [interaction-state.js](<../../interaction-state.js>) 在 `create` 前写入 `stage: 'creating'`。若未获得云端 ID 就断网或退出，保留未知创建锁，禁止自动重复创建；用户可在 Operations 中确认释放本地锁。
 - [interactions.js](<../../interactions.js>) 用已知 `interaction.id` 与 `lastEventId` 调用 `get(id, { stream: true, last_event_id })` 续读，避免重复提交已输出内容；兼容 `2026-05-20` 独立生命周期事件（`in_progress`、`requires_action`、`failed`、`cancelled`、`incomplete`、`budget_exceeded`）与回放流 `user_input` 步骤，已确认终态不被后续通知回退，未知非内容生命周期通知不触发远端取消。
 - 同会话发起新提示词遇到历史已知 ID 锁时，[interaction-state.js](<../../interaction-state.js>) 先以有界超时执行单次非流式对账：若云端已 `failed` / `cancelled` 或返回 `404` 则移除死记录并放行；若云端已处于 `completed` / `requires_action` / `incomplete` / `budget_exceeded` 终态则保留原 `requestKey` 的未回放句柄同时解除对新提示词的排他阻塞；流内不可恢复错误同样先经非流式对账确认 `failed` / `cancelled` / `404` 后才释放句柄。
-- [interaction-query.js](<../../interaction-query.js>) 只执行已知 ID 的单次 `GET`，使用所选路由的当前凭据。查询仍仅接受 `google-vertex` / `google-generative-ai`；不能因代理共享后者就默认替换为代理查询。
+- [interaction-query.js](<../../interaction-query.js>) 只执行已知 ID 的单次 `GET`，使用所选路由的当前凭据。查询仍仅接受 `google-vertex` / `google-generative-ai` 两条官方通道。
 - 查询不生成、不取消、不执行返回的工具。`query-response` 必须保留，用于读取 `query` 的临时分页结果。
 
 ## 5. 精简诊断、存储兼容与 Inspector

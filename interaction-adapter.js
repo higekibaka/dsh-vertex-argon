@@ -5,15 +5,16 @@ import { createArgonDiagnosticTracker } from './diagnostics.js'
 import { interactionExitReason } from './interaction-lifecycle.js'
 import { resolveServicePolicy } from './service-level.js'
 // 循环导入：adapter.js 只在本模块的函数被调用时才读取这些绑定，函数声明本身已提升。
-import { isProxyModel, resolveProxyUpstreamModel } from './adapter.js'
+import { isGoogleApiModel, officialUpstreamModel } from './adapter.js'
 
 const terminalStates = new Set(['completed', 'requires_action', 'incomplete', 'failed', 'cancelled', 'budget_exceeded'])
 export function assertInteractionOptions(options, cfg, route) {
   const max = options.maxTokens ?? cfg.maxTokens
   if (!Number.isSafeInteger(max) || max <= 0 || max > cfg.maxTokens) throw new Error('Interactions output budget must be a positive integer within the configured effective cap.')
-  const level = options.reasoningEffort ?? cfg.reasoning
+  const requestedLevel = options.reasoningEffort ?? cfg.reasoning
+  const level = typeof requestedLevel === 'string' && requestedLevel.toLowerCase() === 'max' ? 'high' : requestedLevel
   if (!['low', 'medium', 'high'].includes(level)) throw new Error('Argon requires low, medium, or high thinking.')
-  if (cfg.interactionsBackground && !cfg.allowInteractionStorage) throw new Error('Background Interactions requires explicit cloud-storage consent in Vertex Argon settings.')
+  if (cfg.interactionsBackground && !cfg.allowInteractionStorage) throw new Error('Background Interactions requires explicit cloud-storage consent in Gemini 4 Adapter settings.')
   if (max > 65536 && !cfg.interactionsBackground) throw new Error('Interactions above 65,536 tokens requires background execution; no request was sent.')
   if (route === 'google-vertex' && max > 65536) throw new Error('Vertex Interactions long decode is not verified; choose GenerateContent or explicitly lower the budget to 65,536.')
   return { maxTokens: max, reasoning: level }
@@ -21,8 +22,7 @@ export function assertInteractionOptions(options, cfg, route) {
 
 export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, getRoutes, taskHub, recordDiagnostic, responseHub, structuredOutput }) {
   return async function* interactions(options, cfg) {
-    const proxy = isProxyModel(options.model)
-    const route = proxy || options.model === 'gemini-4-argon-google' ? 'google-generative-ai' : 'google-vertex'
+    const route = isGoogleApiModel(options.model) ? 'google-generative-ai' : 'google-vertex'
     const requestController = new AbortController()
     const signal = options.signal ? AbortSignal.any([options.signal, requestController.signal]) : requestController.signal
     let tracker, durable, claim, complete = false, usage, firstInput, firstCached, hopIndex = 0
@@ -86,7 +86,7 @@ export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, get
       if (cfg.interactionsBackground) taskHub?.requireReady()
       if (cfg.interactionsBackground && !taskHub) throw new Error('Background recovery storage is not configured.')
       const routes = getRoutes(cfg)
-      const connection = await createGoogleConnection(GoogleGenAI, { route, resolveSecret, apiKey: proxy ? cfg.proxyApiKey.trim() || undefined : undefined, apiKeyEnv: proxy ? 'ANTIGRAVITY_API_KEY' : routes.googleApiKeyEnv, baseURL: proxy ? cfg.proxyBaseUrl : route === 'google-vertex' ? routes.vertexBaseUrl : routes.googleBaseUrl, onResponse: receipt => { if (route === 'google-generative-ai' && receipt.operation === 'create') tracker?.recordServiceTier(receipt.serviceTier, 'response-header') } })
+      const connection = await createGoogleConnection(GoogleGenAI, { route, resolveSecret, apiKeyEnv: routes.googleApiKeyEnv, baseURL: route === 'google-vertex' ? routes.vertexBaseUrl : routes.googleBaseUrl, onResponse: receipt => { if (route === 'google-generative-ai' && receipt.operation === 'create') tracker?.recordServiceTier(receipt.serviceTier, 'response-header') } })
       tracker = createArgonDiagnosticTracker({ route, model: options.model, protocol: 'interactions', background: cfg.interactionsBackground, apiVersion: connection.apiVersion, thinkingLevel: controls.reasoning.toUpperCase(), longDecode: controls.maxTokens > 65536, maxTokens: controls.maxTokens, sessionId: options.sessionId, requestedServiceTier: servicePolicy.tier }, recordDiagnostic, { responseHub, retainRawResponses: cfg.retainRawResponses })
       tracker?.setApiVersion(connection.apiVersion)
       const observe = async (operation, args, trigger) => {
@@ -155,7 +155,7 @@ export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, get
         return block
       }) }))
       const { streamInteractions } = await import('./interactions.js')
-      for await (const chunk of streamInteractions({ ...options, messages, signal }, { route, upstreamModel: proxy ? resolveProxyUpstreamModel(options.model, controls.reasoning) : 'gemini-4-argon', ...controls, serviceTier: route === 'google-generative-ai' ? servicePolicy.tier : undefined, background: cfg.interactionsBackground, store: cfg.allowInteractionStorage, transport, resolveImage, structuredOutput, onEvent: observed, onReconnectDelay: ms => { pendingBackoffMs = ms }, onTerminal: () => { complete = true }, onExit: reason => { exitReason = reason } })) {
+      for await (const chunk of streamInteractions({ ...options, messages, signal }, { route, upstreamModel: officialUpstreamModel(options.model), ...controls, serviceTier: route === 'google-generative-ai' ? servicePolicy.tier : undefined, background: cfg.interactionsBackground, store: cfg.allowInteractionStorage, transport, resolveImage, structuredOutput, onEvent: observed, onReconnectDelay: ms => { pendingBackoffMs = ms }, onTerminal: () => { complete = true }, onExit: reason => { exitReason = reason } })) {
         if (chunk.type === 'usage') {
           recordUsage()
           // Only an observed first-hop input watermark can be normalized for the
@@ -184,7 +184,7 @@ export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, get
       finalError = error
       yield { type: 'finish', reason: { kind, failure: { code: kind === 'aborted' ? 'ABORTED' : 'ARGON_INTERACTIONS', message: error.message, ...(error.status ? { status: error.status } : {}) } } }
     } finally {
-      try { await durable?.finish({ complete, reason: exitReason }) } catch { ctx.logger?.warn?.('Vertex Argon remote cancellation remains unresolved; its recovery handle was retained.') }
+      try { await durable?.finish({ complete, reason: exitReason }) } catch { ctx.logger?.warn?.('Gemini 4 Adapter remote cancellation remains unresolved; its recovery handle was retained.') }
       claim?.release()
       recordUsage()
       if (durable) tracker?.setRemoteCancellation(durable.cancellationState)

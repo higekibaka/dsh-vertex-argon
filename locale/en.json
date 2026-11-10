@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Vertex Argon",
-    "description": "Gemini API, Vertex AI and an independent Antigravity model, with resilient long decode, explicit protocol and service-tier settings, request diagnostics and raw response inspection."
+    "title": "Gemini 4 Adapter",
+    "description": "Official Vertex AI and Gemini API Gemini 4 adapter for DSH (Argon and Carbon): resilient multi-hop long decode, explicit protocols and service tiers, background recovery, and request diagnostics."
   }
 }

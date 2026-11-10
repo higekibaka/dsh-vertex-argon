@@ -179,8 +179,18 @@ function desktopArchive() {
 }
 let archiveFallback
 let archiveChecked = false
+function ensureFromArchive(specifier) {
+  if (specifier.startsWith('.') || specifier.startsWith('/') || specifier.includes(':')) return false
+  if (!archiveChecked) {
+    archiveChecked = true
+    archiveFallback = desktopArchive()
+    if (archiveFallback) process.once('exit', () => archiveFallback.close())
+  }
+  return Boolean(archiveFallback?.ensure(specifier))
+}
 registerHooks({
   resolve(specifier, context, next) {
+    if (anchors.size === 0 || context.parentURL?.includes('/.tmp/test-host/')) ensureFromArchive(specifier)
     try { return next(specifier, context) } catch (error) {
       if (!resolutionErrors.has(error.code) || specifier.startsWith('.') || specifier.startsWith('/') || specifier.includes(':')) throw error
       if (specifier.startsWith('@earendil-works/pi-ai/providers/')) {

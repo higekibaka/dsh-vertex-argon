@@ -62,7 +62,8 @@ async function contentOf(blocks, settings, scrubText = false) {
 // forged function calls or fake thought signatures.
 export async function buildInteractionRequest(options, settings) {
   const max = options.maxTokens ?? settings.maxTokens ?? 65536
-  const level = options.reasoningEffort ?? settings.reasoning ?? 'medium'
+  const requestedLevel = options.reasoningEffort ?? settings.reasoning ?? 'medium'
+  const level = typeof requestedLevel === 'string' && requestedLevel.toLowerCase() === 'max' ? 'high' : requestedLevel
   for (const flag of [settings.background, settings.store]) if (flag !== undefined && typeof flag !== 'boolean') throw new Error('Interactions background and storage consent must be booleans.')
   if (!Number.isSafeInteger(max) || max<1 || max>1048576) throw new Error('Invalid Interactions output token budget.')
   if (!['low','medium','high'].includes(level)) throw new Error('Argon requires low, medium, or high thinking.')
@@ -130,8 +131,8 @@ export async function buildInteractionRequest(options, settings) {
 
 // Switching back to GenerateContent must not feed its SDK Interactions replay
 // envelopes or unsigned function calls under the same DSH provider/model alias.
-// 同插件内换代理模型（Argon <-> Flash）同样是跨路由：pi-ai 按 provider/model 判定
-// 不一致时会摘掉 thoughtSignature，却仍把旧 functionCall 发出去，并把旧思考转成正文。
+// 同插件内换官方模型（Argon <-> Carbon、Vertex <-> Gemini API）同样是跨路由：pi-ai 按
+// provider/model 判定不一致时会摘掉 thoughtSignature，却仍把旧 functionCall 发出去，并把旧思考转成正文。
 //
 // 降级后的工具头绝不写回 assistant 正文：那会让模型在 role:"model" 历史里看到
 // 自己连续手写该标签，形成 few-shot 模仿。头部改存起来，拼到后续 tool 回执里。

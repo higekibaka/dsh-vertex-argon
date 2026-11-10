@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
-import { test, after } from 'node:test'
-import { createArgonAdapter, PROVIDER, MODEL, GOOGLE_API_MODEL } from '../adapter.js'
+import { test as nodeTest } from 'node:test'
+import { createArgonAdapter, ensureGemini4ApiClientPatch, PROVIDER, MODEL, GOOGLE_API_MODEL } from '../adapter.js'
 import { recordSchema } from '../diagnostic-store.js'
 
 const ctx = { get: key => key === 'launchEnvironment' ? { get: name => ['GOOGLE_API_KEY', 'GOOGLE_CLOUD_API_KEY'].includes(name) ? { value: 'fixture' } : undefined } : undefined }
@@ -8,10 +8,11 @@ const request = model => ({ provider: PROVIDER, model, maxTokens: 512, sessionId
 const collect = async stream => { const chunks = []; for await (const chunk of stream) chunks.push(chunk); return chunks }
 const config = (extra = {}) => ({ maxTokens: 65536, reasoning: 'medium', longDecode: true, googleProtocol: 'generate-content', vertexProtocol: 'generate-content', routes: { hasGoogle: true, hasVertex: true }, ...extra })
 const sse = events => new Response(events.map(event => 'data: ' + JSON.stringify(event) + '\n\n').join(''), { headers: { 'Content-Type': 'text/event-stream' } })
-const originalFetch = globalThis.fetch
+// 只在单个测试内替换 fetch：--test-isolation=none 下模块级全局替身会污染其它测试文件。
+const hostFetch = globalThis.fetch
 let responder
 const wire = []
-globalThis.fetch = async (input, init) => {
+const stubFetch = async (input, init) => {
   const url = String(typeof input === 'string' || input instanceof URL ? input : input.url)
   assert.ok(url.includes('streamGenerateContent'), 'only mock GenerateContent may be called')
   const row = { url, headers: new Headers(init?.headers), body: JSON.parse(init.body) }
@@ -19,7 +20,16 @@ globalThis.fetch = async (input, init) => {
   assert.ok(responder, 'no mock responder configured')
   return responder(row)
 }
-after(() => { globalThis.fetch = originalFetch })
+const test = (name, fn) => nodeTest(name, async (...args) => {
+  globalThis.fetch = stubFetch
+  try {
+    return await fn(...args)
+  } finally {
+    globalThis.fetch = hostFetch
+    // 生产代码会常驻 SDK ApiClient 原型补丁；测试结束必须摘掉，避免污染后续测试文件。
+    try { ensureGemini4ApiClientPatch()() } catch {}
+  }
+})
 
 for (const model of [MODEL, GOOGLE_API_MODEL]) {
   for (const longDecode of [true, false]) test(model + ': SDK forwards in-band rejection to the host (longDecode=' + longDecode + ')', async () => {

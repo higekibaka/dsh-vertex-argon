@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Vertex Argon",
-    "description": "Gemini API、Vertex AI 与独立 Antigravity 模型，支持韧性长解码、显式协议与服务层级，以及请求诊断和原始响应检查。"
+    "title": "Gemini 4 Adapter",
+    "description": "面向 DSH 的 Gemini 4 官方双通道适配器（Vertex AI 与 Gemini API，覆盖 Argon 与 Carbon 模型），支持 65K+ 多跳长解码、显式协议与服务层级、后台任务恢复及请求级诊断。"
   }
 }

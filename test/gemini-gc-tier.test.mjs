@@ -83,7 +83,7 @@ for(const header of [undefined,'unknown','PRIORITY'])test('GC response tier head
  }finally{globalThis.fetch=old}
 })
 for(const tier of ['standard','flex','priority'])test('SDK extraBody cannot override frozen '+tier+' tier',async()=>{
- const old=globalThis.fetch,wire=[];ensureGemini4ApiClientPatch()
+ const old=globalThis.fetch,wire=[];const unpatch=ensureGemini4ApiClientPatch()
  const extraBody={service_tier:'priority',generationConfig:{responseMimeType:'text/plain'}}
  globalThis.fetch=async(_url,init)=>{wire.push(JSON.parse(init.body));extraBody.service_tier='standard';return sse(row(wire.length===1?'CONTINUATION':'STOP',wire.length===1?'cp':undefined),'standard')}
  try{
@@ -94,7 +94,7 @@ for(const tier of ['standard','flex','priority'])test('SDK extraBody cannot over
   assert.equal(wire.length,2)
   for(const body of wire){assert.equal(body.service_tier,tier==='standard'?undefined:tier);assert.equal(body.generationConfig.responseMimeType,'text/plain')}
   assert.deepEqual(wire[1],{...wire[0],continuationToken:'cp'})
- }finally{globalThis.fetch=old}
+ }finally{globalThis.fetch=old;unpatch()}
 })
 
 test('GC invalid per-hop counters stay unknown and never retain arbitrary upstream values',async()=>{

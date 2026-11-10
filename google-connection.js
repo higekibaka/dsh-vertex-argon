@@ -8,12 +8,9 @@ import { interactionsEndpoint, createInteractionsTransport } from './interaction
 export async function createGoogleConnection(GoogleGenAI, { route, resolveSecret, apiKey: explicitApiKey, apiKeyEnv = 'GOOGLE_API_KEY', baseURL, fetchImpl, onResponse }) {
   const vertex = route === 'google-vertex'
   if (!vertex && route !== 'google-generative-ai') throw new Error('Unsupported Argon route.')
-  // A dedicated proxy namespace must never inherit a Google/Vertex account.
-  const proxy = apiKeyEnv === 'ANTIGRAVITY_API_KEY'
   const apiKey = explicitApiKey !== undefined ? explicitApiKey : vertex
     ? await resolveSecret('GOOGLE_CLOUD_API_KEY')
-    : proxy ? await resolveSecret(apiKeyEnv)
-      : (await resolveSecret(apiKeyEnv)) || (await resolveSecret('GOOGLE_API_KEY')) || (await resolveSecret('GEMINI_API_KEY'))
+    : (await resolveSecret(apiKeyEnv)) || (await resolveSecret('GOOGLE_API_KEY')) || (await resolveSecret('GEMINI_API_KEY'))
   let project, location = 'global', keyFilename
   if (vertex && !apiKey) {
     project = (await resolveSecret('GOOGLE_CLOUD_PROJECT')) || (await resolveSecret('GCLOUD_PROJECT'))
@@ -22,7 +19,7 @@ export async function createGoogleConnection(GoogleGenAI, { route, resolveSecret
     if (keyFilename?.startsWith('~/') || keyFilename === '~') keyFilename = resolve(homedir(), keyFilename === '~' ? '' : keyFilename.slice(2))
     if (!project) throw new Error('Vertex Interactions requires GOOGLE_CLOUD_PROJECT for ADC.')
   }
-  if (!vertex && !apiKey) throw new Error(proxy ? 'Antigravity proxy credentials are not configured.' : 'Gemini API credentials are not configured.')
+  if (!vertex && !apiKey) throw new Error('Gemini API credentials are not configured.')
   const apiVersion = vertex ? 'v1beta1' : 'v1beta'
   const client = new GoogleGenAI({
     vertexai: vertex,

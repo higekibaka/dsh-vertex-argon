@@ -56,16 +56,17 @@ test('Debug uses tokenUsage watermark verbatim without summing hops or substitut
   } finally { await f.close() }
 })
 
-for (const patch of [{ route: 'google-generative-ai', model: 'gemini-4-argon-proxy' }, { route: 'google-generative-ai', model: 'gemini-3.8-flash-proxy' }, { route: 'antigravity-proxy' }]) test('proxy is visibly distinct while retained backend route stays unchanged: ' + JSON.stringify(patch), async () => {
-  const f = fixture(), record = { ...row(), ...patch }
+// 反代移除后，Debug 的通道名只由官方 route 决定，记录本身保持只读不变。
+for (const [route, label] of [['google-generative-ai', 'Gemini API'], ['google-vertex', 'Vertex AI']]) test('route label reflects the official channel while the retained record stays unchanged: ' + route, async () => {
+  const f = fixture(), record = { ...row(), route }
   const before = plain(record)
   f.handlers.listRequests = async () => ({ ok: true, records: [record] }); f.handlers.getRequest = async () => ({ ...detail(), record })
   try {
     let view = await f.settle()
-    assert.ok(text(view.nodes.find(n => n.props['data-request-id'] === requestId)).includes('Antigravity Proxy'))
-    assert.ok(text(selectRequest(view)).includes('Antigravity Proxy'))
+    assert.ok(text(view.nodes.find(n => n.props['data-request-id'] === requestId)).includes(label))
+    assert.ok(text(selectRequest(view)).includes(label))
     await choose(view); view = await f.settle()
-    assert.ok(text(view.nodes.find(n => n.props['data-summary-field'] === 'route')).includes('Antigravity Proxy'))
+    assert.ok(text(view.nodes.find(n => n.props['data-summary-field'] === 'route')).includes(label))
     assert.deepEqual(record, before)
   } finally { await f.close() }
 })

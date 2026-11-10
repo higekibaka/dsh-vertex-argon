@@ -152,14 +152,14 @@ window.__ModuleLoader__.load({
 
     const dictionaries = {
       zh: {
-        title: 'Vertex Argon',
-        subtitle: '聚合 Gemini API 与 Vertex AI 的 Argon 双通道 · 原生三档思考、独立协议与长解码控制',
+        title: 'Gemini 4 Adapter',
+        subtitle: '聚合 Gemini API 与 Vertex AI 官方双通道（Argon / Carbon）· 原生三档思考、独立协议与韧性长解码',
         summaryLabel: '当前配置摘要',
         summaryLongDecode: '长解码',
         summaryEffectiveCap: '静态有效预算上限',
         readonlyBanner: '只读模式：当前连接仅可查看配置，无法修改宿主设置。',
         generalTitle: '1. 常用与默认思考',
-        show: '在模型选择器中显示 Vertex Argon 分组',
+        show: '在模型选择器中显示 Gemini 4 Adapter 分组',
         showHint: '控制是否在会话模型选择器中列出本分组模型；当前会话不受隐藏影响。',
         visible: '已显示',
         hidden: '已隐藏',
@@ -199,12 +199,12 @@ window.__ModuleLoader__.load({
         advTitle: '5. 能力边界、自动兼容与接入说明',
         capabilities: '实测边界：两通道 GenerateContent 均有真实生成记录，两通道 Interactions 短调用与本地工具往返已实测；Gemini Interactions 后台已测至 63,303 tokens 与单次 POST 冷恢复入口；严格跨 65,536 真实输出尚未观测，Vertex Interactions > 65,536 保持门控。',
         how: '自动检测与凭据复用',
-        step1: '在 DSH「设置 → 模型」的 Google 或 Google Vertex AI 中添加 gemini-4-argon 后，本分组自动出现对应双通道入口。',
+        step1: '在 DSH「设置 → 模型」的 Google 或 Google Vertex AI 中添加 gemini-4-argon / gemini-4-carbon 后，本分组自动出现对应双通道入口。',
         step2: 'Vertex AI 读取 GOOGLE_APPLICATION_CREDENTIALS / GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION；Gemini API 复用已配置的 GOOGLE_API_KEY。',
         step3: '插件同时为原生 google 与 google-vertex 入口注入 GenerateContent 兼容保护（原生思考档位映射、剥离采样参数与签名回传）；Interactions 后台冷恢复与单次 POST 防重锁属于本插件对应的 Interactions 协议通道。',
         scope: '路由标识',
         detail: 'GenerateContent 检查点重连、工具签名回放与 Interactions 未知远端状态防重锁均为各自协议的内置自动机制；若遇云端终止未确认或未知中断，请结合下方诊断记录人工核查。',
-        route: '提供方路由：google-vertex-argon · 模型 ID：gemini-4-argon (Vertex AI) / gemini-4-argon-google (Gemini API)',
+        route: '提供方路由：google-vertex-argon · 模型 ID：gemini-4-argon / gemini-4-carbon (Vertex AI) · gemini-4-argon-google / gemini-4-carbon-google (Gemini API)',
         recoveryTitle: '后台任务恢复',
         recoveryHint: '最近 20 条脱敏状态，未解除记录优先。这里只解除本地防重拦截，不取消云端任务，也不自动重发。',
         recoveryRefresh: '刷新恢复状态',
@@ -237,15 +237,15 @@ window.__ModuleLoader__.load({
         diagHopsDroppedSuffix: ' 条分段诊断（非输出丢失）',
       },
       en: {
-        title: 'Vertex Argon',
-        subtitle: 'Dual-route Gemini API & Vertex AI Argon integration · native thinking levels, independent protocols & long decode controls',
+        title: 'Gemini 4 Adapter',
+        subtitle: 'Official Gemini API & Vertex AI dual-route integration (Argon & Carbon) · native thinking levels, independent protocols & resilient long decode',
         summaryLabel: 'Current configuration',
         summaryLongDecode: 'Long Decode',
         summaryEffectiveCap: 'Static effective cap',
         readonlyBanner: 'Read-only mode: this connection can view settings but cannot modify Host configuration.',
         generalTitle: '1. General & Default Thinking',
-        show: 'Show Vertex Argon group in the model picker',
-        showHint: 'Controls whether Vertex Argon models appear in the model picker; active conversations are unaffected.',
+        show: 'Show Gemini 4 Adapter group in the model picker',
+        showHint: 'Controls whether Gemini 4 Adapter models appear in the model picker; active conversations are unaffected.',
         visible: 'Visible',
         hidden: 'Hidden',
         reasoningLabel: 'Default Thinking Level',
@@ -284,12 +284,12 @@ window.__ModuleLoader__.load({
         advTitle: '5. Capabilities, Verification & Setup Guide',
         capabilities: 'Verification boundaries: both routes have live-verified GenerateContent generation records, and both routes have live-verified Interactions short calls and local tool round-trips. Gemini Interactions background is verified up to 63,303 tokens with single-POST cold resume entry; strict > 65,536 live output is not yet observed, and Vertex Interactions > 65,536 remains gated.',
         how: 'Auto-detection & credential reuse',
-        step1: 'Add gemini-4-argon under Google or Google Vertex AI in Models settings to expose both routes automatically.',
+        step1: 'Add gemini-4-argon or gemini-4-carbon under Google or Google Vertex AI in Models settings to expose both routes automatically.',
         step2: 'Vertex AI reads GOOGLE_APPLICATION_CREDENTIALS / GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION; Gemini API reuses your configured GOOGLE_API_KEY.',
         step3: 'Native google and google-vertex entries receive GenerateContent compatibility protection (native thinkingLevel mapping, sampling parameter stripping, and thoughtSignature replay); Interactions background cold resume and single-POST dedup locks belong to this plugin\'s Interactions protocol route.',
         scope: 'Route identifiers',
         detail: 'GenerateContent checkpoint reconnect, tool signature replay, and Interactions unknown-remote-state dedup locks run automatically within their respective protocols; if remote termination is unconfirmed or interrupted in an unknown state, inspect the diagnostics panel below.',
-        route: 'Provider route: google-vertex-argon · Models: gemini-4-argon (Vertex AI) / gemini-4-argon-google (Gemini API)',
+        route: 'Provider route: google-vertex-argon · Models: gemini-4-argon / gemini-4-carbon (Vertex AI) · gemini-4-argon-google / gemini-4-carbon-google (Gemini API)',
         recoveryTitle: 'Background Task Recovery',
         recoveryHint: 'Latest 20 redacted states, unreleased records first. This only releases the local duplicate-send block; it never cancels a cloud task or automatically resends a request.',
         recoveryRefresh: 'Refresh recovery status',
@@ -325,8 +325,8 @@ window.__ModuleLoader__.load({
 
     Object.assign(dictionaries.zh, {
   "inspectorUnverified": "存在关联记录，尚未经历史日志核验",
-  "inspectorTitle": "Argon 诊断",
-  "inspectorOpen": "Argon 详情",
+  "inspectorTitle": "Gemini 4 诊断",
+  "inspectorOpen": "Gemini 4 详情",
   "inspectorRequests": "请求与响应",
   "inspectorQuery": "按 ID 查询云端状态 · 网络访问",
   "inspectorSession": "会话",
@@ -377,8 +377,8 @@ window.__ModuleLoader__.load({
 })
     Object.assign(dictionaries.en, {
   "inspectorUnverified": "Stored association; historical verification pending",
-  "inspectorTitle": "Argon diagnostics",
-  "inspectorOpen": "Argon details",
+  "inspectorTitle": "Gemini 4 diagnostics",
+  "inspectorOpen": "Gemini 4 details",
   "inspectorRequests": "Requests & responses",
   "inspectorQuery": "Cloud ID lookup · network access",
   "inspectorSession": "Session",
@@ -487,7 +487,7 @@ window.__ModuleLoader__.load({
     Object.assign(dictionaries.zh, {
       inspectorDiagnosis: 'Debug', inspectorOperations: '操作', inspectorProtocol: '请求协议',
       inspectorGuideHint: '当前会话的请求调试与响应证据；操作另行确认。',
-      inspectorScopeChanged: '会话位置已变化或入口参数无效；请在目标会话的右侧栏重新打开 Argon 诊断。',
+      inspectorScopeChanged: '会话位置已变化或入口参数无效；请在目标会话的右侧栏重新打开 Gemini 4 诊断。',
       inspectorSessionScope: '范围：当前会话', inspectorAnswerScope: '范围：此条回答（精确关联）',
       inspectorScopeIds: '查看范围标识', inspectorAllRequests: '查看本会话全部请求', inspectorBackToAnswer: '返回此回答的请求',
       inspectorSelectionMissing: '所选请求已不在刷新后的列表中，旧详情已清空。请重新选择。',
@@ -500,7 +500,7 @@ window.__ModuleLoader__.load({
       inspectorCaptureStatus: '原始响应捕获记录', inspectorCapture_disabled: '本次请求未开启留存',
       inspectorCapture_captured: '已捕获（当前是否可读取需单独检查）', inspectorCapture_truncated: '捕获已截断',
       inspectorCapture_unavailable: '捕获不可用', inspectorCapture_unknown: '未记录 / 未知',
-      inspectorSettingsHint: '此处仅修改后续请求的默认设置。请求诊断与操作请使用当前会话的 Argon 详情页、右侧栏的 Argon 诊断，或回答下方的详情图标。',
+      inspectorSettingsHint: '此处仅修改后续请求的默认设置。请求诊断与操作请使用当前会话的 Gemini 4 详情页、右侧栏的 Gemini 4 诊断，或回答下方的详情图标。',
       inspectorMetaScope: '当前保留列表 · 最多 100 条，非会话全历史', inspectorRawTitle: '响应与证据',
       inspectorDebugHint: '从请求到证据，一处看清。', inspectorLocalOnly: '本地诊断',
       inspectorStepHopTable: 'Step / Hop 轨迹明细',
@@ -508,7 +508,7 @@ window.__ModuleLoader__.load({
     Object.assign(dictionaries.en, {
       inspectorDiagnosis: 'Debug', inspectorOperations: 'Operations', inspectorProtocol: 'Request protocol',
       inspectorGuideHint: 'Request debug details and response evidence for this session; operations require separate actions.',
-      inspectorScopeChanged: 'The session surface changed or entry parameters are invalid. Reopen Argon diagnostics from the intended session’s right sidebar.',
+      inspectorScopeChanged: 'The session surface changed or entry parameters are invalid. Reopen Gemini 4 diagnostics from the intended session’s right sidebar.',
       inspectorSessionScope: 'Scope: current session', inspectorAnswerScope: 'Scope: this answer (exact association)',
       inspectorScopeIds: 'Scope identifiers', inspectorAllRequests: 'View all requests in this session', inspectorBackToAnswer: 'Back to this answer’s requests',
       inspectorSelectionMissing: 'The selected request is no longer in the refreshed list. Previous details were cleared; select another request.',
@@ -521,7 +521,7 @@ window.__ModuleLoader__.load({
       inspectorCaptureStatus: 'Raw response capture record', inspectorCapture_disabled: 'Retention was off for this request',
       inspectorCapture_captured: 'Captured (current availability requires a separate read)', inspectorCapture_truncated: 'Capture truncated',
       inspectorCapture_unavailable: 'Capture unavailable', inspectorCapture_unknown: 'Not recorded / unknown',
-      inspectorSettingsHint: 'Only defaults for future requests are changed here. Use the session’s Argon details tab, Argon diagnostics in the right sidebar, or the details icon below an answer for diagnostics and operations.',
+      inspectorSettingsHint: 'Only defaults for future requests are changed here. Use the session’s Gemini 4 details tab, Gemini 4 diagnostics in the right sidebar, or the details icon below an answer for diagnostics and operations.',
       inspectorMetaScope: 'Retained list · up to 100, not the full session history', inspectorRawTitle: 'Response & evidence',
       inspectorDebugHint: 'From request to evidence, in one place.', inspectorLocalOnly: 'Local diagnostics',
       inspectorStepHopTable: 'Step / Hop trajectory',
@@ -529,19 +529,11 @@ window.__ModuleLoader__.load({
 
     Object.assign(dictionaries.zh, {
       inspectorTimeline: '请求列表', inspectorThinking: '思考等级', inspectorFailure: '失败类别', inspectorDuration: '耗时',
-      inspectorAssociation: '关联状态', inspectorTokenWatermark: 'Token 水位', inspectorEyebrow: 'ARGON / DEBUG',
-      proxyTitle: 'Antigravity 反代通道 (Antigravity Proxy)', proxyEnabled: '启用独立代理模型', proxyBaseUrl: '代理 Base URL', proxyApiKey: '代理 API Key',
-      proxyHint: '独立模型 gemini-4-argon-proxy 与 gemini-3.8-flash-proxy；共用 Gemini API 的协议与服务等级。密钥只使用此处配置或 ANTIGRAVITY_API_KEY，不复用 Google / Vertex 凭据。',
-      proxySaveHint: '开关点击即保存；地址和密钥在离开输入框或点击对应保存按钮时保存，不逐字提交。恢复默认值会关闭代理、恢复默认地址并清空专属密钥。',
-      proxySaveBaseUrl: '保存代理地址', proxySaveApiKey: '保存代理密钥',
+      inspectorAssociation: '关联状态', inspectorTokenWatermark: 'Token 水位', inspectorEyebrow: 'GEMINI 4 / DEBUG',
     })
     Object.assign(dictionaries.en, {
       inspectorTimeline: 'Requests', inspectorThinking: 'Thinking level', inspectorFailure: 'Failure category', inspectorDuration: 'Duration',
-      inspectorAssociation: 'Association status', inspectorTokenWatermark: 'Token watermark', inspectorEyebrow: 'ARGON / DEBUG',
-      proxyTitle: 'Antigravity Proxy', proxyEnabled: 'Enable the independent proxy model', proxyBaseUrl: 'Proxy Base URL', proxyApiKey: 'Proxy API Key',
-      proxyHint: 'Independent gemini-4-argon-proxy and gemini-3.8-flash-proxy models; they share Gemini API protocol and service tier settings. Uses only this key or ANTIGRAVITY_API_KEY, never Google / Vertex credentials.',
-      proxySaveHint: 'The switch saves immediately. URL and key save on blur or with their Save buttons, never on each keystroke. Reset disables the proxy, restores the default URL and clears its dedicated key.',
-      proxySaveBaseUrl: 'Save proxy URL', proxySaveApiKey: 'Save proxy key',
+      inspectorAssociation: 'Association status', inspectorTokenWatermark: 'Token watermark', inspectorEyebrow: 'GEMINI 4 / DEBUG',
     })
 
     function installAdjacentPicker(ctx) {
@@ -1047,7 +1039,7 @@ window.__ModuleLoader__.load({
         navigate()
       }
       const association = row => t(row?.association === 'linked' ? 'inspectorAssociated' : row?.association === 'unverified' ? 'inspectorUnverified' : 'inspectorUnassociated')
-      const routeName = record => record?.model === 'gemini-4-argon-proxy' || record?.model === 'gemini-3.8-flash-proxy' || record?.route === 'antigravity-proxy' ? 'Antigravity Proxy' : record?.route === 'google-generative-ai' ? 'Gemini API' : record?.route === 'google-vertex' ? 'Vertex AI' : (record?.route ?? t('inspectorUnknown'))
+      const routeName = record => record?.route === 'google-generative-ai' ? 'Gemini API' : record?.route === 'google-vertex' ? 'Vertex AI' : (record?.route ?? t('inspectorUnknown'))
       const outcome = value => t(({ done: 'diagOutcome_done', 'tool-calls': 'diagOutcome_tool', 'max-tokens': 'diagOutcome_max', error: 'diagOutcome_error', aborted: 'diagOutcome_aborted' })[value] ?? 'diagOutcome_incomplete')
       const tone = value => value === 'done' || value === 'tool-calls' ? 'success' : value === 'error' ? 'error' : value === 'max-tokens' ? 'warn' : 'idle'
       const activeDetail = detail?.status === 'available' ? detail : null
@@ -1131,9 +1123,7 @@ window.__ModuleLoader__.load({
       const [notice, setNotice] = React.useState('')
       const writing = React.useRef(false)
       const alive = React.useRef(true)
-      const drafts = React.useRef({})
-      const [proxyDrafts, setProxyDrafts] = React.useState({})
-      React.useEffect(() => { alive.current = true; return () => { alive.current = false; drafts.current = {} } }, [])
+      React.useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
       const val = state.value || {}
       const visible = val.showInModelPicker !== false
       const reasoning = val.reasoning || 'medium'
@@ -1168,20 +1158,12 @@ window.__ModuleLoader__.load({
         writing.current = true; setPending(true); setNotice('')
         try {
           const saved = await setField(key, nextVal)
-          if (alive.current && saved && Object.hasOwn(drafts.current, key) && drafts.current[key] === nextVal) {
-            delete drafts.current[key]; setProxyDrafts({ ...drafts.current })
-          }
           if (alive.current) setNotice(saved ? 'saved' : 'error')
         }
         catch { if (alive.current) setNotice('error') }
         finally { writing.current = false; if (alive.current) setPending(false) }
       }
 
-      const editProxy = (key, value) => {
-        if (!alive.current || disabled || !formWritable(form)) return
-        drafts.current[key] = value; setProxyDrafts({ ...drafts.current })
-      }
-      const saveProxy = key => Object.hasOwn(drafts.current, key) ? updateField(key, drafts.current[key]) : undefined
       const resetAll = async () => {
         if (!alive.current || disabled || writing.current || !formWritable(form)) return
         writing.current = true; setPending(true); setNotice('')
@@ -1199,14 +1181,8 @@ window.__ModuleLoader__.load({
           const ok8 = await setField('interactionsBackground', false)
           const ok9 = await setField('allowInteractionStorage', false)
           const ok10 = await setField('retainRawResponses', false)
-          const ok14 = await setField('proxyEnabled', false)
-          const ok15 = await setField('proxyBaseUrl', 'http://127.0.0.1:8045/v1beta')
-          const ok16 = await setField('proxyApiKey', '')
           if (!alive.current) return
-          if (ok15) delete drafts.current.proxyBaseUrl
-          if (ok16) delete drafts.current.proxyApiKey
-          setProxyDrafts({ ...drafts.current })
-          setNotice(ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11 && ok12 && ok13 && ok14 && ok15 && ok16 ? 'saved' : 'error')
+          setNotice(ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11 && ok12 && ok13 ? 'saved' : 'error')
         } catch { if (alive.current) setNotice('error') }
         finally { writing.current = false; if (alive.current) setPending(false) }
       }
@@ -1299,21 +1275,6 @@ window.__ModuleLoader__.load({
           h('p', { className: 'muted' }, t('protocolHint')),
           h('p', { className: 'muted', id: 'argon-tier-protocol-hint' }, t('tierProtocolBlocked')),
           budgetMismatch ? h('p', { role: 'alert', className: 'status error' }, budgetWarningText) : null,
-        ),
-        h('section', { className: 'card', 'aria-label': t('proxyTitle') },
-          h('h3', null, t('proxyTitle')),
-          h('div', { className: 'row' }, h('strong', { id: 'argon-proxy-enabled' }, t('proxyEnabled')),
-            h('button', { type: 'button', role: 'switch', 'aria-checked': val.proxyEnabled === true,
-              'aria-labelledby': 'argon-proxy-enabled', disabled, onClick: () => updateField('proxyEnabled', val.proxyEnabled !== true),
-            }, t(val.proxyEnabled === true ? 'longDecodeOn' : 'longDecodeOff'))),
-          h('p', { className: 'muted' }, t('proxyHint')),
-          ...[['proxyBaseUrl', 'text', 'http://127.0.0.1:8045/v1beta', 'proxySaveBaseUrl'], ['proxyApiKey', 'password', 'sk-... / ANTIGRAVITY_API_KEY', 'proxySaveApiKey']].map(([key, type, placeholder, saveLabel]) =>
-            h('div', { key }, h('label', null, t(key), h('input', {
-              name: key, type, placeholder, autoComplete: 'off', spellCheck: false, disabled,
-              value: proxyDrafts[key] ?? val[key] ?? (key === 'proxyBaseUrl' ? 'http://127.0.0.1:8045/v1beta' : ''),
-              onChange: event => editProxy(key, event.target.value), onBlur: () => saveProxy(key),
-            })), h('button', { type: 'button', disabled, onClick: () => saveProxy(key) }, t(saveLabel)))),
-          h('p', { className: 'muted' }, t('proxySaveHint')),
         ),
         h('div', { className: 'card' },
           h('h3', null, t('tierTitle')),
@@ -1462,7 +1423,7 @@ window.__ModuleLoader__.load({
         }
         const identity = remote => remote?.[Symbol.for('cordis.original')] ?? remote
         async function ensureRemoteReady() {
-          if (!active) throw new Error('Vertex Argon client disposed')
+          if (!active) throw new Error('Gemini 4 Adapter client disposed')
           if (pendingMount) return pendingMount
           const remote = getRemote()
           if (mountedOn && mountedOn === identity(remote)) return
@@ -1475,7 +1436,7 @@ window.__ModuleLoader__.load({
             const dispose = await remote.$mount(DIAGNOSTICS_REMOTE)
             if (!active) {
               await dispose?.()
-              throw new Error('Vertex Argon client disposed')
+              throw new Error('Gemini 4 Adapter client disposed')
             }
             disposeMount = dispose
             mountedOn = identity(remote)

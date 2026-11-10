@@ -133,8 +133,8 @@ test('reset restores both protocols and revokes background/storage options',asyn
   const resets=r.all.filter(x=>x.type==='button'&&x.children.includes(r.dictionary.resetDefaults))
   assert.equal(resets.length,1)
   await resets[0].props.onClick()
-  assert.equal(r.writes.length,16)
-  assert.deepEqual(Object.fromEntries(r.writes),{showInModelPicker:true,reasoning:'medium',longDecode:true,maxTokens:65536,contextWindow:1048576,googleProtocol:'generate-content',vertexProtocol:'generate-content',interactionsBackground:false,allowInteractionStorage:false,retainRawResponses:false,googleServiceTier:'standard',vertexServiceTier:'standard',vertexPaygoOnly:false,proxyEnabled:false,proxyBaseUrl:'http://127.0.0.1:8045/v1beta',proxyApiKey:''})
+  assert.equal(r.writes.length,13)
+  assert.deepEqual(Object.fromEntries(r.writes),{showInModelPicker:true,reasoning:'medium',longDecode:true,maxTokens:65536,contextWindow:1048576,googleProtocol:'generate-content',vertexProtocol:'generate-content',interactionsBackground:false,allowInteractionStorage:false,retainRawResponses:false,googleServiceTier:'standard',vertexServiceTier:'standard',vertexPaygoOnly:false})
   await r.close()
 })
 test('incompatible Vertex budget is visibly warned, never silently clamped',async()=>{
@@ -309,19 +309,13 @@ test('tier writes use the real revision-fenced ConfigFormController and Host sch
     assert.deepEqual(resolveServicePolicy(controller.getSnapshot().value,'google-vertex','generate-content').headers,{'X-Vertex-AI-LLM-Shared-Request-Type':'priority','X-Vertex-AI-LLM-Request-Type':'shared'})
     const panel=r.settingsPanel()
     try {
-      let view=await panel.mount()
-      await view.nodes.find(node=>node.props['aria-labelledby']==='argon-proxy-enabled').props.onClick()
-      view=panel.draw();view.nodes.find(node=>node.props.name==='proxyBaseUrl').props.onChange({target:{value:'https://proxy.example/v1beta'}})
-      await button(panel.draw(),r.dictionary.proxySaveBaseUrl).props.onClick()
-      view=panel.draw();view.nodes.find(node=>node.props.name==='proxyApiKey').props.onChange({target:{value:'dedicated-proxy-key'}})
-      await view.nodes.find(node=>node.props.name==='proxyApiKey').props.onBlur()
-      assert.deepEqual(calls.slice(3).map(call=>call.ops),[
-        [{op:'set',path:['proxyEnabled'],value:true}],
-        [{op:'set',path:['proxyBaseUrl'],value:'https://proxy.example/v1beta'}],
-        [{op:'set',path:['proxyApiKey'],value:'dedicated-proxy-key'}],
-      ])
-      assert.deepEqual(calls.slice(3).map(call=>call.revision),[10,11,12])
-      assert.equal(controller.getSnapshot().value.proxyApiKey,'dedicated-proxy-key')
+      await panel.mount()
+      await button(panel.draw(),r.dictionary.resetDefaults).props.onClick()
+      // 重置仍逐字段提交：反代移除后是 13 次写，且都不再出现 proxy* 字段。
+      const resetOps=calls.slice(3).flatMap(call=>call.ops.map(op=>op.path[0]))
+      assert.equal(calls.length,16)
+      assert.deepEqual(resetOps.sort(),['allowInteractionStorage','contextWindow','googleProtocol','googleServiceTier','interactionsBackground','longDecode','maxTokens','reasoning','retainRawResponses','showInModelPicker','vertexPaygoOnly','vertexProtocol','vertexServiceTier'].sort())
+      assert.equal(Object.keys(controller.getSnapshot().value).some(key=>key.startsWith('proxy')),false)
     } finally { panel.close() }
 
   }finally{await r.close();await controller.dispose()}
@@ -722,67 +716,20 @@ test('client formatting never falls back to a per-call locale constructor',async
   assert.equal(source.match(/timeFormatter\.format\(/g)?.length,undefined)
   assert.equal(source.match(/numberFormatter\.format\(/g)?.length,2,'token text and budget share one formatter')
 })
-const proxyInput = (view, key) => view.nodes.find(node => node.type === 'input' && node.props.name === key)
-for (const language of ['zh','en']) test('proxy settings default off, isolate password input and save only on blur/button: '+language,async()=>{
-  const r=render({},true,{language}), panel=r.settingsPanel()
-  try{
-    let view=await panel.mount()
-    const toggle=view.nodes.find(node=>node.props['aria-labelledby']==='argon-proxy-enabled')
-    assert.equal(toggle.props['aria-checked'],false)
-    assert.equal(proxyInput(view,'proxyBaseUrl').props.value,'http://127.0.0.1:8045/v1beta')
-    assert.equal(proxyInput(view,'proxyApiKey').props.value,'')
-    assert.equal(proxyInput(view,'proxyApiKey').props.type,'password')
-    assert.equal(proxyInput(view,'proxyApiKey').props.placeholder,'sk-... / ANTIGRAVITY_API_KEY')
-    assert.equal(r.writes.length,0)
-    assert.ok(view.text.includes(r.dictionary.proxyHint));assert.ok(view.text.includes(r.dictionary.proxySaveHint))
-    await toggle.props.onClick();assert.deepEqual(r.writes,[['proxyEnabled',true]])
-    view=panel.draw();proxyInput(view,'proxyBaseUrl').props.onChange({target:{value:'https://proxy.example/v1beta'}})
-    assert.equal(r.writes.length,1,'typing never writes')
-    await proxyInput(panel.draw(),'proxyBaseUrl').props.onBlur()
-    assert.deepEqual(r.writes.at(-1),['proxyBaseUrl','https://proxy.example/v1beta'])
-    view=panel.draw();proxyInput(view,'proxyApiKey').props.onChange({target:{value:'proxy-key'}})
-    await button(panel.draw(),r.dictionary.proxySaveApiKey).props.onClick()
-    assert.deepEqual(r.writes.at(-1),['proxyApiKey','proxy-key'])
-    const count=r.writes.length;await proxyInput(panel.draw(),'proxyApiKey').props.onBlur();assert.equal(r.writes.length,count,'successful save clears dirty state')
-    assert.ok(!panel.draw().text.includes('proxy-key'),'key is never echoed as plain text')
-  }finally{panel.close();await r.close()}
-})
-
-for(const state of [{status:'ready',writable:false},{status:'loading',writable:true},{status:'unavailable',writable:true}])test('proxy draft and retained save are denied by current form state '+JSON.stringify(state),async()=>{
-  const r=render(),panel=r.settingsPanel()
-  try{
-    let view=await panel.mount();proxyInput(view,'proxyApiKey').props.onChange({target:{value:'draft-key'}})
-    const save=button(panel.draw(),r.dictionary.proxySaveApiKey).props.onClick
-    const blur=proxyInput(panel.draw(),'proxyApiKey').props.onBlur
-    r.setForm(state);view=panel.draw()
-    assert.equal(proxyInput(view,'proxyApiKey').props.disabled,true)
-    await save();await blur();assert.equal(r.writes.length,0)
-    panel.close();await save();assert.equal(r.writes.length,0)
-  }finally{panel.close();await r.close()}
-})
-
-test('proxy save failure retains draft, blocks duplicate blur and never echoes the key in the error',async()=>{
-  let resolve;const pending=new Promise(r=>{resolve=r}),writes=[]
-  const form={getSnapshot:()=>({status:'ready',writable:true,value:{}}),subscribe:()=>()=>{},set:(key,value)=>{writes.push([key,value]);return pending}}
-  const r=render({},true,{formController:form}),panel=r.settingsPanel()
-  try{
-    let view=await panel.mount();proxyInput(view,'proxyApiKey').props.onChange({target:{value:'private-draft'}})
-    const blur=proxyInput(panel.draw(),'proxyApiKey').props.onBlur
-    const work=blur();await blur();await button(panel.draw(),r.dictionary.proxySaveApiKey).props.onClick()
-    assert.equal(writes.length,1)
-    resolve(false);await work;view=panel.draw()
-    assert.equal(proxyInput(view,'proxyApiKey').props.value,'private-draft');assert.ok(view.text.includes(r.dictionary.error));assert.ok(!view.text.includes('private-draft'))
-  }finally{resolve(false);panel.close();await r.close()}
-})
-
-test('proxy reset clears dedicated key and dirty fields without touching foreign credentials',async()=>{
-  let snapshot={status:'ready',writable:true,value:{proxyEnabled:true,proxyBaseUrl:'https://custom.example',proxyApiKey:'stored-key',googleApiKey:'foreign-key'}}
-  const writes=[],form={getSnapshot:()=>snapshot,subscribe:()=>()=>{},set:async(key,value)=>{writes.push([key,value]);snapshot={...snapshot,value:{...snapshot.value,[key]:value}};return true}}
-  const r=render({},true,{formController:form}),panel=r.settingsPanel()
-  try{
-    let view=await panel.mount();proxyInput(view,'proxyApiKey').props.onChange({target:{value:'dirty-key'}})
-    await button(panel.draw(),r.dictionary.resetDefaults).props.onClick();view=panel.draw()
-    assert.deepEqual(writes.filter(([key])=>key.startsWith('proxy')),[['proxyEnabled',false],['proxyBaseUrl','http://127.0.0.1:8045/v1beta'],['proxyApiKey','']])
-    assert.equal(proxyInput(view,'proxyApiKey').props.value,'');assert.equal(snapshot.value.googleApiKey,'foreign-key')
-  }finally{panel.close();await r.close()}
+// 反代通道已删除：设置页、文案表与配置 Schema 都不再有 proxy* 残留。
+test('settings expose no dedicated reverse-proxy surface after removal',async()=>{
+  for (const language of ['zh','en']) {
+    const r=render({},true,{language}), panel=r.settingsPanel()
+    try{
+      const view=await panel.mount()
+      assert.equal(view.nodes.some(node=>String(node.props['aria-labelledby']??'').startsWith('argon-proxy')),false)
+      assert.equal(view.nodes.some(node=>typeof node.props.name==='string'&&node.props.name.startsWith('proxy')),false)
+      assert.equal(Object.keys(r.dictionary).some(key=>key.startsWith('proxy')),false)
+      assert.equal(r.dictionaries.zh.title,'Gemini 4 Adapter')
+      assert.equal(r.dictionaries.en.title,'Gemini 4 Adapter')
+      assert.equal(typeof r.dictionaries.en.proxyHint,'undefined')
+    }finally{panel.close();await r.close()}
+  }
+  assert.equal(Object.keys(Config({})).some(key=>key.startsWith('proxy')),false)
+  assert.equal(Object.keys(Config({})).length,13)
 })

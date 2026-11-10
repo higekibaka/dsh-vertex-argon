@@ -140,7 +140,7 @@ export function durableInteractionTransport(base, hub, identity, { signal, onEve
     async create(body) {
       signal?.throwIfAborted()
       if (task) {
-        if (!task.interactionId) throw new Error('A previous background creation has an unknown outcome; refusing a duplicate billable POST. Open Argon Inspector > Operations > Background Task Recovery to review and explicitly release the local block.')
+        if (!task.interactionId) throw new Error('A previous background creation has an unknown outcome; refusing a duplicate billable POST. Open Gemini 4 diagnostics > Operations > Background Task Recovery to review and explicitly release the local block.')
         if (task.stage === 'cancel-failed') {
           await this.cancel(task.interactionId)
           throw new Error('The previous background task is now cancelled. Start the request again explicitly if still needed.')
@@ -228,7 +228,7 @@ export function durableInteractionTransport(base, hub, identity, { signal, onEve
           await hub.remove(identity.key); task = undefined
         } else {
           await save('unknown')
-          error.message += ' Background creation outcome is unknown. Open Argon Inspector > Operations > Background Task Recovery to review this record; no automatic resubmission was made.'
+          error.message += ' Background creation outcome is unknown. Open Gemini 4 diagnostics > Operations > Background Task Recovery to review this record; no automatic resubmission was made.'
           error.code = 'ARGON_BACKGROUND_UNKNOWN'
         }
         throw error

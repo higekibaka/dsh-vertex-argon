@@ -114,7 +114,7 @@ export function diagnosticWriter(domain, warn = () => {}, limit = 200) {
     if (!warned) {
       warned = true
       try {
-        warn('Vertex Argon diagnostic storage unavailable or overloaded; some metadata was not saved.')
+        warn('Gemini 4 Adapter diagnostic storage unavailable or overloaded; some metadata was not saved.')
       } catch {}
     }
   }
@@ -350,7 +350,7 @@ export class ArgonDiagnosticsService extends TypertRemoteService {
       const { limit } = parseListRecentRequest(request)
       return { ok: true, records: this.hub.listRecent(limit).map(({association, ...record}) => record) }
     } catch {
-      return { ok: false, error: 'Failed to read Vertex Argon diagnostics' }
+      return { ok: false, error: 'Failed to read Gemini 4 Adapter diagnostics' }
     }
   }
 }

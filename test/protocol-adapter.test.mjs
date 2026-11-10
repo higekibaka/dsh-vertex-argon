@@ -1,32 +1,35 @@
 import assert from 'node:assert/strict'
-import {test} from 'node:test'
-import {createArgonAdapter,PROVIDER,MODEL,GOOGLE_API_MODEL} from '../adapter.js'
+import {test as nodeTest} from 'node:test'
+import {createArgonAdapter,PROVIDER,MODEL,GOOGLE_API_MODEL,CARBON_MODEL,GOOGLE_API_CARBON_MODEL} from '../adapter.js'
 import {createInteractionStateHub} from '../interaction-state.js'
 import {createResponseHub} from '../response-store.js'
 import {recordSchema} from '../diagnostic-store.js'
 const ctx={get:k=>k==='launchEnvironment'?{get:n=>['GOOGLE_API_KEY','GOOGLE_CLOUD_API_KEY'].includes(n)?{value:'fixture'}:undefined}:undefined}
-const cfg=()=>({maxTokens:65536,reasoning:'medium',longDecode:true,googleProtocol:'interactions',vertexProtocol:'generate-content',routes:{hasGoogle:true,hasVertex:true}})
+const cfg=()=>({maxTokens:65536,reasoning:'medium',longDecode:true,googleProtocol:'interactions',vertexProtocol:'generate-content',routes:{hasGoogle:true,hasVertex:true,hasGoogleCarbon:true,hasVertexCarbon:true}})
 const req=model=>({provider:PROVIDER,model,maxTokens:512,sessionId:'fixture-session',messages:[{role:'user',content:[{type:'text',text:'hello'}]}]})
 const collect=async stream=>{const out=[];for await(const c of stream)out.push(c);return out}
 const wire=[]
 const sse=events=>new Response(events.map(e=>'data: '+JSON.stringify(e)+'\n\n').join(''),{headers:{'Content-Type':'text/event-stream'}})
 const interactionEvents=[{event_type:'interaction.created',event_id:'e1',interaction:{id:'remote',status:'in_progress'}},{event_type:'step.start',event_id:'e2',index:0,step:{type:'model_output'}},{event_type:'step.delta',event_id:'e3',index:0,delta:{type:'text',text:'hello'}},{event_type:'step.stop',event_id:'e4',index:0},{event_type:'interaction.completed',event_id:'e5',interaction:{id:'remote',status:'completed',usage:{total_input_tokens:30,total_output_tokens:1,total_thought_tokens:0,total_tokens:31}}}]
-const originalFetch=globalThis.fetch
+// 只在单个测试内替换 fetch：--test-isolation=none 下模块级全局替身会污染其它测试文件。
+const hostFetch=globalThis.fetch
 let responder
-globalThis.fetch=async(input,init)=>{
+const stubFetch=async(input,init)=>{
  const url=String(typeof input==='string'?input:input instanceof URL?input.href:input.url)
  const entry={url,method:init?.method??'GET',body:init?.body?JSON.parse(init.body):undefined};wire.push(entry)
  if(responder)return responder(entry)
  if(url.includes('streamGenerateContent'))return sse([{candidates:[{content:{role:'model',parts:[{text:'hello'}]},finishReason:'STOP'}],usageMetadata:{promptTokenCount:30,candidatesTokenCount:1,totalTokenCount:31}}])
  return sse(interactionEvents)
 }
-for(const [model,route]of [[GOOGLE_API_MODEL,'google-generative-ai'],[MODEL,'google-vertex']])test(route+': selected Interactions reaches its exact endpoint through prepared DSH calls',async()=>{
+const test=(name,fn)=>nodeTest(name,async(...args)=>{globalThis.fetch=stubFetch;try{return await fn(...args)}finally{globalThis.fetch=hostFetch}})
+for(const [model,route,expectedUpstream]of [[GOOGLE_API_MODEL,'google-generative-ai','gemini-4-argon'],[MODEL,'google-vertex','gemini-4-argon'],[GOOGLE_API_CARBON_MODEL,'google-generative-ai','gemini-4-carbon'],[CARBON_MODEL,'google-vertex','gemini-4-carbon']])test(route+' ('+model+'): selected Interactions reaches its exact endpoint through prepared DSH calls',async()=>{
  const config=cfg();config.googleProtocol='interactions';config.vertexProtocol='interactions';let diagnostic
  const adapter=createArgonAdapter(ctx,config,undefined,undefined,d=>diagnostic=d)
  const prepared=await adapter.prepareCall(PROVIDER,model)
  const out=await collect(prepared.stream(req(model)))
  assert.equal(out.at(-1).reason.kind,'stop');assert.equal(diagnostic.protocol,'interactions');assert.equal('regionClass' in diagnostic,false)
  const last=wire.at(-1);assert.ok(last.url.endsWith(route==='google-vertex'?'/v1beta1/locations/global/interactions':'/v1beta/interactions'))
+ assert.equal(last.body.model,expectedUpstream)
  assert.equal(last.body.store,false);assert.equal(last.body.background,false)
  assert.equal(out.find(c=>c.type==='usage').usage.totalTokens,31)
 })
@@ -34,6 +37,27 @@ test('one route can use Interactions while the other retains GenerateContent',as
  const adapter=createArgonAdapter(ctx,cfg())
  await collect(adapter.stream(req(GOOGLE_API_MODEL)));assert.ok(wire.at(-1).url.endsWith('/interactions'))
  await collect(adapter.stream(req(MODEL)));assert.ok(wire.at(-1).url.includes('streamGenerateContent'))
+})
+test('Interactions narrows max to high on both Carbon routes regardless of the configured default level',async()=>{
+ for(const model of [GOOGLE_API_CARBON_MODEL,CARBON_MODEL]){
+  const config={...cfg(),reasoning:'low'};config.googleProtocol='interactions';config.vertexProtocol='interactions'
+  const adapter=createArgonAdapter(ctx,config)
+  const viaEffort=await collect(adapter.stream({...req(model),reasoningEffort:'max'}))
+  assert.equal(viaEffort.at(-1).reason.kind,'stop')
+  assert.equal(wire.at(-1).body.generation_config.thinking_level,'high')
+  assert.equal(wire.at(-1).body.model,'gemini-4-carbon')
+  const prepared=await adapter.prepareCall(PROVIDER,model)
+  const viaReasoning=await collect(prepared.stream({...req(model),reasoning:'max'}))
+  assert.equal(viaReasoning.at(-1).reason.kind,'stop')
+  assert.equal(wire.at(-1).body.generation_config.thinking_level,'high')
+  for(const bad of ['minimal','off','xhigh']){
+   const before=wire.length
+   const out=await collect(adapter.stream({...req(model),reasoningEffort:bad}))
+   assert.equal(out.at(-1).reason.kind,'error')
+   assert.match(JSON.stringify(out.at(-1).reason),/requires low, medium, or high thinking/)
+   assert.equal(wire.length,before)
+  }
+ }
 })
 test('prepared Interactions call retains config and endpoint snapshot',async()=>{
  const config=cfg();const adapter=createArgonAdapter(ctx,()=>config)
@@ -282,4 +306,3 @@ test('a later hop cannot overwrite the first-hop input watermark',async()=>{
   assert.equal(rows.size,0)
  }finally{responder=undefined;await hub.close()}
 })
-process.on('exit',()=>{globalThis.fetch=originalFetch})

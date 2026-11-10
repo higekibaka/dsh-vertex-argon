@@ -1,33 +1,29 @@
-# dsh-vertex-argon 实现架构与模块边界（v1.6.4）
+# Gemini 4 Adapter（dsh-vertex-argon）实现架构与模块边界（v2.0.0）
 
 本目录描述当前本地工程；实现合同见 [DECISIONS.md](<DECISIONS.md>)，本轮验证与历史实测分开记录于 [STATUS.md](<STATUS.md>)。文档更新不表示插件已安装、已发布或新增了云端验证。
 
 ## 1. 插件与宿主边界
 
-- 包名 `dsh-vertex-argon`，Host 注册名 `local-vertex-argon`，Provider ID `google-vertex-argon`。
-- 保留用户工程版本 `1.6.4`，支持 DSH `>=0.2.0-rc.2`；Node.js `^22.19.0 || >=24.0.0`。元数据以 [package.json](<../../package.json>) 为准。
+- 展示品牌名 **Gemini 4 Adapter**（诊断面板显示为 **Gemini 4 诊断** / **Gemini 4 diagnostics**）；底层 npm 包名保持 `dsh-vertex-argon`，Host 注册名 `local-vertex-argon`，Provider ID `google-vertex-argon`。
+- 当前工程版本 `2.0.0`，支持 DSH `>=0.2.0-rc.2`；Node.js `^22.19.0 || >=24.0.0`。元数据以 [package.json](<../../package.json>) 为准。
 - 仅使用宿主公开的 `llm`、`storageDomain`、`typert`、`settings`、`tools` 与 Web Client Slots，不修改宿主源码、已安装归档或 profile。
 - `installGemini4PiAiPatch` 保留对原生 `google` / `google-vertex` 的 Gemini 4 调用修正；不引入隐式辅助模型请求。
 
-## 2. 三个独立模型、两种协议路由
+## 2. 双官方通道、四个模型 ID、两种协议路由
 
 | 模型 | 连接目标 | `route` | 配置来源 |
 |---|---|---|---|
-| `gemini-4-argon` | Vertex AI | `google-vertex` | `vertexProtocol` / `vertexServiceTier` |
-| `gemini-4-argon-google` | Gemini API | `google-generative-ai` | `googleProtocol` / `googleServiceTier` |
-| `gemini-4-argon-proxy` | Antigravity Proxy | `google-generative-ai` | 复用 Google 协议与服务层级；独立地址/密钥 |
-| `gemini-3.8-flash-proxy` | Antigravity Proxy | `google-generative-ai` | 同上；与 Argon 共用代理地址与专属密钥 |
+| `gemini-4-argon` / `gemini-4-carbon` | Vertex AI | `google-vertex` | `vertexProtocol` / `vertexServiceTier` |
+| `gemini-4-argon-google` / `gemini-4-carbon-google` | Gemini API | `google-generative-ai` | `googleProtocol` / `googleServiceTier` |
 
-代理由 `proxyEnabled || explicitRoutes.hasProxy` 开启，默认关闭。`PROXY_MODEL` / `PROXY_FLASH_MODEL` 都是独立模型 ID，不新增第三种诊断路由枚举；`isProxyModel` 是两个代理模型的唯一判定入口。界面依据 `model` 显示 Antigravity；云端 ID 查询仍仅支持 Google/Vertex，不据诊断路由推断代理凭据。
+四个模型 ID 由两条官方通道派生：Argon 与 Carbon 共用通道配置，上游基础模型 ID 由 `officialUpstreamModel` 决定（`gemini-4-argon` 或 `gemini-4-carbon`）。诊断 `route` 只取 `google-vertex` 与 `google-generative-ai`，Inspector 直接按 `route` 显示官方通道名；云端 ID 查询也只覆盖这两个官方通道。
 
 ```mermaid
 flowchart TD
-    U[DSH 模型选择] --> V[Vertex AI 独立模型]
-    U --> G[Gemini API 独立模型]
-    U --> A[Antigravity 独立模型与专属密钥]
+    U[DSH 模型选择] --> V[Vertex AI 通道：Argon / Carbon]
+    U --> G[Gemini API 通道：Argon / Carbon]
     V --> P[显式协议与服务层级校验]
     G --> P
-    A --> P
     P --> GC[GenerateContent 长解码与四项恢复机制]
     P --> IA[Interactions 状态机与后台恢复]
     GC --> D[请求诊断与基本 Token 计数]
@@ -42,15 +38,15 @@ flowchart TD
 
 ### 入口与配置
 
-- [index.js](<../../index.js>)：16 项 `volatile` 配置、存储域、Typert 服务、请求关联事件与延迟加载工具注册。配置完整表见 [主文档](<../../README.md#完整配置16-项>)。
-- [client.js](<../../client.js>)：设置页面（含 Antigravity 三字段卡片）、右侧栏/会话主视图/回复快捷入口，以及 **Debug / Operations** 两个工作区；不挂载范围聚合仪表盘。
+- [index.js](<../../index.js>)：13 项 `volatile` 配置、存储域、Typert 服务、请求关联事件与延迟加载工具注册。配置完整表见 [主文档](<../../README.md#完整配置13-项>)。
+- [client.js](<../../client.js>)：设置页面、右侧栏/会话主视图/回复快捷入口，以及 **Debug / Operations** 两个工作区；不挂载范围聚合仪表盘。
 - [runtime.js](<../../runtime.js>)：从现有宿主解析 `@deepseek-ai/*`、`@earendil-works/pi-ai`、`@google/genai`、`zod` 等依赖。
 
 ### 路由、连接与服务层级
 
-- [adapter.js](<../../adapter.js>)：三模型注册、配置快照与缓存失效、凭据解析、代理 URL 规范化和原生适配器补丁。代理 Key 仅取已去空白的设置值或 `ANTIGRAVITY_API_KEY`，不与 Google/Vertex 混用。
-- [google-connection.js](<../../google-connection.js>)：创建 `GoogleGenAI` 与 Interactions 传输；显式 Key 覆盖和专属环境键确保代理隔离。
-- [service-level.js](<../../service-level.js>)：既有服务层级/PayGo 能力矩阵与真实回执提取；代理沿用 Google 路由，不扩展矩阵。
+- [adapter.js](<../../adapter.js>)：四模型注册、配置快照与缓存失效、凭据解析和原生适配器补丁。Gemini API Key 与 Vertex Key 各自独立解析，互不回退。
+- [google-connection.js](<../../google-connection.js>)：创建 `GoogleGenAI` 与 Interactions 传输；显式 Key 覆盖、环境键与自定义 `baseURL` 支持官方通道隔离。
+- [service-level.js](<../../service-level.js>)：既有服务层级/PayGo 能力矩阵与真实回执提取；两条官方通道各自使用自己的矩阵，不互相沿用。
 
 ### GenerateContent 与签名
 
@@ -90,7 +86,7 @@ flowchart TD
 
 ## 5. 离线测试与依赖边界
 
-`npm test` 先加载 [offline-guard.mjs](<../../test/offline-guard.mjs>)，再加载 [host-loader.mjs](<../../test/host-loader.mjs>)。只允许测试进程自行创建的临时 IPv4 回环服务，禁止真实外网。测试数量与最终通过结果由负责人依据当轮日志补充到 [STATUS.md](<STATUS.md>)。
+`npm test` 先加载 [offline-guard.mjs](<../../test/offline-guard.mjs>)，再加载 [host-loader.mjs](<../../test/host-loader.mjs>)。只允许测试进程自行创建的临时 IPv4 回环服务，禁止真实外网。Windows 受限沙盒禁止子进程时可改用 `--test-isolation=none` 同进程聚合执行：每个测试文件自行安装并恢复 `globalThis.fetch` 替身与 SDK 原型补丁，两种执行方式结果一致。测试数量与最终通过结果由负责人依据当轮日志补充到 [STATUS.md](<STATUS.md>)。
 
 加载器保留 Node 正常解析，再按显式 `DSH_TEST_HOST_ROOT`、相邻源码树、desktop profile、已有解包依赖回退；最后可只读复用本机 ASAR，将需要的包缓存到仓库临时目录。路径/链接/文件偏移/完整性须校验，完整包原子发布给并发进程；不下载依赖，不修改宿主或 profile。
 

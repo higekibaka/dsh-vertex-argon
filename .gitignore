@@ -2,6 +2,7 @@ node_modules/
 pnpm-lock.yaml
 dev/
 releases/
+promo-video/
 /.dsh-ops/
 /.tmp/
 *.tgz

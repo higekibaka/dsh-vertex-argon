@@ -1,6 +1,26 @@
 # Changelog
 
-All notable changes to `dsh-vertex-argon` are documented in this file.
+All notable changes to **Gemini 4 Adapter** (`dsh-vertex-argon`) are documented in this file.
+
+## [2.0.0] - 2026-11-11
+
+### Breaking Changes
+- **Focused Dual Official Channels & Proxy Route Removal (`adapter.js`, `index.js`, `interaction-adapter.js`, `client.js`)**:
+  - Removed the third-party Antigravity reverse-proxy route (`gemini-4-argon-proxy`, `gemini-3.8-flash-proxy`), dedicated `proxy*` settings (`proxyEnabled`, `proxyBaseUrl`, `proxyApiKey`), and the reverse-proxy settings card introduced in `1.6.0`–`1.6.3`, streamlining volatile plugin settings from 16 to **13** and focusing exclusively on official **Vertex AI** and **Gemini Developer API** channels.
+
+### Added
+- **Gemini 4 Carbon Support Across Both Official Channels (`adapter.js`, `interaction-adapter.js`, `client.js`, `package.json`)**:
+  - Added `CARBON_MODEL = 'gemini-4-carbon'` (Vertex AI) and `GOOGLE_API_CARBON_MODEL = 'gemini-4-carbon-google'` (Gemini API) alongside the Argon models via `officialUpstreamModel` and `detectPiAiArgonRoutes`, forming a 4-model official matrix with shared long-decode, service-tier validation, and cross-model tool-history downgrade protection.
+
+### Changed
+- **Rebranded Display Surface to Gemini 4 Adapter (`locale/zh.json`, `locale/en.json`, `adapter.js`, `client.js`, `README.md`)**:
+  - Updated UI display titles, model-picker group name, diagnostics views (**Gemini 4 诊断** / **Gemini 4 diagnostics**), and package metadata to **Gemini 4 Adapter** while preserving the npm package name (`dsh-vertex-argon`), provider ID (`google-vertex-argon`), patch row ID (`local-vertex-argon`), tool name (`argon_inspect`), and storage domains (`vertex_argon_*`) for seamless in-place upgrades.
+  - Rewrote `README.md` for clarity, onboarding, and full `v2.0.0` architecture alignment.
+
+### Fixed
+- **Direct-Adapter `max` → `high` Reasoning Convergence & Test Isolation (`adapter.js`, `interaction-adapter.js`, `interactions-input.js`, `test/*.test.mjs`)**:
+  - Added `narrowMaxReasoning` across `ArgonAdapter.prepareCall`, `gemini4StreamSimple`, `interaction-adapter`, and `interactions-input` so callers invoking `adapter.stream` or `prepareCall().stream` directly (bypassing `agent/request`, such as advisor plugins) consistently normalize `max` reasoning effort to `high` while continuing to reject `off` / `minimal` / `xhigh`.
+  - Isolated per-test `globalThis.fetch` mocks and SDK prototype patches across the offline test suite so single-process `--test-isolation=none` runs match per-file isolated runs.
 
 ## [1.6.4] - 2026-11-05
 
