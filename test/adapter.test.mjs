@@ -11,6 +11,7 @@ import {
   GOOGLE_API_MODEL,
   CARBON_MODEL,
   GOOGLE_API_CARBON_MODEL,
+  HYDROGEN_MODEL,
   isGoogleApiModel,
   officialUpstreamModel,
   LEVELS,
@@ -161,6 +162,34 @@ test('auto-detects google & google-vertex Argon configs and exposes both in plug
   assert.equal(parts.find(p => p.functionCall).thoughtSignature, 'dG9vbA==')
 })
 
+test('auto-detects google-vertex Hydrogen config and exposes gemini-4-hydrogen', async () => {
+  const mockCtx = {
+    get: k => {
+      if (k === 'launchEnvironment') return { get: n => n === 'GOOGLE_CLOUD_API_KEY' ? { value: 'fixture-key' } : undefined }
+      if (k === 'configEditor') return {
+        entries: () => [{
+          options: {
+            id: 'llm-pi-ai',
+            config: {
+              providers: {
+                'google-vertex': { models: [{ id: 'gemini-4-hydrogen' }] },
+              },
+            },
+          },
+        }],
+      }
+    },
+  }
+  const detected = detectPiAiArgonRoutes(mockCtx)
+  assert.equal(detected.hasVertexHydrogen, true)
+  const a = createArgonAdapter(mockCtx, config)
+  const models = await a.listModels(PROVIDER)
+  assert.deepEqual(models.map(m => ({ id: m.id, name: m.name })), [
+    { id: MODEL, name: 'Gemini 4 Argon' },
+    { id: HYDROGEN_MODEL, name: 'Gemini 4 Hydrogen' },
+  ])
+})
+
 test('auto-detects google & google-vertex Carbon configs and routes both to upstream gemini-4-carbon', async () => {
   assert.equal(isGoogleApiModel(GOOGLE_API_MODEL), true)
   assert.equal(isGoogleApiModel(GOOGLE_API_CARBON_MODEL), true)
@@ -170,6 +199,8 @@ test('auto-detects google & google-vertex Carbon configs and routes both to upst
   assert.equal(officialUpstreamModel(GOOGLE_API_MODEL), MODEL)
   assert.equal(officialUpstreamModel(CARBON_MODEL), CARBON_MODEL)
   assert.equal(officialUpstreamModel(GOOGLE_API_CARBON_MODEL), CARBON_MODEL)
+  assert.equal(officialUpstreamModel(HYDROGEN_MODEL), HYDROGEN_MODEL)
+  assert.equal(isGoogleApiModel(HYDROGEN_MODEL), false)
 
   const mockCtx = {
     get: k => {
