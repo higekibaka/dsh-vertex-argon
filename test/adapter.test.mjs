@@ -988,6 +988,28 @@ test('signature bridge degrades unsigned or cross-provider toolCall without code
   assert.ok(r2.content[0].text.includes('[Previously executed tool pwsh; call f1]'))
 })
 
+test('signature bridge propagates first toolCall thoughtSignature to parallel sibling toolCalls', () => {
+  const model = { api: 'google-vertex', provider: PROVIDER, id: MODEL, maxTokens: 512 }
+  const bridge = createGoogleSignatureBridge({
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'run' }] },
+      {
+        role: 'assistant',
+        api: 'google-vertex',
+        provider: PROVIDER,
+        model: MODEL,
+        content: [
+          { type: 'toolCall', id: 'c1', name: 'read', arguments: {}, thoughtSignature: 'turn-sig' },
+          { type: 'toolCall', id: 'c2', name: 'glob', arguments: {} },
+        ],
+      },
+    ],
+  }, model)
+  const [, assistant] = bridge.context.messages
+  assert.equal(assistant.content[0].thoughtSignature, 'turn-sig')
+  assert.equal(assistant.content[1].thoughtSignature, 'turn-sig')
+})
+
 test('generateContentHistory scrubs polluted [:thinking:] prefix and trailing forged tool call while preserving backtick diagnostic quotes', async () => {
   const a = createArgonAdapter(ctx, officialConfig)
   mode = 'text'

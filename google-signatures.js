@@ -60,12 +60,14 @@ export function createGoogleSignatureBridge(context, model) {
     const same = message.api === model.api && message.provider === model.provider && message.model === model.id
     const codes = message.content.map(block => block.type === 'text' ? decode(block.textSignature) : undefined)
     const hasCodes = codes.some(code => code !== undefined)
+    const firstToolSig = message.content.find(block => block.type === 'toolCall' && typeof block.thoughtSignature === 'string' && block.thoughtSignature.length > 0)?.thoughtSignature
     const hasToolCall = message.content.some(block => block.type === 'toolCall')
-    const hasSignedToolCall = message.content.some(block => block.type === 'toolCall' && typeof block.thoughtSignature === 'string' && block.thoughtSignature.length > 0)
+    const hasSignedToolCall = typeof firstToolSig === 'string'
     const contentDigest = hasCodes ? digest(message.content) : undefined
     let next = message
     if ((hasCodes && (!same || codes.some((code, index) => code !== undefined && (!code || message.content[index].text !== '' || code.contentDigest !== contentDigest || code.historyDigest !== previousHistory)))) || (hasToolCall && (!same || !hasSignedToolCall))) next = unsigned(message, demoted)
     else {
+      let changed = hasCodes
       const content = message.content.map((block, index) => {
         const code = codes[index]
         if (code) {
@@ -74,9 +76,13 @@ export function createGoogleSignatureBridge(context, model) {
           return { ...block, textSignature: carrier }
         }
         if (same && block.type === 'text' && block.text === '' && base64(block.textSignature)) restore.push({ signature: block.textSignature, carrier: block.textSignature, standalone: false })
+        if (same && block.type === 'toolCall' && !block.thoughtSignature && firstToolSig) {
+          changed = true
+          return { ...block, thoughtSignature: firstToolSig }
+        }
         return block
       })
-      if (hasCodes) next = { ...message, content }
+      if (changed) next = { ...message, content }
     }
     history.update(historyRecord(next))
     return next
