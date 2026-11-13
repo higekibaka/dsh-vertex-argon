@@ -954,6 +954,40 @@ test('signature bridge degrades a stale signature codec and its toolResult to te
   )
 })
 
+test('signature bridge degrades unsigned or cross-provider toolCall without codec to text', () => {
+  const model = { api: 'google-vertex', provider: PROVIDER, id: MODEL, maxTokens: 512 }
+  const bridge = createGoogleSignatureBridge({
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'run' }] },
+      {
+        role: 'assistant',
+        api: 'google-vertex',
+        provider: PROVIDER,
+        model: MODEL,
+        content: [{ type: 'toolCall', id: 'u1', name: 'pwsh', arguments: { command: 'ls' } }],
+      },
+      { role: 'toolResult', toolCallId: 'u1', toolName: 'pwsh', content: [{ type: 'text', text: 'ok' }], isError: false },
+      {
+        role: 'assistant',
+        api: 'google-vertex',
+        provider: 'google-vertex',
+        model: MODEL,
+        content: [{ type: 'toolCall', id: 'f1', name: 'pwsh', arguments: { command: 'pwd' }, thoughtSignature: 'foreign-sig' }],
+      },
+      { role: 'toolResult', toolCallId: 'f1', toolName: 'pwsh', content: [{ type: 'text', text: 'E:\\Code' }], isError: false },
+    ],
+  }, model)
+  const [, a1, r1, a2, r2] = bridge.context.messages
+  assert.equal(a1.api, 'dsh-foreign')
+  assert.equal(a1.content.some(b => b.type === 'toolCall'), false)
+  assert.equal(r1.role, 'user')
+  assert.ok(r1.content[0].text.includes('[Previously executed tool pwsh; call u1]'))
+  assert.equal(a2.api, 'dsh-foreign')
+  assert.equal(a2.content.some(b => b.type === 'toolCall'), false)
+  assert.equal(r2.role, 'user')
+  assert.ok(r2.content[0].text.includes('[Previously executed tool pwsh; call f1]'))
+})
+
 test('generateContentHistory scrubs polluted [:thinking:] prefix and trailing forged tool call while preserving backtick diagnostic quotes', async () => {
   const a = createArgonAdapter(ctx, officialConfig)
   mode = 'text'

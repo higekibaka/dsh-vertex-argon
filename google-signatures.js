@@ -60,9 +60,11 @@ export function createGoogleSignatureBridge(context, model) {
     const same = message.api === model.api && message.provider === model.provider && message.model === model.id
     const codes = message.content.map(block => block.type === 'text' ? decode(block.textSignature) : undefined)
     const hasCodes = codes.some(code => code !== undefined)
+    const hasToolCall = message.content.some(block => block.type === 'toolCall')
+    const hasSignedToolCall = message.content.some(block => block.type === 'toolCall' && typeof block.thoughtSignature === 'string' && block.thoughtSignature.length > 0)
     const contentDigest = hasCodes ? digest(message.content) : undefined
     let next = message
-    if (hasCodes && (!same || codes.some((code, index) => code !== undefined && (!code || message.content[index].text !== '' || code.contentDigest !== contentDigest || code.historyDigest !== previousHistory)))) next = unsigned(message, demoted)
+    if ((hasCodes && (!same || codes.some((code, index) => code !== undefined && (!code || message.content[index].text !== '' || code.contentDigest !== contentDigest || code.historyDigest !== previousHistory)))) || (hasToolCall && (!same || !hasSignedToolCall))) next = unsigned(message, demoted)
     else {
       const content = message.content.map((block, index) => {
         const code = codes[index]
