@@ -66,7 +66,7 @@ export const recordSchema = z.object({
   remoteCancellation: z.enum(['not-requested', 'confirmed', 'unconfirmed']).optional(),
   serviceTier: z.object({ requested: z.enum(['standard', 'flex', 'priority']), observed: z.enum(['standard', 'flex', 'priority', 'provisioned', 'mixed']).nullable(), source: z.enum(['response-header', 'traffic-type']).nullable() }).strict().optional(),
   apiVersion: z.enum(['v1', 'v1beta1', 'v1beta']),
-  thinkingLevel: z.enum(['LOW', 'MEDIUM', 'HIGH']),
+  thinkingLevel: z.enum(['LOW', 'MEDIUM', 'HIGH', 'XHIGH']),
   longDecodeEnabled: z.boolean(),
   configuredMaxTokens: positiveInt.nullable(),
   hopCount: count,

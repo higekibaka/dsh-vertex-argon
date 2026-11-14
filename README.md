@@ -2,22 +2,22 @@
 
 ![Gemini 4 Adapter](<icon.svg>)
 
-**面向 [DeepSeek Harness](<https://github.com/deepseek-ai/deepseek-harness>) 的 Google 官方双通道（Vertex AI + Gemini Developer API）Gemini 4 适配器，原生支持 Argon 与 Carbon 四模型路由、GenerateContent / Interactions 双协议、65K+ 多跳长解码与请求级诊断。**
+**面向 [DeepSeek Harness](<https://github.com/deepseek-ai/deepseek-harness>) 的 Google 官方双通道（Vertex AI + Gemini Developer API）Gemini 4 适配器，原生支持 Argon、Carbon 与 Hydrogen 六模型路由、GenerateContent / Interactions 双协议、65K+ 多跳长解码与请求级诊断。**
 
 - **当前版本**：`2.0.0`（[CHANGELOG.md](<CHANGELOG.md>)）
 - **npm 包名**：`dsh-vertex-argon`（保留既有包名、官方通道路由与本地存储域 ID，官方通道用户可直接原地升级；`2.0.0` 已移除 `1.6.x` 非官方反代通道）
 - **运行要求**：DSH `>=0.2.0-rc.2`，Node.js `^22.19.0 || >=24.0.0`（见 [package.json](<package.json>)）
 
-[快速开始](<#快速开始>) · [双官方通道与四模型](<#双官方通道与四模型>) · [长解码与流式恢复](<#generatecontent长解码与四项韧性机制>) · [配置速查](<#完整配置13-项>) · [诊断与工具](<#gemini-4-诊断与-argon_inspect-工具>) · [长解码实测参考](<#历史实测参考奥德赛七号全年舰长日志>)
+[快速开始](<#快速开始>) · [双官方通道与六模型](<#双官方通道与六模型>) · [长解码与流式恢复](<#generatecontent长解码与四项韧性机制>) · [配置速查](<#完整配置13-项>) · [诊断与工具](<#gemini-4-诊断与-argon_inspect-工具>) · [长解码实测参考](<#历史实测参考奥德赛七号全年舰长日志>)
 
 ---
 
 ## 核心特性
 
-- **双官方通道 × 四模型路由**：同时接入 Google Cloud **Vertex AI**（`gemini-4-argon` / `gemini-4-carbon`）与 **Gemini Developer API**（`gemini-4-argon-google` / `gemini-4-carbon-google`），两通道凭据与网关严格隔离，绝不暗中互借或静默回退。
+- **双官方通道 × 六模型路由**：同时接入 Google Cloud **Vertex AI**（`gemini-4-argon` / `gemini-4-carbon` / `gemini-4-hydrogen`）与 **Gemini Developer API**（`gemini-4-argon-google` / `gemini-4-carbon-google` / `gemini-4-hydrogen-google`），两通道凭据与网关严格隔离，绝不暗中互借或静默回退。
 - **65K+ 多跳长解码与流自愈**：单跳上限 `65,536` tokens，最大输出预算可达 `1,048,576`（最多 32 跳）；首个检查点前实时流式输出，支持检查点尾段回滚续传、逐跳四阶段超时看门狗、零交付首包重试、仅思考结束单次续答自愈，以及 `MALFORMED_FUNCTION_CALL` 后 `VALIDATED` → `AUTO` 工具模式自动退避。
 - **Interactions 协议与后台任务恢复**：支持前台流式及显式授权后的云端后台执行；内置 `creating` 预写防重计费锁、`last_event_id` 断点续读、`2026-05-20` 独立生命周期事件兼容，以及同会话新提示词触发的历史死锁非流式探针对账。
-- **签名保真与跨模型安全降级**：完整保留并回放 `thoughtSignature` / `thought_signature`（含无文本独立签名块）；原生映射 `low` / `medium` / `high` 三档思考级别（宿主或子代理传入 `max` 时自动收敛为 `high`，永不下发 `thinkingBudget`）；在 Argon ↔ Carbon 或跨通道切换时自动将旧工具历史安全降级为文本记录并清洗污染块。
+- **签名保真与跨模型安全降级**：完整保留并回放 `thoughtSignature` / `thought_signature`（含无文本独立签名块）；原生映射 `low` / `medium` / `high` 三档思考级别（宿主或子代理传入 `max` 时自动收敛为 `high`，永不下发 `thinkingBudget`）；在 Argon ↔ Carbon ↔ Hydrogen 或跨通道切换时自动将旧工具历史安全降级为文本记录并清洗污染块。
 - **Gemini 4 诊断面板与只读工具**：在右侧栏、会话详情页与单条回复底部提供请求摘要、基础 Token 水位（严格区分首跳上下文水位与跨跳累计用量）、11 列逐跳轨迹、分页原始响应证据、云端 Interaction ID 只读查询与全局恢复锁管理，并向智能体提供延迟加载的只读工具 `argon_inspect`。
 
 ---
@@ -40,7 +40,7 @@ dsh plugin --profile desktop add dsh-vertex-argon
 
 ### 2. 声明模型入口
 
-在 DSH「**设置 → 模型**」的原生 `Google` 或 `Google Vertex AI` 供应商下添加 `gemini-4-argon` 和/或 `gemini-4-carbon`，插件会自动识别并在模型选择器中暴露 **Gemini 4 Adapter** 分组下的对应模型。
+在 DSH「**设置 → 模型**」的原生 `Google` 或 `Google Vertex AI` 供应商下添加 `gemini-4-argon`、`gemini-4-carbon` 和/或 `gemini-4-hydrogen`，插件会自动识别并在模型选择器中暴露 **Gemini 4 Adapter** 分组下的对应模型。
 
 ### 3. 配置官方凭据
 
@@ -52,7 +52,7 @@ dsh plugin --profile desktop add dsh-vertex-argon
 
 ---
 
-## 双官方通道与四模型
+## 双官方通道与六模型
 
 底层 Provider ID 为 `google-vertex-argon`，模型选择器分组显示为 **Gemini 4 Adapter**（实现见 [adapter.js](<adapter.js>) 与 [google-connection.js](<google-connection.js>)）。
 
@@ -60,13 +60,15 @@ dsh plugin --profile desktop add dsh-vertex-argon
 |---|---|---|---|---|
 | **Vertex AI** | `gemini-4-argon` | `gemini-4-argon` | `google-vertex` | `vertexProtocol` / `vertexServiceTier` |
 | **Vertex AI** | `gemini-4-carbon` | `gemini-4-carbon` | `google-vertex` | `vertexProtocol` / `vertexServiceTier` |
+| **Vertex AI** | `gemini-4-hydrogen` | `gemini-4-hydrogen` | `google-vertex` | `vertexProtocol` / `vertexServiceTier` |
 | **Gemini API** | `gemini-4-argon-google` | `gemini-4-argon` | `google-generative-ai` | `googleProtocol` / `googleServiceTier` |
 | **Gemini API** | `gemini-4-carbon-google` | `gemini-4-carbon` | `google-generative-ai` | `googleProtocol` / `googleServiceTier` |
+| **Gemini API** | `gemini-4-hydrogen-google` | `gemini-4-hydrogen` | `google-generative-ai` | `googleProtocol` / `googleServiceTier` |
 
 ### 跨模型切换与历史清洗规则
 
 - **同模型连续对话**：完整保留原生 `thoughtSignature` / `thought_signature` 与 `functionCall` / `functionResponse` 签名回放。
-- **跨模型或跨通道切换（如 Argon ↔ Carbon、Vertex ↔ Gemini API）**：出站前自动将含推理或工具调用的旧回合降级为纯文本记录（剔除旧思考块，将已完成工具调用转为角色安全的文本摘要，未完成调用直接拦截），避免因底层摘除跨模型签名而发出裸 `functionCall` 或孤立 `functionResponse`。
+- **跨模型或跨通道切换（如 Argon ↔ Carbon ↔ Hydrogen、Vertex ↔ Gemini API）**：出站前自动将含推理或工具调用的旧回合降级为纯文本记录（剔除旧思考块，将已完成工具调用转为角色安全的文本摘要，未完成调用直接拦截），避免因底层摘除跨模型签名而发出裸 `functionCall` 或孤立 `functionResponse`。
 - **原生入口兼容保护**：插件同时为宿主原生 `google` 与 `google-vertex` 适配器中的 Gemini 4 模型注入 GenerateContent 思考档位映射、采样参数剥离与签名回放保护。
 
 ---

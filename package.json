@@ -1,7 +1,7 @@
 {
   "name": "dsh-vertex-argon",
   "version": "2.0.0",
-  "description": "Gemini 4 Adapter for DSH: official Vertex AI & Gemini API channels (Argon & Carbon), resilient long decode, explicit service tiers, and request diagnostics.",
+  "description": "Gemini 4 Adapter for DSH: official Vertex AI & Gemini API channels (Argon, Carbon & Hydrogen), resilient long decode, explicit service tiers, and request diagnostics.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -63,6 +63,7 @@
     "gemini",
     "gemini-4-argon",
     "gemini-4-carbon",
+    "gemini-4-hydrogen",
     "plugin"
   ],
   "dsh": {

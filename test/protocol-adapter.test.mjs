@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
 import {test as nodeTest} from 'node:test'
-import {createArgonAdapter,PROVIDER,MODEL,GOOGLE_API_MODEL,CARBON_MODEL,GOOGLE_API_CARBON_MODEL} from '../adapter.js'
+import {createArgonAdapter,PROVIDER,MODEL,GOOGLE_API_MODEL,CARBON_MODEL,GOOGLE_API_CARBON_MODEL,HYDROGEN_MODEL,GOOGLE_API_HYDROGEN_MODEL} from '../adapter.js'
+import {contentHash,historyHash} from '../interactions-input.js'
 import {createInteractionStateHub} from '../interaction-state.js'
 import {createResponseHub} from '../response-store.js'
 import {recordSchema} from '../diagnostic-store.js'
 const ctx={get:k=>k==='launchEnvironment'?{get:n=>['GOOGLE_API_KEY','GOOGLE_CLOUD_API_KEY'].includes(n)?{value:'fixture'}:undefined}:undefined}
-const cfg=()=>({maxTokens:65536,reasoning:'medium',longDecode:true,googleProtocol:'interactions',vertexProtocol:'generate-content',routes:{hasGoogle:true,hasVertex:true,hasGoogleCarbon:true,hasVertexCarbon:true}})
+const cfg=()=>({maxTokens:65536,reasoning:'medium',longDecode:true,googleProtocol:'interactions',vertexProtocol:'generate-content',routes:{hasGoogle:true,hasVertex:true,hasGoogleCarbon:true,hasVertexCarbon:true,hasVertexHydrogen:true,hasGoogleHydrogen:true}})
 const req=model=>({provider:PROVIDER,model,maxTokens:512,sessionId:'fixture-session',messages:[{role:'user',content:[{type:'text',text:'hello'}]}]})
 const collect=async stream=>{const out=[];for await(const c of stream)out.push(c);return out}
 const wire=[]
@@ -22,7 +23,7 @@ const stubFetch=async(input,init)=>{
  return sse(interactionEvents)
 }
 const test=(name,fn)=>nodeTest(name,async(...args)=>{globalThis.fetch=stubFetch;try{return await fn(...args)}finally{globalThis.fetch=hostFetch}})
-for(const [model,route,expectedUpstream]of [[GOOGLE_API_MODEL,'google-generative-ai','gemini-4-argon'],[MODEL,'google-vertex','gemini-4-argon'],[GOOGLE_API_CARBON_MODEL,'google-generative-ai','gemini-4-carbon'],[CARBON_MODEL,'google-vertex','gemini-4-carbon']])test(route+' ('+model+'): selected Interactions reaches its exact endpoint through prepared DSH calls',async()=>{
+for(const [model,route,expectedUpstream]of [[GOOGLE_API_MODEL,'google-generative-ai','gemini-4-argon'],[MODEL,'google-vertex','gemini-4-argon'],[GOOGLE_API_CARBON_MODEL,'google-generative-ai','gemini-4-carbon'],[CARBON_MODEL,'google-vertex','gemini-4-carbon'],[GOOGLE_API_HYDROGEN_MODEL,'google-generative-ai','gemini-4-hydrogen'],[HYDROGEN_MODEL,'google-vertex','gemini-4-hydrogen']])test(route+' ('+model+'): selected Interactions reaches its exact endpoint through prepared DSH calls',async()=>{
  const config=cfg();config.googleProtocol='interactions';config.vertexProtocol='interactions';let diagnostic
  const adapter=createArgonAdapter(ctx,config,undefined,undefined,d=>diagnostic=d)
  const prepared=await adapter.prepareCall(PROVIDER,model)
@@ -32,6 +33,33 @@ for(const [model,route,expectedUpstream]of [[GOOGLE_API_MODEL,'google-generative
  assert.equal(last.body.model,expectedUpstream)
  assert.equal(last.body.store,false);assert.equal(last.body.background,false)
  assert.equal(out.find(c=>c.type==='usage').usage.totalTokens,31)
+})
+test('Interactions keeps Hydrogen native replay on the same model and degrades Argon/Carbon history to text',async()=>{
+ const config=cfg();config.googleProtocol='interactions';config.vertexProtocol='interactions'
+ config.routes={...config.routes,hasVertexHydrogen:true,hasGoogleHydrogen:true}
+ const tools=[{name:'echo',description:'offline fixture only',parameters:{type:'object',properties:{value:{type:'string'}},required:['value']}}]
+ const user={role:'user',content:[{type:'text',text:'hello'}]}
+ const tool={role:'tool',toolCallId:'h1',toolName:'echo',content:[{type:'text',text:'ok'}],isError:false}
+ const encodedSig=Buffer.from('hydrogen-signature').toString('base64')
+ const content=[{type:'text',text:'thinking',textSignature:encodedSig},{type:'tool-call',id:'h1',name:'echo',arguments:{value:'x'}}]
+ const steps=[{type:'thought',signature:encodedSig,content:[{type:'text',text:'thinking'}]},{type:'function_call',call_id:'h1',name:'echo',arguments:{value:'x'}}]
+ const historyOf=model=>[user,{role:'assistant',content,source:{provider:PROVIDER,model,replayState:{response:{api:'google-interactions-v1',provider:PROVIDER,model,route:'google-vertex',contentHash:contentHash(content),historyHash:historyHash([user]),steps}}}},tool]
+ const adapter=createArgonAdapter(ctx,config)
+ const same=await collect(adapter.stream({...req(HYDROGEN_MODEL),messages:historyOf(HYDROGEN_MODEL),tools}))
+ assert.equal(same.at(-1).reason.kind,'stop')
+ const native=wire.at(-1).body.input
+ assert.ok(native.some(row=>row&&row.type==='function_call'&&row.call_id==='h1'))
+ assert.ok(native.some(row=>row&&row.type==='thought'&&row.signature===encodedSig))
+ assert.equal(JSON.stringify(native).includes('[Previously executed tool'),false)
+ for(const from of [MODEL,GOOGLE_API_CARBON_MODEL]){
+  const crossed=await collect(adapter.stream({...req(HYDROGEN_MODEL),messages:historyOf(from),tools}))
+  assert.equal(crossed.at(-1).reason.kind,'stop')
+  const degraded=wire.at(-1).body.input
+  assert.equal(degraded.some(row=>row&&(row.type==='function_call'||row.type==='function_result')),false)
+  assert.equal(JSON.stringify(degraded).includes(encodedSig),false)
+  assert.ok(JSON.stringify(degraded).includes('[Previously executed tool echo; call h1]'))
+  assert.ok(JSON.stringify(degraded).includes('[Result of previously executed tool call h1]'))
+ }
 })
 test('one route can use Interactions while the other retains GenerateContent',async()=>{
  const adapter=createArgonAdapter(ctx,cfg())

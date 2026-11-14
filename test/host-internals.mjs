@@ -73,7 +73,9 @@ function clientBundle(name) {
   const url = shipped(name, 'lib/client.js')
   let source = readFileSync(url, 'utf8')
   const names = internalNames[name] ?? []
-  const boundary = source.lastIndexOf('return module.exports;')
+  // 宿主 bundle 的 CJS 工厂收尾在 0.2.2 系列改为 `return module.exports}});`（无分号），
+  // 因此只按标记本身定位插入点，兼容带不带分号的产物。
+  const boundary = source.lastIndexOf('return module.exports')
   assert.ok(boundary >= 0, 'Real host client factory must return its exports')
   if (names.length) source = source.slice(0, boundary) + 'Object.assign(module.exports, {' + names.join(',') + '});\n' + source.slice(boundary)
   let declaration

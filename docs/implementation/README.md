@@ -9,19 +9,19 @@
 - 仅使用宿主公开的 `llm`、`storageDomain`、`typert`、`settings`、`tools` 与 Web Client Slots，不修改宿主源码、已安装归档或 profile。
 - `installGemini4PiAiPatch` 保留对原生 `google` / `google-vertex` 的 Gemini 4 调用修正；不引入隐式辅助模型请求。
 
-## 2. 双官方通道、四个模型 ID、两种协议路由
+## 2. 双官方通道、六个模型 ID、两种协议路由
 
 | 模型 | 连接目标 | `route` | 配置来源 |
 |---|---|---|---|
-| `gemini-4-argon` / `gemini-4-carbon` | Vertex AI | `google-vertex` | `vertexProtocol` / `vertexServiceTier` |
-| `gemini-4-argon-google` / `gemini-4-carbon-google` | Gemini API | `google-generative-ai` | `googleProtocol` / `googleServiceTier` |
+| `gemini-4-argon` / `gemini-4-carbon` / `gemini-4-hydrogen` | Vertex AI | `google-vertex` | `vertexProtocol` / `vertexServiceTier` |
+| `gemini-4-argon-google` / `gemini-4-carbon-google` / `gemini-4-hydrogen-google` | Gemini API | `google-generative-ai` | `googleProtocol` / `googleServiceTier` |
 
-四个模型 ID 由两条官方通道派生：Argon 与 Carbon 共用通道配置，上游基础模型 ID 由 `officialUpstreamModel` 决定（`gemini-4-argon` 或 `gemini-4-carbon`）。诊断 `route` 只取 `google-vertex` 与 `google-generative-ai`，Inspector 直接按 `route` 显示官方通道名；云端 ID 查询也只覆盖这两个官方通道。
+六个模型 ID 由两条官方通道派生：Argon、Carbon 与 Hydrogen 共用通道配置，上游基础模型 ID 由 `officialUpstreamModel` 决定（`gemini-4-argon`、`gemini-4-carbon` 或 `gemini-4-hydrogen`）。诊断 `route` 只取 `google-vertex` 与 `google-generative-ai`，Inspector 直接按 `route` 显示官方通道名；云端 ID 查询也只覆盖这两个官方通道。
 
 ```mermaid
 flowchart TD
-    U[DSH 模型选择] --> V[Vertex AI 通道：Argon / Carbon]
-    U --> G[Gemini API 通道：Argon / Carbon]
+    U[DSH 模型选择] --> V[Vertex AI 通道：Argon / Carbon / Hydrogen]
+    U --> G[Gemini API 通道：Argon / Carbon / Hydrogen]
     V --> P[显式协议与服务层级校验]
     G --> P
     P --> GC[GenerateContent 长解码与四项恢复机制]
@@ -44,7 +44,7 @@ flowchart TD
 
 ### 路由、连接与服务层级
 
-- [adapter.js](<../../adapter.js>)：四模型注册、配置快照与缓存失效、凭据解析和原生适配器补丁。Gemini API Key 与 Vertex Key 各自独立解析，互不回退。
+- [adapter.js](<../../adapter.js>)：六模型注册、配置快照与缓存失效、凭据解析和原生适配器补丁。Gemini API Key 与 Vertex Key 各自独立解析，互不回退。
 - [google-connection.js](<../../google-connection.js>)：创建 `GoogleGenAI` 与 Interactions 传输；显式 Key 覆盖、环境键与自定义 `baseURL` 支持官方通道隔离。
 - [service-level.js](<../../service-level.js>)：既有服务层级/PayGo 能力矩阵与真实回执提取；两条官方通道各自使用自己的矩阵，不互相沿用。
 

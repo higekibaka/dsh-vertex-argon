@@ -15,6 +15,7 @@ import {
   PROVIDER,
   NATIVE_PROVIDER,
   LEVELS,
+  isHydrogenModel,
   MAX_SINGLE_CALL_TOKENS,
   MAX_LONG_DECODE_TOKENS,
 } from './adapter.js'
@@ -136,7 +137,11 @@ export function apply(ctx, config) {
             /^(?:models\/)?gemini-4\b/i.test(proposed?.model ?? ''))) &&
         proposed.reasoningEffort === 'max'
       ) {
-        return { ...proposed, reasoningEffort: 'high' }
+        // Hydrogen 的最髙档是独有第四档 xhigh；其余 Gemini 4 模型仍是 high。
+        return {
+          ...proposed,
+          reasoningEffort: isHydrogenModel(proposed?.model) ? 'xhigh' : 'high',
+        }
       }
       return proposed
     })

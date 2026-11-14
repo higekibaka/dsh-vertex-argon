@@ -62,11 +62,16 @@ async function contentOf(blocks, settings, scrubText = false) {
 // forged function calls or fake thought signatures.
 export async function buildInteractionRequest(options, settings) {
   const max = options.maxTokens ?? settings.maxTokens ?? 65536
+  const interactionModel = String(settings.upstreamModel ?? options.model ?? '')
+  const isHydrogen = /^(?:models\/)?gemini-4-hydrogen(?:-google)?$/i.test(interactionModel)
   const requestedLevel = options.reasoningEffort ?? settings.reasoning ?? 'medium'
-  const level = typeof requestedLevel === 'string' && requestedLevel.toLowerCase() === 'max' ? 'high' : requestedLevel
+  const normalizedRequested = typeof requestedLevel === 'string' ? requestedLevel.toLowerCase() : requestedLevel
+  // max 按目标模型收敛：Hydrogen 收到独有最高档 xhigh，其余模型仍是 high。
+  const level = normalizedRequested === 'max' ? (isHydrogen ? 'xhigh' : 'high') : normalizedRequested
   for (const flag of [settings.background, settings.store]) if (flag !== undefined && typeof flag !== 'boolean') throw new Error('Interactions background and storage consent must be booleans.')
   if (!Number.isSafeInteger(max) || max<1 || max>1048576) throw new Error('Invalid Interactions output token budget.')
-  if (!['low','medium','high'].includes(level)) throw new Error('Argon requires low, medium, or high thinking.')
+  const allowedLevels = isHydrogen ? ['low','medium','high','xhigh'] : ['low','medium','high']
+  if (!allowedLevels.includes(level)) throw new Error(isHydrogen ? 'Gemini 4 Hydrogen requires low, medium, high, or xhigh thinking.' : 'Argon requires low, medium, or high thinking.')
   if (settings.background && !settings.store) throw new Error('Background Interactions requires explicit storage consent.')
   if (max>65536 && !settings.background) throw new Error('Interactions above 65,536 tokens requires background execution.')
   if (max>65536 && settings.route==='google-vertex') throw new Error('Vertex Interactions long decode is not verified; use GenerateContent.')

@@ -6,12 +6,12 @@
 
 实现入口为 [adapter.js](<../../adapter.js>)、[google-connection.js](<../../google-connection.js>)、[index.js](<../../index.js>)。
 
-### 双官方通道的四个模型 ID
+### 双官方通道的六个模型 ID
 
-- `MODEL = gemini-4-argon`，`GOOGLE_API_MODEL = gemini-4-argon-google`，`CARBON_MODEL = gemini-4-carbon`，`GOOGLE_API_CARBON_MODEL = gemini-4-carbon-google`；四者按路由配置独立注册，不覆盖原有模型。Gemini API 模型由 `isGoogleApiModel` 判定，四个模型的上游基础 ID 统一由 `officialUpstreamModel` 映射为 `gemini-4-argon` 或 `gemini-4-carbon`；不再有反代专用通道与档位映射。
+- `MODEL = gemini-4-argon`，`GOOGLE_API_MODEL = gemini-4-argon-google`，`CARBON_MODEL = gemini-4-carbon`，`GOOGLE_API_CARBON_MODEL = gemini-4-carbon-google`，`HYDROGEN_MODEL = gemini-4-hydrogen`，`GOOGLE_API_HYDROGEN_MODEL = gemini-4-hydrogen-google`；六者按路由配置独立注册，不覆盖原有模型。Gemini API 模型由 `isGoogleApiModel` 判定，六个模型的上游基础 ID 统一由 `officialUpstreamModel` 映射为 `gemini-4-argon`、`gemini-4-carbon` 或 `gemini-4-hydrogen`；不再有反代专用通道与档位映射。
 - 官方通道只有两条：Vertex AI（`google-vertex`）与 Gemini API（`google-generative-ai`）。诊断 `route` 枚举不扩展，Inspector 直接按 `route` 显示通道名；云端 ID 查询也只覆盖这两个官方通道。
 - GenerateContent 与 Interactions 使用同一份 `officialUpstreamModel` 映射；两条通道各自遵守自己的协议与服务层级设置，缓存随设置和路由变化失效。
-- GenerateContent 历史在交给 pi-ai 前先过 `generateContentHistory(options, model)`：Interactions 来源的信封，以及跨模型（Argon ↔ Carbon、Vertex ↔ Gemini API，或跨 provider）且内容含 `reasoning` / `tool-call` 块的历史，一律降级为文本转录（剔除旧思考、已完成调用转 `[Previously executed tool ...]` 文本、对应结果转用户态文本、移除 `replayState`），未完成的调用直接报错。判据取 `message.source` 与 `replayState.response` 的 provider/model 双向比对；只含纯文本的跨模型消息仍交由签名桥按 `!same` 剥离独立签名。同模型历史保留原生签名回放。
+- GenerateContent 历史在交给 pi-ai 前先过 `generateContentHistory(options, model)`：Interactions 来源的信封，以及跨模型（Argon ↔ Carbon ↔ Hydrogen、Vertex ↔ Gemini API，或跨 provider）且内容含 `reasoning` / `tool-call` 块的历史，一律降级为文本转录（剔除旧思考、已完成调用转 `[Previously executed tool ...]` 文本、对应结果转用户态文本、移除 `replayState`），未完成的调用直接报错。判据取 `message.source` 与 `replayState.response` 的 provider/model 双向比对；只含纯文本的跨模型消息仍交由签名桥按 `!same` 剥离独立签名。同模型历史保留原生签名回放。
 
 ### 凭据解析与能力校验
 

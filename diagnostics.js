@@ -89,7 +89,7 @@ export function createArgonDiagnosticTracker(meta, record, captureOptions = {}) 
     remoteCancellation: 'not-requested',
     serviceTier: { requested: ['standard', 'flex', 'priority'].includes(meta?.requestedServiceTier) ? meta.requestedServiceTier : 'standard', observed: null, source: null },
     apiVersion: meta?.apiVersion === 'v1' ? 'v1' : 'v1beta1',
-    thinkingLevel: ['LOW', 'MEDIUM', 'HIGH'].includes(meta?.thinkingLevel) ? meta.thinkingLevel : 'MEDIUM',
+    thinkingLevel: ['LOW', 'MEDIUM', 'HIGH', 'XHIGH'].includes(meta?.thinkingLevel) ? meta.thinkingLevel : 'MEDIUM',
     longDecodeEnabled: meta?.longDecode !== false,
     configuredMaxTokens: Number.isSafeInteger(meta?.maxTokens) && meta.maxTokens > 0 ? meta.maxTokens : null,
     hopCount: 0,

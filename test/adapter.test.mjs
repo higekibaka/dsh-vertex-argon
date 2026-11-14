@@ -11,6 +11,8 @@ import {
   GOOGLE_API_MODEL,
   CARBON_MODEL,
   GOOGLE_API_CARBON_MODEL,
+  HYDROGEN_MODEL,
+  GOOGLE_API_HYDROGEN_MODEL,
   isGoogleApiModel,
   officialUpstreamModel,
   LEVELS,
@@ -128,6 +130,9 @@ test('auto-detects google & google-vertex Argon configs and exposes both in plug
   assert.equal(detected.hasVertex, true)
   assert.equal(detected.hasGoogle, true)
   const a = createArgonAdapter(mockCtx, config)
+  const argonProfile = a.inner.current().profiles.get(PROVIDER)
+  assert.equal(argonProfile.maxRequestImages, 50)
+  assert.equal(argonProfile.imageOffloadCountQuantum, 10)
   const models = await a.listModels(PROVIDER)
   assert.deepEqual(models.map(m => ({ id: m.id, name: m.name })), [
     { id: MODEL, name: 'Gemini 4 Argon (Vertex AI)' },
@@ -214,6 +219,109 @@ test('auto-detects google & google-vertex Carbon configs and routes both to upst
   assert.ok(wire.at(-1).url.includes('generativelanguage.googleapis.com'))
   assert.ok(wire.at(-1).url.includes('models/gemini-4-carbon:streamGenerateContent'))
   assert.deepEqual(wire.at(-1).body.generationConfig.thinkingConfig, { thinkingLevel: 'MEDIUM', includeThoughts: true })
+})
+
+test('auto-detects google & google-vertex Hydrogen configs and exposes all six official models', async () => {
+  assert.equal(isGoogleApiModel(HYDROGEN_MODEL), false)
+  assert.equal(isGoogleApiModel(GOOGLE_API_HYDROGEN_MODEL), true)
+  assert.equal(officialUpstreamModel(HYDROGEN_MODEL), HYDROGEN_MODEL)
+  assert.equal(officialUpstreamModel(GOOGLE_API_HYDROGEN_MODEL), HYDROGEN_MODEL)
+  // Hydrogen 不得挤进 Argon / Carbon 的上游映射。
+  assert.equal(officialUpstreamModel(MODEL), MODEL)
+  assert.equal(officialUpstreamModel(GOOGLE_API_CARBON_MODEL), CARBON_MODEL)
+
+  const mockCtx = {
+    get: k => {
+      if (k === 'launchEnvironment') return { get: n => n === 'GOOGLE_CLOUD_API_KEY' || n === 'GOOGLE_API_KEY' ? { value: 'fixture-key' } : undefined }
+      if (k === 'configEditor') return {
+        entries: () => [{
+          options: {
+            id: 'llm-pi-ai',
+            config: {
+              providers: {
+                google: { apiKeyEnv: 'GOOGLE_API_KEY', models: [{ id: 'gemini-4-argon' }, { id: 'gemini-4-carbon' }, { id: 'models/gemini-4-hydrogen' }] },
+                'google-vertex': { models: [{ id: 'gemini-4-argon' }, { id: 'gemini-4-carbon' }, { id: 'models/gemini-4-hydrogen' }] },
+              },
+            },
+          },
+        }],
+      }
+    },
+  }
+  const detected = detectPiAiArgonRoutes(mockCtx)
+  assert.equal(detected.hasVertex, true)
+  assert.equal(detected.hasGoogle, true)
+  assert.equal(detected.hasVertexHydrogen, true)
+  assert.equal(detected.hasGoogleHydrogen, true)
+  const a = createArgonAdapter(mockCtx, config)
+  const models = await a.listModels(PROVIDER)
+  assert.deepEqual(models.map(m => ({ id: m.id, name: m.name })), [
+    { id: MODEL, name: 'Gemini 4 Argon (Vertex AI)' },
+    { id: CARBON_MODEL, name: 'Gemini 4 Carbon (Vertex AI)' },
+    { id: HYDROGEN_MODEL, name: 'Gemini 4 Hydrogen (Vertex AI)' },
+    { id: GOOGLE_API_MODEL, name: 'Gemini 4 Argon (Gemini API)' },
+    { id: GOOGLE_API_CARBON_MODEL, name: 'Gemini 4 Carbon (Gemini API)' },
+    { id: GOOGLE_API_HYDROGEN_MODEL, name: 'Gemini 4 Hydrogen (Gemini API)' },
+  ])
+  // 规格与 Carbon 完全一致，且思考档位映射保持原样（非法档位继续拒绝）。
+  const spec = a.inner.current().profiles.get(PROVIDER).piProvider.getModels().find(m => m.id === HYDROGEN_MODEL)
+  assert.deepEqual({
+    api: spec.api,
+    reasoning: spec.reasoning,
+    input: spec.input,
+    contextWindow: spec.contextWindow,
+    maxTokens: spec.maxTokens,
+    thinkingLevelMap: spec.thinkingLevelMap,
+  }, {
+    api: 'google-vertex',
+    reasoning: true,
+    input: ['text', 'image'],
+    contextWindow: 1048576,
+    maxTokens: 65536,
+    // Hydrogen 是唯一挂载 xhigh 的模型（官方第四档）。
+    thinkingLevelMap: { off: null, minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: null },
+  })
+  const resolved = await a.resolveModel(PROVIDER, HYDROGEN_MODEL)
+  assert.deepEqual(resolved.reasoning.efforts.map(e => e.id), ['low', 'medium', 'high', 'xhigh'])
+  mode = 'text'
+  const outVertex = await collect(a.stream(req('high', HYDROGEN_MODEL)))
+  assert.deepEqual(outVertex.at(-1).reason, { kind: 'stop' })
+  assert.ok(wire.at(-1).url.includes('/v1beta1/'))
+  assert.ok(wire.at(-1).url.includes('models/gemini-4-hydrogen:streamGenerateContent'))
+  assert.deepEqual(wire.at(-1).body.generationConfig.thinkingConfig, { thinkingLevel: 'HIGH', includeThoughts: true })
+  const outGoogle = await collect(a.stream(req('medium', GOOGLE_API_HYDROGEN_MODEL)))
+  assert.deepEqual(outGoogle.at(-1).reason, { kind: 'stop' })
+  assert.ok(wire.at(-1).url.includes('generativelanguage.googleapis.com'))
+  assert.ok(wire.at(-1).url.includes('models/gemini-4-hydrogen:streamGenerateContent'))
+  assert.deepEqual(wire.at(-1).body.generationConfig.thinkingConfig, { thinkingLevel: 'MEDIUM', includeThoughts: true })
+  // Hydrogen 独有 xhigh：真实下发 XHIGH 档位，且绝不拼 thinkingBudget。
+  const outXhigh = await collect(a.stream(req('xhigh', HYDROGEN_MODEL)))
+  assert.deepEqual(outXhigh.at(-1).reason, { kind: 'stop' })
+  assert.deepEqual(wire.at(-1).body.generationConfig.thinkingConfig, { thinkingLevel: 'XHIGH', includeThoughts: true })
+  const before = wire.length
+  // Hydrogen 官方明确拒绝 minimal；off 同样不在四档之内。两者都不得发出任何请求。
+  for (const level of ['minimal', 'off']) await assert.rejects(collect(a.stream(req(level, HYDROGEN_MODEL))), /does not support/)
+  assert.equal(wire.length, before)
+})
+
+test('explicit routes and fallback detection carry Hydrogen flags without changing Argon defaults', () => {
+  const explicit = detectPiAiArgonRoutes(ctx, { hasVertex: true, hasGoogle: true, hasVertexHydrogen: true, hasGoogleHydrogen: true })
+  assert.deepEqual({ v: explicit.hasVertex, g: explicit.hasGoogle, va: explicit.hasVertexArgon, ga: explicit.hasGoogleArgon, vh: explicit.hasVertexHydrogen, gh: explicit.hasGoogleHydrogen }, { v: true, g: true, va: true, ga: true, vh: true, gh: true })
+  assert.equal(detectPiAiArgonRoutes(ctx, { hasGoogle: true, hasGoogleHydrogen: true }).hasVertexHydrogen, false)
+  assert.equal(detectPiAiArgonRoutes(ctx, { hasVertex: true, hasVertexHydrogen: true }).hasGoogleHydrogen, false)
+
+  // 无 configEditor 的兜底分支：保持只暴露 Vertex Argon，Hydrogen 明确关闭。
+  const fallback = detectPiAiArgonRoutes(ctx)
+  assert.deepEqual({ v: fallback.hasVertex, g: fallback.hasGoogle, va: fallback.hasVertexArgon, vh: fallback.hasVertexHydrogen, gh: fallback.hasGoogleHydrogen }, { v: true, g: false, va: true, vh: false, gh: false })
+
+  // configEditor 里没有任何 gemini-4 模型时，Argon 默认回退必须同时排除 Carbon 与 Hydrogen。
+  const emptyProviderCtx = {
+    get: k => k === 'configEditor' ? {
+      entries: () => [{ options: { id: 'llm-pi-ai', config: { providers: { google: { models: [] }, 'google-vertex': { models: [] } } } } }],
+    } : undefined,
+  }
+  const empty = detectPiAiArgonRoutes(emptyProviderCtx)
+  assert.deepEqual({ v: empty.hasVertex, g: empty.hasGoogle, va: empty.hasVertexArgon, vh: empty.hasVertexHydrogen, gh: empty.hasGoogleHydrogen }, { v: true, g: false, va: true, vh: false, gh: false })
 })
 
 test('all three official levels survive SDK serialization with no thinkingBudget and use v1beta1 on Vertex', async () => {
@@ -573,6 +681,13 @@ test('abort, config validation, legacy max listener migration and scoped registr
   }, Config({}))
   const migrated1 = await requestListener({}, async () => ({ provider: PROVIDER, model: GOOGLE_API_MODEL, reasoningEffort: 'max' }))
   assert.equal(migrated1.reasoningEffort, 'high')
+  // 钩子层也必须模型感知：Hydrogen 的 max 收敛到独有 xhigh，其余 Gemini 4 模型仍是 high。
+  const hydrogenNarrowed = await requestListener({}, async () => ({ provider: PROVIDER, model: HYDROGEN_MODEL, reasoningEffort: 'max' }))
+  assert.equal(hydrogenNarrowed.reasoningEffort, 'xhigh')
+  const nativeHydrogenNarrowed = await requestListener({}, async () => ({ provider: 'google-vertex', model: HYDROGEN_MODEL, reasoningEffort: 'max' }))
+  assert.equal(nativeHydrogenNarrowed.reasoningEffort, 'xhigh')
+  const nativeCarbon = await requestListener({}, async () => ({ provider: 'google', model: 'gemini-4-carbon', reasoningEffort: 'max' }))
+  assert.equal(nativeCarbon.reasoningEffort, 'high')
   cleanup()
   assert.ok(disposed)
   mode = 'malformed'
@@ -800,7 +915,7 @@ for (const route of ['google-generative-ai', 'google-vertex']) test(route + ': n
 })
 
 // —— 由已删除的 test/proxy-route.test.mjs 迁移：官方双通道凭据隔离 ——
-const officialConfig = { ...config, routes: { hasGoogle: true, hasVertex: true, hasVertexCarbon: true, hasGoogleCarbon: true } }
+const officialConfig = { ...config, routes: { hasGoogle: true, hasVertex: true, hasVertexCarbon: true, hasGoogleCarbon: true, hasVertexHydrogen: true, hasGoogleHydrogen: true } }
 test('Gemini API and Vertex AI official channels never share credentials', async () => {
   const channelKeys = { GOOGLE_API_KEY: 'google-only-key', GOOGLE_CLOUD_API_KEY: 'vertex-only-key' }
   const channelCtx = values => ({ get: k => k === 'launchEnvironment' ? { get: name => values[name] ? { value: values[name] } : undefined } : undefined })
@@ -847,7 +962,10 @@ test('Google connection honors an explicit key, the official apiKeyEnv order and
 const crossTools = [{ name: 'echo', description: 'offline fixture only', parameters: { type: 'object', properties: { value: { type: 'string' } }, required: ['value'] } }]
 const crossSignature = Buffer.from('cross-model-tool-signature').toString('base64')
 
-for (const [from, to] of [[CARBON_MODEL, CARBON_MODEL], [MODEL, CARBON_MODEL], [GOOGLE_API_MODEL, GOOGLE_API_CARBON_MODEL]]) test('generate-content signed tool history ' + from + ' -> ' + to, async () => {
+for (const [from, to] of [
+  [CARBON_MODEL, CARBON_MODEL], [MODEL, CARBON_MODEL], [GOOGLE_API_MODEL, GOOGLE_API_CARBON_MODEL],
+  [HYDROGEN_MODEL, HYDROGEN_MODEL], [HYDROGEN_MODEL, CARBON_MODEL], [GOOGLE_API_CARBON_MODEL, GOOGLE_API_HYDROGEN_MODEL],
+]) test('generate-content signed tool history ' + from + ' -> ' + to, async () => {
   const a = createArgonAdapter(ctx, officialConfig)
   const user = createUserMessage({ content: [{ type: 'text', text: 'fixture' }], source: { kind: 'user' } })
   let step = 0
@@ -875,7 +993,7 @@ for (const [from, to] of [[CARBON_MODEL, CARBON_MODEL], [MODEL, CARBON_MODEL], [
       assert.equal(parts.find(part => part.functionCall)?.thoughtSignature, crossSignature)
       assert.equal(JSON.stringify(parts).includes('[Previously executed tool'), false)
     } else {
-      // 跨官方模型（Argon ↔ Carbon、Vertex ↔ Gemini API）时签名被摘掉：必须降级成文本，绝不发裸 functionCall。
+      // 跨官方模型（Argon ↔ Carbon ↔ Hydrogen、Vertex ↔ Gemini API）时签名被摘掉：必须降级成文本，绝不发裸 functionCall。
       assert.equal(parts.some(part => part.functionCall || part.functionResponse), false)
       assert.equal(JSON.stringify(body).includes(crossSignature), false)
       assert.equal(JSON.stringify(body).includes('private reasoning fixture'), false)

@@ -9,8 +9,8 @@ All notable changes to **Gemini 4 Adapter** (`dsh-vertex-argon`) are documented 
   - Removed the third-party Antigravity reverse-proxy route (`gemini-4-argon-proxy`, `gemini-3.8-flash-proxy`), dedicated `proxy*` settings (`proxyEnabled`, `proxyBaseUrl`, `proxyApiKey`), and the reverse-proxy settings card introduced in `1.6.0`–`1.6.3`, streamlining volatile plugin settings from 16 to **13** and focusing exclusively on official **Vertex AI** and **Gemini Developer API** channels.
 
 ### Added
-- **Gemini 4 Carbon Support Across Both Official Channels (`adapter.js`, `interaction-adapter.js`, `client.js`, `package.json`)**:
-  - Added `CARBON_MODEL = 'gemini-4-carbon'` (Vertex AI) and `GOOGLE_API_CARBON_MODEL = 'gemini-4-carbon-google'` (Gemini API) alongside the Argon models via `officialUpstreamModel` and `detectPiAiArgonRoutes`, forming a 4-model official matrix with shared long-decode, service-tier validation, and cross-model tool-history downgrade protection.
+- **Gemini 4 Carbon & Hydrogen Support Across Both Official Channels (`adapter.js`, `interaction-adapter.js`, `client.js`, `package.json`)**:
+  - Added `CARBON_MODEL = 'gemini-4-carbon'` / `GOOGLE_API_CARBON_MODEL = 'gemini-4-carbon-google'` and `HYDROGEN_MODEL = 'gemini-4-hydrogen'` / `GOOGLE_API_HYDROGEN_MODEL = 'gemini-4-hydrogen-google'` alongside the Argon models via `officialUpstreamModel` and `detectPiAiArgonRoutes`, forming a 6-model official matrix with shared long-decode, service-tier validation, and cross-model tool-history downgrade protection.
 
 ### Changed
 - **Rebranded Display Surface to Gemini 4 Adapter (`locale/zh.json`, `locale/en.json`, `adapter.js`, `client.js`, `README.md`)**:

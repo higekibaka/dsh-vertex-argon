@@ -25,29 +25,56 @@ export const MODEL = 'gemini-4-argon'
 export const GOOGLE_API_MODEL = 'gemini-4-argon-google'
 export const CARBON_MODEL = 'gemini-4-carbon'
 export const GOOGLE_API_CARBON_MODEL = 'gemini-4-carbon-google'
-/** Gemini API 官方直连模型判定（Argon 与 Carbon）。 */
+export const HYDROGEN_MODEL = 'gemini-4-hydrogen'
+export const GOOGLE_API_HYDROGEN_MODEL = 'gemini-4-hydrogen-google'
+/** Gemini API 官方直连模型判定（Argon、Carbon 与 Hydrogen）。 */
 export function isGoogleApiModel(modelId) {
-  return modelId === GOOGLE_API_MODEL || modelId === GOOGLE_API_CARBON_MODEL
+  return modelId === GOOGLE_API_MODEL || modelId === GOOGLE_API_CARBON_MODEL || modelId === GOOGLE_API_HYDROGEN_MODEL
 }
 /** 官方直连（Vertex AI / Gemini API）对应的上游模型 ID。 */
 export function officialUpstreamModel(modelId) {
+  if (modelId === HYDROGEN_MODEL || modelId === GOOGLE_API_HYDROGEN_MODEL) return HYDROGEN_MODEL
   return modelId === CARBON_MODEL || modelId === GOOGLE_API_CARBON_MODEL ? CARBON_MODEL : MODEL
 }
 export const LEVELS = ['low', 'medium', 'high']
+/**
+ * Gemini 4 Hydrogen 独有的第四档 xhigh（官方默认 high）。
+ * Argon / Carbon 的允许集合必须严格维持三档，绝不泄漏 xhigh。
+ */
+export const HYDROGEN_LEVELS = ['low', 'medium', 'high', 'xhigh']
 export const MAX_SINGLE_CALL_TOKENS = 65536
 export const MAX_LONG_DECODE_TOKENS = 1048576
 const COMPACTION_HEADROOM_FLOOR = 131072
 const ENV_KEYS = ['GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_CLOUD_PROJECT', 'GCLOUD_PROJECT', 'GOOGLE_CLOUD_LOCATION', 'GOOGLE_CLOUD_API_KEY']
 const DEFAULT_THINKING_MAP = { off: null, minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: null, max: null }
+/** Hydrogen 的档位映射：唯一一处把 xhigh 放行到 thinkingConfig 的地方。 */
+const HYDROGEN_THINKING_MAP = { off: null, minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: null }
+
+/** Hydrogen 模型 ID 判定：同时识别 `gemini-4-hydrogen` 与 `gemini-4-hydrogen-google`（可带 models/ 前缀）。 */
+export function isHydrogenModel(modelId) {
+  return typeof modelId === 'string' && /^(?:models\/)?gemini-4-hydrogen(?:-google)?$/i.test(modelId)
+}
+
+/** 模型对应的合法思考档位集合：只有 Hydrogen 拿到 xhigh。 */
+export function levelsForModel(modelId) {
+  return isHydrogenModel(modelId) ? HYDROGEN_LEVELS : LEVELS
+}
+
+/** 模型对应的档位映射表：Hydrogen 放行 xhigh，其余模型仍为 null。 */
+export function thinkingLevelMapFor(modelId) {
+  return isHydrogenModel(modelId) ? HYDROGEN_THINKING_MAP : DEFAULT_THINKING_MAP
+}
 
 // The host's agent/request hook already narrows 'max' to 'high'. Direct adapter
 // callers (advisor tools calling adapter.stream / prepareCall().stream) bypass
 // that hook, so the same narrowing has to happen at this boundary too.
-export function narrowMaxReasoning(options) {
+export function narrowMaxReasoning(options, modelId = options?.model) {
   if (!options || typeof options !== 'object') return options
   const requested = [options.reasoning, options.reasoningEffort]
   if (!requested.some(value => typeof value === 'string' && value.toLowerCase() === 'max')) return options
-  return { ...options, reasoning: 'high', reasoningEffort: 'high' }
+  // Hydrogen 的最高档是 xhigh；其余模型仍是 high。
+  const ceiling = isHydrogenModel(modelId) ? 'xhigh' : 'high'
+  return { ...options, reasoning: ceiling, reasoningEffort: ceiling }
 }
 
 const readVal = v => (v && typeof v === 'object' && typeof v.get === 'function') ? v.get() : v
@@ -70,6 +97,8 @@ export function detectPiAiArgonRoutes(ctx, explicitRoutes) {
   if (explicitRoutes && typeof explicitRoutes === 'object') {
     const hasVertexCarbon = Boolean(explicitRoutes.hasVertexCarbon)
     const hasGoogleCarbon = Boolean(explicitRoutes.hasGoogleCarbon)
+    const hasVertexHydrogen = Boolean(explicitRoutes.hasVertexHydrogen)
+    const hasGoogleHydrogen = Boolean(explicitRoutes.hasGoogleHydrogen)
     const hasVertexArgon = explicitRoutes.hasVertexArgon !== undefined
       ? Boolean(explicitRoutes.hasVertexArgon)
       : explicitRoutes.hasVertex !== false
@@ -77,12 +106,14 @@ export function detectPiAiArgonRoutes(ctx, explicitRoutes) {
       ? Boolean(explicitRoutes.hasGoogleArgon)
       : Boolean(explicitRoutes.hasGoogle)
     return {
-      hasVertex: hasVertexArgon || hasVertexCarbon,
-      hasGoogle: hasGoogleArgon || hasGoogleCarbon,
+      hasVertex: hasVertexArgon || hasVertexCarbon || hasVertexHydrogen,
+      hasGoogle: hasGoogleArgon || hasGoogleCarbon || hasGoogleHydrogen,
       hasVertexArgon,
       hasGoogleArgon,
       hasVertexCarbon,
       hasGoogleCarbon,
+      hasVertexHydrogen,
+      hasGoogleHydrogen,
       googleApiKeyEnv: googleKeyEnvironment(explicitRoutes.googleApiKeyEnv),
       googleBaseUrl: explicitRoutes.googleBaseUrl,
       vertexBaseUrl: explicitRoutes.vertexBaseUrl,
@@ -102,15 +133,19 @@ export function detectPiAiArgonRoutes(ctx, explicitRoutes) {
       const hasVertexArgon = hasModel(vertexModels, /^(?:models\/)?gemini-4-argon\b/i)
       const hasGoogleCarbon = hasModel(googleModels, /^(?:models\/)?gemini-4-carbon\b/i)
       const hasVertexCarbon = hasModel(vertexModels, /^(?:models\/)?gemini-4-carbon\b/i)
-      const hasGoogle = hasGoogleArgon || hasGoogleCarbon
-      const hasVertex = hasVertexArgon || hasVertexCarbon || !hasGoogle
+      const hasGoogleHydrogen = hasModel(googleModels, /^(?:models\/)?gemini-4-hydrogen\b/i)
+      const hasVertexHydrogen = hasModel(vertexModels, /^(?:models\/)?gemini-4-hydrogen\b/i)
+      const hasGoogle = hasGoogleArgon || hasGoogleCarbon || hasGoogleHydrogen
+      const hasVertex = hasVertexArgon || hasVertexCarbon || hasVertexHydrogen || !hasGoogle
       return {
         hasVertex,
         hasGoogle,
-        hasVertexArgon: hasVertexArgon || (!hasGoogle && !hasVertexCarbon),
+        hasVertexArgon: hasVertexArgon || (!hasGoogle && !hasVertexCarbon && !hasVertexHydrogen),
         hasGoogleArgon,
         hasVertexCarbon,
         hasGoogleCarbon,
+        hasVertexHydrogen,
+        hasGoogleHydrogen,
         googleApiKeyEnv: googleKeyEnvironment(readVal(googleCfg?.apiKeyEnv)),
         googleBaseUrl: readVal(googleCfg?.baseURL),
         vertexBaseUrl: readVal(vertexCfg?.baseURL),
@@ -124,6 +159,8 @@ export function detectPiAiArgonRoutes(ctx, explicitRoutes) {
     hasGoogleArgon: false,
     hasVertexCarbon: false,
     hasGoogleCarbon: false,
+    hasVertexHydrogen: false,
+    hasGoogleHydrogen: false,
     googleApiKeyEnv: 'GOOGLE_API_KEY',
   }
 }
@@ -266,11 +303,23 @@ export function gemini4StreamSimple(
   assertPreparedStructuredOutput(structuredOutput)
   ensureGemini4ApiClientPatch()
   const fallback = defaultLevel ?? (/cyber-permissive/i.test(requestModel?.id ?? '') ? 'high' : 'medium')
+  const modelId = requestModel?.id
+  const hydrogen = isHydrogenModel(modelId)
   const requestedLevel = options.reasoning ?? fallback
-  const rawLevel = typeof requestedLevel === 'string' && requestedLevel.toLowerCase() === 'max' ? 'high' : requestedLevel
+  // max 按目标模型收敛：Hydrogen 收到独有最高档 xhigh，其余模型仍是 high。
+  const rawLevel = typeof requestedLevel === 'string' && requestedLevel.toLowerCase() === 'max'
+    ? (hydrogen ? 'xhigh' : 'high')
+    : (typeof requestedLevel === 'string' ? requestedLevel.toLowerCase() : requestedLevel)
   const mapped = requestModel?.thinkingLevelMap?.[rawLevel] ?? rawLevel
   const level = typeof mapped === 'string' ? mapped.toLowerCase() : fallback
-  if (!LEVELS.includes(level)) throw new LlmError('Gemini 4 (Argon / Carbon) requires low, medium or high.', 'UNSUPPORTED_REASONING_EFFORT')
+  if (!levelsForModel(modelId).includes(level)) {
+    throw new LlmError(
+      hydrogen
+        ? 'Gemini 4 Hydrogen requires low, medium, high or xhigh.'
+        : 'Gemini 4 (Argon / Carbon / Hydrogen) requires low, medium or high.',
+      'UNSUPPORTED_REASONING_EFFORT',
+    )
+  }
   const { reasoning, thinking, thinkingBudgets, temperature, onPayload: prior, onProviderStreamEvent: priorEvent, ...rest } = options
   const requestedMaxTokens = options.maxTokens ?? requestModel.maxTokens
   const effectiveMaxTokens =
@@ -309,7 +358,16 @@ export function gemini4StreamSimple(
         }
         body = signatures.restorePayload(body)
         if (structuredOutput) body = structuredOutput.generateContent(body)
+        // Gemini 4 Hydrogen 官方不支持显式缓存（cachedContents），残留字段会被上游拒绝。
+        if (hydrogen) {
+          delete body.cachedContent
+          delete body.cached_content
+        }
         const { temperature: _t, topP: _tp, topK: _tk, candidateCount: _cc, frequencyPenalty: _fp, presencePenalty: _pp, ...cleanConfig } = body.config
+        if (hydrogen) {
+          delete cleanConfig.cachedContent
+          delete cleanConfig.cached_content
+        }
         const prevHttpOptions =
           cleanConfig.httpOptions && typeof cleanConfig.httpOptions === 'object' && !Array.isArray(cleanConfig.httpOptions)
             ? cleanConfig.httpOptions
@@ -360,7 +418,7 @@ export function installGemini4PiAiPatch(recordDiagnostic, configInput = {}, resp
       for (const m of piProvider.getModels()) {
         if (isGemini4Model(m) && !m.reasoning) {
           m.reasoning = true
-          m.thinkingLevelMap = { ...DEFAULT_THINKING_MAP }
+          m.thinkingLevelMap = { ...thinkingLevelMapFor(m.id) }
         }
       }
     } catch {}
@@ -538,9 +596,9 @@ export class ArgonAdapter extends LlmAdapter {
     if (provider === PROVIDER && cfg) resolveServicePolicy(cfg, googleApi ? 'google-generative-ai' : 'google-vertex', protocol)
     const prepared = await this.inner.prepareCall(provider, model, signal)
     if (provider === PROVIDER && protocol === 'interactions' && this.interactionHandler) {
-      return { model: prepared.model, stream: options => this.interactionHandler(narrowMaxReasoning(options), cfg) }
+      return { model: prepared.model, stream: options => this.interactionHandler(narrowMaxReasoning(options, model), cfg) }
     }
-    return { ...prepared, stream: options => prepared.stream(generateContentHistory(narrowMaxReasoning(options), model)) }
+    return { ...prepared, stream: options => prepared.stream(generateContentHistory(narrowMaxReasoning(options, model), model)) }
   }
   async *stream(options) {
     const prepared = await this.prepareCall(options.provider, options.model, options.signal)
@@ -606,6 +664,8 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
       ga: detected.hasGoogleArgon,
       vc: detected.hasVertexCarbon,
       gc: detected.hasGoogleCarbon,
+      vh: detected.hasVertexHydrogen,
+      gh: detected.hasGoogleHydrogen,
       ge: detected.googleApiKeyEnv,
       gb: detected.googleBaseUrl,
       vb: detected.vertexBaseUrl,
@@ -667,6 +727,21 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       })
     }
+    if (detected.hasVertexHydrogen) {
+      models.push({
+        id: HYDROGEN_MODEL,
+        name: detected.hasGoogle ? 'Gemini 4 Hydrogen (Vertex AI)' : 'Gemini 4 Hydrogen',
+        provider: PROVIDER,
+        api: 'google-vertex',
+        baseUrl: detected.vertexBaseUrl || 'https://{location}-aiplatform.googleapis.com',
+        reasoning: true,
+        input: ['text', 'image'],
+        contextWindow: cfg.contextWindow,
+        maxTokens: cfg.maxTokens,
+        thinkingLevelMap: { ...HYDROGEN_THINKING_MAP },
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      })
+    }
     if (detected.hasGoogleArgon ?? detected.hasGoogle) {
       models.push({
         id: GOOGLE_API_MODEL,
@@ -697,6 +772,21 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       })
     }
+    if (detected.hasGoogleHydrogen) {
+      models.push({
+        id: GOOGLE_API_HYDROGEN_MODEL,
+        name: 'Gemini 4 Hydrogen (Gemini API)',
+        provider: PROVIDER,
+        api: 'google-generative-ai',
+        baseUrl: detected.googleBaseUrl || 'https://generativelanguage.googleapis.com/v1beta',
+        reasoning: true,
+        input: ['text', 'image'],
+        contextWindow: cfg.contextWindow,
+        maxTokens: cfg.maxTokens,
+        thinkingLevelMap: { ...HYDROGEN_THINKING_MAP },
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      })
+    }
     const configuredMaxTokens = new Map(models.map(m => [m.id, cfg.maxTokens]))
     const provider = argonProvider({ ...nativeVertex, auth }, models, cfg.reasoning, nativeGoogle, cfg.longDecode, recordDiagnostic, cfg, responseHub, structuredOutput)
     cachedKey = key
@@ -709,6 +799,8 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
       maxRequestImageBytes: 20 * 1024 * 1024,
       requestImagePixelBudget: 2048 * 2048,
       requestImageMaxBytes: 1024 * 1024,
+      maxRequestImages: 50,
+      imageOffloadCountQuantum: 10,
       retryPolicy: resolveRetryPolicy(undefined, 'local-vertex-argon'),
       modelErrors: new Map(),
       configuredMaxTokens,
