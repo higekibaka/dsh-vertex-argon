@@ -1,6 +1,6 @@
-# Gemini 4 Adapter（dsh-vertex-argon）发版状态与验证账本（v2.0.0）
+# Gemini 4 Adapter（dsh-vertex-argon）发版状态与验证账本（v2.1.0）
 
-- **用户工程版本**：`2.0.0`（展示品牌名 **Gemini 4 Adapter**，底层包名保持 `dsh-vertex-argon`），以 [package.json](<../../package.json>) 为准。
+- **用户工程版本**：`2.1.0`（展示品牌名 **Gemini 4 Adapter**，底层包名保持 `dsh-vertex-argon`），以 [package.json](<../../package.json>) 为准。
 - **声明兼容**：DSH `>=0.2.0-rc.2`；Node.js `^22.19.0 || >=24.0.0`。以 [package.json](<../../package.json>) 为准。
 - **本轮范围**：移除非官方反代分支并聚焦双官方通道四模型（Argon + Carbon；2026-11-12 已扩至 Hydrogen 六模型，见下方增补记录）、适配器边界 `max` → `high` 收敛、展示层品牌升级为 **Gemini 4 Adapter**（保持底层包名 `dsh-vertex-argon`、Provider ID `google-vertex-argon`、配置 ID `local-vertex-argon`、工具名 `argon_inspect` 及存储域不变）、版本号升级为 `2.0.0`，以及全面重写 [主文档](<../../README.md>) 与补齐 [CHANGELOG.md](<../../CHANGELOG.md>)。
 - **验证状态**：2026-11-11 完成 `v2.0.0` 品牌重命名与文档重写后，重跑 36 个测试文件、642 项离线测试（641 通过、0 失败、1 跳过），`git diff --check` 退出码 0，`pnpm pack` 生成的 `dsh-vertex-argon-2.0.0.tgz` 预检白名单共 32 个文件严丝合缝。待用户最终确认后再推送 GitHub 标签触发发布或更新桌面安装。

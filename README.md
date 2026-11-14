@@ -4,7 +4,7 @@
 
 **面向 [DeepSeek Harness](<https://github.com/deepseek-ai/deepseek-harness>) 的 Google 官方双通道（Vertex AI + Gemini Developer API）Gemini 4 适配器，原生支持 Argon、Carbon 与 Hydrogen 六模型路由、GenerateContent / Interactions 双协议、65K+ 多跳长解码与请求级诊断。**
 
-- **当前版本**：`2.0.0`（[CHANGELOG.md](<CHANGELOG.md>)）
+- **当前版本**：`2.1.0`（[CHANGELOG.md](<CHANGELOG.md>)）
 - **npm 包名**：`dsh-vertex-argon`（保留既有包名、官方通道路由与本地存储域 ID，官方通道用户可直接原地升级；`2.0.0` 已移除 `1.6.x` 非官方反代通道）
 - **运行要求**：DSH `>=0.2.0-rc.2`，Node.js `^22.19.0 || >=24.0.0`（见 [package.json](<package.json>)）
 

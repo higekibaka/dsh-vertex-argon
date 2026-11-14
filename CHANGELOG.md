@@ -2,6 +2,19 @@
 
 All notable changes to **Gemini 4 Adapter** (`dsh-vertex-argon`) are documented in this file.
 
+## [2.1.0] - 2026-11-15
+
+### Added
+- **Gemini 4 Hydrogen Support Across Both Official Channels (`adapter.js`, `interaction-adapter.js`, `client.js`, `package.json`)**:
+  - Added `HYDROGEN_MODEL = 'gemini-4-hydrogen'` (Vertex AI) and `GOOGLE_API_HYDROGEN_MODEL = 'gemini-4-hydrogen-google'` (Gemini API) alongside Argon and Carbon via `officialUpstreamModel` and `detectPiAiArgonRoutes`, expanding the official matrix to 6 models with shared long-decode, service-tier validation, and cross-model tool-history downgrade protection.
+- **Model-Scoped `xhigh` Reasoning Effort for Hydrogen (`adapter.js`, `interactions-input.js`, `diagnostics.js`, `diagnostic-store.js`, `client.js`)**:
+  - Added `HYDROGEN_LEVELS = ['low', 'medium', 'high', 'xhigh']`, `HYDROGEN_THINKING_MAP`, `levelsForModel()`, and `thinkingLevelMapFor()`: Hydrogen supports four reasoning levels (default `high`, mapping `max` → `xhigh` and stripping unsupported `cachedContent` / `cached_content` outbound fields), while Argon and Carbon remain strictly 3-level and reject `xhigh` before dispatch with `UNSUPPORTED_REASONING_EFFORT`.
+  - Expanded diagnostic enums and validators to preserve `XHIGH` instead of silently downgrading it to `MEDIUM`.
+
+### Fixed
+- **DSH 0.2.2-rc.2+ Host Bundle Loader Compatibility (`test/host-internals.mjs`)**:
+  - Updated client bundle injection marker matching to tolerate `return module.exports` without a trailing semicolon.
+
 ## [2.0.0] - 2026-11-11
 
 ### Breaking Changes
@@ -9,8 +22,8 @@ All notable changes to **Gemini 4 Adapter** (`dsh-vertex-argon`) are documented 
   - Removed the third-party Antigravity reverse-proxy route (`gemini-4-argon-proxy`, `gemini-3.8-flash-proxy`), dedicated `proxy*` settings (`proxyEnabled`, `proxyBaseUrl`, `proxyApiKey`), and the reverse-proxy settings card introduced in `1.6.0`–`1.6.3`, streamlining volatile plugin settings from 16 to **13** and focusing exclusively on official **Vertex AI** and **Gemini Developer API** channels.
 
 ### Added
-- **Gemini 4 Carbon & Hydrogen Support Across Both Official Channels (`adapter.js`, `interaction-adapter.js`, `client.js`, `package.json`)**:
-  - Added `CARBON_MODEL = 'gemini-4-carbon'` / `GOOGLE_API_CARBON_MODEL = 'gemini-4-carbon-google'` and `HYDROGEN_MODEL = 'gemini-4-hydrogen'` / `GOOGLE_API_HYDROGEN_MODEL = 'gemini-4-hydrogen-google'` alongside the Argon models via `officialUpstreamModel` and `detectPiAiArgonRoutes`, forming a 6-model official matrix with shared long-decode, service-tier validation, and cross-model tool-history downgrade protection.
+- **Gemini 4 Carbon Support Across Both Official Channels (`adapter.js`, `interaction-adapter.js`, `client.js`, `package.json`)**:
+  - Added `CARBON_MODEL = 'gemini-4-carbon'` (Vertex AI) and `GOOGLE_API_CARBON_MODEL = 'gemini-4-carbon-google'` (Gemini API) alongside the Argon models via `officialUpstreamModel` and `detectPiAiArgonRoutes`, forming a 4-model official matrix with shared long-decode, service-tier validation, and cross-model tool-history downgrade protection.
 
 ### Changed
 - **Rebranded Display Surface to Gemini 4 Adapter (`locale/zh.json`, `locale/en.json`, `adapter.js`, `client.js`, `README.md`)**:
