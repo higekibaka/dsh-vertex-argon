@@ -60,10 +60,15 @@ export function createGoogleSignatureBridge(context, model) {
     const same = message.api === model.api && message.provider === model.provider && message.model === model.id
     const codes = message.content.map(block => block.type === 'text' ? decode(block.textSignature) : undefined)
     const hasCodes = codes.some(code => code !== undefined)
+    const hasToolCall = message.content.some(block => block.type === 'toolCall')
+    const signedToolCallSig = message.content.find(block => block.type === 'toolCall' && typeof block.thoughtSignature === 'string' && block.thoughtSignature.length > 0)?.thoughtSignature
+    const hasSignedToolCall = typeof signedToolCallSig === 'string' && signedToolCallSig.length > 0
     const contentDigest = hasCodes ? digest(message.content) : undefined
     let next = message
-    if (hasCodes && (!same || codes.some((code, index) => code !== undefined && (!code || message.content[index].text !== '' || code.contentDigest !== contentDigest || code.historyDigest !== previousHistory)))) next = unsigned(message, demoted)
+    if ((hasCodes && (!same || codes.some((code, index) => code !== undefined && (!code || message.content[index].text !== '' || code.contentDigest !== contentDigest || code.historyDigest !== previousHistory)))) || (hasToolCall && (!same || !hasSignedToolCall))) next = unsigned(message, demoted)
     else {
+      let lastToolSig = signedToolCallSig
+      let changedToolSig = false
       const content = message.content.map((block, index) => {
         const code = codes[index]
         if (code) {
@@ -72,9 +77,17 @@ export function createGoogleSignatureBridge(context, model) {
           return { ...block, textSignature: carrier }
         }
         if (same && block.type === 'text' && block.text === '' && base64(block.textSignature)) restore.push({ signature: block.textSignature, carrier: block.textSignature, standalone: false })
+        if (same && hasSignedToolCall && block.type === 'toolCall') {
+          if (typeof block.thoughtSignature === 'string' && block.thoughtSignature.length > 0) {
+            lastToolSig = block.thoughtSignature
+          } else if (lastToolSig) {
+            changedToolSig = true
+            return { ...block, thoughtSignature: lastToolSig }
+          }
+        }
         return block
       })
-      if (hasCodes) next = { ...message, content }
+      if (hasCodes || changedToolSig) next = { ...message, content }
     }
     history.update(historyRecord(next))
     return next
@@ -82,7 +95,7 @@ export function createGoogleSignatureBridge(context, model) {
   const historyDigest = history.digest('hex')
   const content = [], pending = [], standalone = new Map(), usedToolIds = new Set()
   const partial = { role: 'assistant', api: model.api, provider: model.provider, model: model.id, content }
-  let current, seen = false, bytes = 0
+  let current, seen = false, bytes = 0, lastToolSignature
   const emit = event => {
     if (pending.length >= 32768) throw failure('Google response exceeded the bounded pending event count.')
     pending.push({ ...event, partial })
@@ -153,7 +166,9 @@ export function createGoogleSignatureBridge(context, model) {
           const call = part.functionCall
           const id = call.id && !usedToolIds.has(call.id) ? call.id : 'argon_' + randomUUID().replaceAll('-', '')
           usedToolIds.add(id)
-          const block = { type: 'toolCall', id, name: call.name || '', arguments: call.args ?? {}, ...(sig ? { thoughtSignature: sig } : {}) }
+          const effectiveSig = sig ?? lastToolSignature
+          if (sig) lastToolSignature = sig
+          const block = { type: 'toolCall', id, name: call.name || '', arguments: call.args ?? {}, ...(effectiveSig ? { thoughtSignature: effectiveSig } : {}) }
           const index = start(block)
           emit({ type: 'toolcall_start', contentIndex: index })
           emit({ type: 'toolcall_delta', contentIndex: index, delta: JSON.stringify(block.arguments) })

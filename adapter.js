@@ -25,13 +25,15 @@ export const MODEL = 'gemini-4-argon'
 export const GOOGLE_API_MODEL = 'gemini-4-argon-google'
 export const CARBON_MODEL = 'gemini-4-carbon'
 export const GOOGLE_API_CARBON_MODEL = 'gemini-4-carbon-google'
+export const HYDROGEN_MODEL = 'gemini-4-hydrogen'
 /** Gemini API 官方直连模型判定（Argon 与 Carbon）。 */
 export function isGoogleApiModel(modelId) {
   return modelId === GOOGLE_API_MODEL || modelId === GOOGLE_API_CARBON_MODEL
 }
 /** 官方直连（Vertex AI / Gemini API）对应的上游模型 ID。 */
 export function officialUpstreamModel(modelId) {
-  return modelId === CARBON_MODEL || modelId === GOOGLE_API_CARBON_MODEL ? CARBON_MODEL : MODEL
+  return modelId === HYDROGEN_MODEL ? HYDROGEN_MODEL
+    : modelId === CARBON_MODEL || modelId === GOOGLE_API_CARBON_MODEL ? CARBON_MODEL : MODEL
 }
 export const LEVELS = ['low', 'medium', 'high']
 export const MAX_SINGLE_CALL_TOKENS = 65536
@@ -70,6 +72,8 @@ export function detectPiAiArgonRoutes(ctx, explicitRoutes) {
   if (explicitRoutes && typeof explicitRoutes === 'object') {
     const hasVertexCarbon = Boolean(explicitRoutes.hasVertexCarbon)
     const hasGoogleCarbon = Boolean(explicitRoutes.hasGoogleCarbon)
+    const hasVertexHydrogen = Boolean(explicitRoutes.hasVertexHydrogen)
+    const hasGoogleHydrogen = Boolean(explicitRoutes.hasGoogleHydrogen)
     const hasVertexArgon = explicitRoutes.hasVertexArgon !== undefined
       ? Boolean(explicitRoutes.hasVertexArgon)
       : explicitRoutes.hasVertex !== false
@@ -77,12 +81,14 @@ export function detectPiAiArgonRoutes(ctx, explicitRoutes) {
       ? Boolean(explicitRoutes.hasGoogleArgon)
       : Boolean(explicitRoutes.hasGoogle)
     return {
-      hasVertex: hasVertexArgon || hasVertexCarbon,
-      hasGoogle: hasGoogleArgon || hasGoogleCarbon,
+      hasVertex: hasVertexArgon || hasVertexCarbon || hasVertexHydrogen,
+      hasGoogle: hasGoogleArgon || hasGoogleCarbon || hasGoogleHydrogen,
       hasVertexArgon,
       hasGoogleArgon,
       hasVertexCarbon,
       hasGoogleCarbon,
+      hasVertexHydrogen,
+      hasGoogleHydrogen,
       googleApiKeyEnv: googleKeyEnvironment(explicitRoutes.googleApiKeyEnv),
       googleBaseUrl: explicitRoutes.googleBaseUrl,
       vertexBaseUrl: explicitRoutes.vertexBaseUrl,
@@ -102,8 +108,10 @@ export function detectPiAiArgonRoutes(ctx, explicitRoutes) {
       const hasVertexArgon = hasModel(vertexModels, /^(?:models\/)?gemini-4-argon\b/i)
       const hasGoogleCarbon = hasModel(googleModels, /^(?:models\/)?gemini-4-carbon\b/i)
       const hasVertexCarbon = hasModel(vertexModels, /^(?:models\/)?gemini-4-carbon\b/i)
-      const hasGoogle = hasGoogleArgon || hasGoogleCarbon
-      const hasVertex = hasVertexArgon || hasVertexCarbon || !hasGoogle
+      const hasGoogleHydrogen = hasModel(googleModels, /^(?:models\/)?gemini-4-hydrogen\b/i)
+      const hasVertexHydrogen = hasModel(vertexModels, /^(?:models\/)?gemini-4-hydrogen\b/i)
+      const hasGoogle = hasGoogleArgon || hasGoogleCarbon || hasGoogleHydrogen
+      const hasVertex = hasVertexArgon || hasVertexCarbon || hasVertexHydrogen || !hasGoogle
       return {
         hasVertex,
         hasGoogle,
@@ -111,6 +119,8 @@ export function detectPiAiArgonRoutes(ctx, explicitRoutes) {
         hasGoogleArgon,
         hasVertexCarbon,
         hasGoogleCarbon,
+        hasVertexHydrogen,
+        hasGoogleHydrogen,
         googleApiKeyEnv: googleKeyEnvironment(readVal(googleCfg?.apiKeyEnv)),
         googleBaseUrl: readVal(googleCfg?.baseURL),
         vertexBaseUrl: readVal(vertexCfg?.baseURL),
@@ -124,6 +134,8 @@ export function detectPiAiArgonRoutes(ctx, explicitRoutes) {
     hasGoogleArgon: false,
     hasVertexCarbon: false,
     hasGoogleCarbon: false,
+    hasVertexHydrogen: false,
+    hasGoogleHydrogen: false,
     googleApiKeyEnv: 'GOOGLE_API_KEY',
   }
 }
@@ -606,6 +618,8 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
       ga: detected.hasGoogleArgon,
       vc: detected.hasVertexCarbon,
       gc: detected.hasGoogleCarbon,
+      vh: detected.hasVertexHydrogen,
+      gh: detected.hasGoogleHydrogen,
       ge: detected.googleApiKeyEnv,
       gb: detected.googleBaseUrl,
       vb: detected.vertexBaseUrl,
@@ -656,6 +670,21 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
       models.push({
         id: CARBON_MODEL,
         name: detected.hasGoogle ? 'Gemini 4 Carbon (Vertex AI)' : 'Gemini 4 Carbon',
+        provider: PROVIDER,
+        api: 'google-vertex',
+        baseUrl: detected.vertexBaseUrl || 'https://{location}-aiplatform.googleapis.com',
+        reasoning: true,
+        input: ['text', 'image'],
+        contextWindow: cfg.contextWindow,
+        maxTokens: cfg.maxTokens,
+        thinkingLevelMap: { ...DEFAULT_THINKING_MAP },
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      })
+    }
+    if (detected.hasVertexHydrogen) {
+      models.push({
+        id: HYDROGEN_MODEL,
+        name: detected.hasGoogle ? 'Gemini 4 Hydrogen (Vertex AI)' : 'Gemini 4 Hydrogen',
         provider: PROVIDER,
         api: 'google-vertex',
         baseUrl: detected.vertexBaseUrl || 'https://{location}-aiplatform.googleapis.com',
