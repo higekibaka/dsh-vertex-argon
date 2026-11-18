@@ -403,3 +403,112 @@ test('a later hop cannot overwrite the first-hop input watermark',async()=>{
   assert.equal(rows.size,0)
  }finally{responder=undefined;await hub.close()}
 })
+test('Interactions model parsing, prepareCall target pinning, and dual-field reasoning validation', async () => {
+ const built = await buildInteractionRequest(
+  { ...req('models/GEMINI-4-NEON-GOOGLE'), reasoningEffort: 'max' },
+  { route: 'google-generative-ai' },
+ )
+ assert.equal(built.model, 'gemini-4-neon')
+ assert.equal(built.generation_config.thinking_level, 'xhigh')
+
+ await assert.rejects(
+  buildInteractionRequest({ ...req('gemini-4-neon-preview'), reasoningEffort: 'high' }, { route: 'google-generative-ai' }),
+  /Unknown Gemini 4 official model/,
+ )
+ await assert.rejects(
+  buildInteractionRequest({ ...req(NEON_MODEL), reasoningEffort: 'high' }, { route: 'google-vertex', upstreamModel: 'gemini-4-argon' }),
+  /Conflicting Gemini 4 models/,
+ )
+ for (const invalid of [{ reasoning: 'off' }, { reasoning: 'off', reasoningEffort: 'max' }, { reasoning: 'low', reasoningEffort: 'high' }]) {
+  await assert.rejects(
+   buildInteractionRequest({ ...req(NEON_MODEL), reasoningEffort: undefined, ...invalid }, { route: 'google-vertex' }),
+   /requires low, medium, high, or xhigh thinking|Conflicting reasoning/,
+  )
+ }
+
+ const config = { ...cfg(), reasoning: 'low', googleProtocol: 'interactions', vertexProtocol: 'interactions' }
+ const adapter = createArgonAdapter(ctx, config)
+ const prepared = await adapter.prepareCall(PROVIDER, NEON_MODEL)
+ assert.throws(() => prepared.stream({ ...req(MODEL) }), { code: 'INVALID_REQUEST' })
+ assert.throws(() => prepared.stream({ ...req(NEON_MODEL), provider: 'other' }), { code: 'INVALID_REQUEST' })
+
+ const before = wire.length
+ const { provider: _p, model: _m, ...omittedTargetReq } = req(NEON_MODEL)
+ const pinnedOut = await collect(prepared.stream({ ...omittedTargetReq, reasoningEffort: 'xhigh' }))
+ assert.equal(pinnedOut.at(-1).reason.kind, 'stop')
+ assert.equal(wire.at(-1).body.model, 'gemini-4-neon')
+ assert.equal(wire.at(-1).body.generation_config.thinking_level, 'xhigh')
+
+ const beforeInvalid = wire.length
+ for (const invalid of [{ reasoning: 'off' }, { reasoning: 'off', reasoningEffort: 'max' }, { reasoning: 'low', reasoningEffort: 'high' }]) {
+  const errOut = await collect(adapter.stream({ ...req(NEON_MODEL), reasoningEffort: undefined, ...invalid }))
+  assert.equal(errOut.at(-1).reason.kind, 'error')
+  assert.match(JSON.stringify(errOut.at(-1).reason), /requires low, medium, high, or xhigh thinking|Conflicting reasoning/)
+ }
+ assert.equal(wire.length, beforeInvalid)
+ assert.ok(wire.length > before)
+})
+test('buildInteractionRequest isolates reused toolCallId FIFO queues across foreign and native turns and detects later unfinished calls', async () => {
+ const user1 = { role: 'user', content: [{ type: 'text', text: 'first' }] }
+ const foreignCallBlocks = [{ type: 'tool-call', id: 'call-reused', name: 'echo', arguments: '{"step":1}' }]
+ const carbonAssistant = { role: 'assistant', source: { provider: PROVIDER, model: CARBON_MODEL }, content: foreignCallBlocks }
+ const carbonTool = { role: 'tool', toolCallId: 'call-reused', isError: false, content: [{ type: 'text', text: 'carbon-res' }] }
+ const user2 = { role: 'user', content: [{ type: 'text', text: 'second' }] }
+ const nativeCallBlocks = [{ type: 'tool-call', id: 'call-reused', name: 'echo', arguments: '{"step":2}' }]
+ const priorMessages = [user1, carbonAssistant, carbonTool, user2]
+ const replaySteps = [
+  { type: 'thought', signature: 'sig-neon' },
+  { type: 'function_call', id: 'call-reused', name: 'echo', arguments: { step: 2 } },
+ ]
+ const neonAssistant = {
+  role: 'assistant',
+  content: nativeCallBlocks,
+  source: {
+   provider: PROVIDER,
+   model: NEON_MODEL,
+   replayState: {
+    response: {
+     api: 'google-interactions-v1',
+     provider: PROVIDER,
+     model: NEON_MODEL,
+     route: 'google-vertex',
+     contentHash: contentHash(nativeCallBlocks),
+     historyHash: historyHash(priorMessages),
+     steps: replaySteps,
+    },
+   },
+  },
+ }
+ const neonTool = { role: 'tool', toolCallId: 'call-reused', isError: false, content: [{ type: 'text', text: 'neon-res' }] }
+ const built = await buildInteractionRequest(
+  { provider: PROVIDER, model: NEON_MODEL, messages: [...priorMessages, neonAssistant, neonTool] },
+  { route: 'google-vertex', upstreamModel: 'gemini-4-neon' },
+ )
+ const transcript = built.input.find(item => item.type === 'user_input' && item.content?.some(c => c.text?.includes('Previously executed tool echo; call call-reused')))
+ assert.ok(transcript)
+ const fnResult = built.input.find(item => item.type === 'function_result')
+ assert.deepEqual(fnResult, {
+  type: 'function_result',
+  call_id: 'call-reused',
+  name: 'echo',
+  is_error: false,
+  result: [{ type: 'text', text: 'neon-res' }],
+ })
+
+ await assert.rejects(
+  buildInteractionRequest(
+   {
+    provider: PROVIDER,
+    model: NEON_MODEL,
+    messages: [
+     user1,
+     carbonAssistant,
+     carbonTool,
+     { role: 'assistant', source: { provider: PROVIDER, model: CARBON_MODEL }, content: [{ type: 'tool-call', id: 'call-reused', name: 'echo', arguments: '{"step":3}' }] },
+    ],
+   },
+   { route: 'google-vertex', upstreamModel: 'gemini-4-neon' },
+  ),
+  /unfinished foreign or edited tool call/,
+ )
+})

@@ -1,4 +1,4 @@
-# Gemini 4 Adapter（dsh-vertex-argon）核心技术决定与协议合同（v2.2.0）
+# Gemini 4 Adapter（dsh-vertex-argon）核心技术决定与协议合同（v2.2.1）
 
 本文区分当前实现合同与历史实测；验证来源与本轮结果见 [STATUS.md](<STATUS.md>)。
 
@@ -8,17 +8,17 @@
 
 ### 双官方通道的八个模型 ID
 
-- `MODEL = gemini-4-argon`，`GOOGLE_API_MODEL = gemini-4-argon-google`，`CARBON_MODEL = gemini-4-carbon`，`GOOGLE_API_CARBON_MODEL = gemini-4-carbon-google`，`HYDROGEN_MODEL = gemini-4-hydrogen`，`GOOGLE_API_HYDROGEN_MODEL = gemini-4-hydrogen-google`，`NEON_MODEL = gemini-4-neon`，`GOOGLE_API_NEON_MODEL = gemini-4-neon-google`；八者按路由配置独立注册，不覆盖原有模型。Gemini API 模型由 `isGoogleApiModel` 判定，八个模型的上游基础 ID 统一由 `officialUpstreamModel` 映射为 `gemini-4-argon`、`gemini-4-carbon`、`gemini-4-hydrogen` 或 `gemini-4-neon`；不再有反代专用通道与档位映射。
+- `MODEL = gemini-4-argon`，`GOOGLE_API_MODEL = gemini-4-argon-google`，`CARBON_MODEL = gemini-4-carbon`，`GOOGLE_API_CARBON_MODEL = gemini-4-carbon-google`，`HYDROGEN_MODEL = gemini-4-hydrogen`，`GOOGLE_API_HYDROGEN_MODEL = gemini-4-hydrogen-google`，`NEON_MODEL = gemini-4-neon`，`GOOGLE_API_NEON_MODEL = gemini-4-neon-google`；八者按路由配置独立注册，不覆盖原有模型。Gemini API 模型由 `isGoogleApiModel`（基于统一解析器 `resolveOfficialGemini4Model`，大小写不敏感且支持 `models/` 前缀）判定，`detectPiAiArgonRoutes` 仅匹配精确 `$` 结尾（排除 `-preview` 等非官方变体）；八个模型的上游基础 ID 统一由 `officialUpstreamModel` 映射（空值默认 `gemini-4-argon`，非空未知 ID 直接抛出 `UNKNOWN_MODEL`）；`ArgonAdapter.prepareCall` 与 `PiAiAdapter.prototype.prepareCall` 在双协议分支固定绑定 `(provider, model)`；Interactions 在缺省 `settings.upstreamModel` 时直接从 `options.model` 解析上游模型并拒绝冲突或未知模型。
 - 官方通道只有两条：Vertex AI（`google-vertex`）与 Gemini API（`google-generative-ai`）。诊断 `route` 枚举不扩展，Inspector 直接按 `route` 显示通道名；云端 ID 查询也只覆盖这两个官方通道。
 - GenerateContent 与 Interactions 使用同一份 `officialUpstreamModel` 映射；两条通道各自遵守自己的协议与服务层级设置，缓存随设置和路由变化失效。
-- GenerateContent 历史在交给 pi-ai 前先过 `generateContentHistory(options, model)`：Interactions 来源的信封，以及跨模型（Argon ↔ Carbon ↔ Hydrogen ↔ Neon、Vertex ↔ Gemini API，或跨 provider）且内容含 `reasoning` / `tool-call` 块的历史，一律降级为文本转录（剔除旧思考、已完成调用转 `[Previously executed tool ...]` 文本、对应结果转用户态文本、移除 `replayState`），未完成的调用直接报错。判据取 `message.source` 与 `replayState.response` 的 provider/model 双向比对；只含纯文本的跨模型消息仍交由签名桥按 `!same` 剥离独立签名。同模型历史保留原生签名回放。
+- GenerateContent 历史在交给 pi-ai 前先过 `generateContentHistory(options, model)`：Interactions 来源的信封，以及跨模型（Argon ↔ Carbon ↔ Hydrogen ↔ Neon、Vertex ↔ Gemini API，或跨 provider）且内容含 `reasoning` / `tool-call` 块的历史，一律按 per-`toolCallId` FIFO 队列与位置后继未认领匹配降级为文本转录（剔除旧思考、已完成调用转 `[Previously executed tool ...]` 文本、对应结果转用户态文本、移除 `replayState`），未完成的调用直接报错；`createGoogleSignatureBridge` 与 `buildInteractionRequest` 同样以 per-`toolCallId` FIFO 队列隔离复用 `toolCallId` 的跨轮次降级与原生回放。判据取 `message.source` 与 `replayState.response` 的 provider/model 双向比对；只含纯文本的跨模型消息仍交由签名桥按 `!same` 剥离独立签名。同模型历史保留原生签名回放。
 
 ### 凭据解析与能力校验
 
 - Google/Vertex 凭据优先级为 `credentials` → `launchEnvironment` → `process.env`。凭据服务自身抛错时直接失败，不能退回旧密钥。Gemini API Key（`GOOGLE_API_KEY` / `GEMINI_API_KEY` / 配置的 `apiKeyEnv`）与 Vertex Key（`GOOGLE_CLOUD_API_KEY` / ADC）各自独立解析，互不借用、互不泄漏。
 - [service-level.js](<../../service-level.js>) 保持既有能力矩阵：Google 路由两种协议支持 `standard` / `flex` / `priority`；Vertex GenerateContent 支持 `standard` / `priority` 及 `vertexPaygoOnly`；Vertex Interactions 仅允许 `standard` 且不允许 PayGo-only。
 - 不支持的组合发包前报 `ARGON_SERVICE_TIER_UNVERIFIED`，不暗中降级、升级或切换协议。离线矩阵校验不等于对应官方端点已获云端实测证明。
-- 请求层级与观测层级分别保存；Vertex 用 `traffic-type`，Google 使用响应头。思考档位按 `supportsXhighReasoning(modelId)` 分集：Argon / Carbon 维持 `low` / `medium` / `high` 三档（`max` 收敛为 `high`），`xhigh` / `off` / `minimal` 仍在发包前拒绝；Hydrogen / Neon 放行 `low` / `medium` / `high` / `xhigh` 四档（`max` 收敛为 `xhigh`，并在 GenerateContent 出站前剥离显式 `cachedContent` / `cached_content`），`off` / `minimal` 发包前拒绝。收敛与分集在两处边界一致生效：宿主 `agent/request` 钩子（[index.js](<../../index.js>)），以及直接调用 `adapter.stream` / `prepareCall().stream` 的边界（[adapter.js](<../../adapter.js>) 的 `narrowMaxReasoning`、[interaction-adapter.js](<../../interaction-adapter.js>) 的 `assertInteractionOptions` 与 [interactions-input.js](<../../interactions-input.js>) 的 `buildInteractionRequest`）。
+- 请求层级与观测层级分别保存；Vertex 用 `traffic-type`，Google 使用响应头。思考档位按 `supportsXhighReasoning(modelId)` 分集：Argon / Carbon 维持 `low` / `medium` / `high` 三档（`max` 收敛为 `high`），`xhigh` / `off` / `minimal` 仍在发包前拒绝；Hydrogen / Neon 放行 `low` / `medium` / `high` / `xhigh` 四档（`max` 收敛为 `xhigh`，并在 GenerateContent 出站前剥离顶层、`config` 及 `httpOptions.extraBody` 中的显式 `cachedContent` / `cached_content`），`off` / `minimal` 发包前拒绝。收敛、双字段（`reasoning` / `reasoningEffort`）显式合法性与互斥检查，以及原生 `PiAiAdapter` / `piProvider.stream` / `streamSimple` 补丁在全边界一致生效（[index.js](<../../index.js>) `agent/request` 钩子、[adapter.js](<../../adapter.js>)、`interaction-adapter.js` 与 `interactions-input.js` 共享 `resolveGemini4ReasoningLevel`）。
 
 ## 2. GenerateContent 长解码不变式
 

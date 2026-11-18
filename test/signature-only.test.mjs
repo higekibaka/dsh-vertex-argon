@@ -155,3 +155,35 @@ test('ordinary empty-text thoughtSignature without standalone codec survives sam
   assert.deepEqual(sent[1].contents.find(c => c.role === 'model').parts, wireParts)
  } finally { globalThis.fetch = originalFetch }
 })
+
+test('createGoogleSignatureBridge scopes demoted toolCallId FIFO queue across turns without clobbering reused native toolCallId', () => {
+ const model = { api: 'google-generative-ai', provider: PROVIDER, id: GOOGLE_API_MODEL }
+ const foreign = {
+  role: 'assistant', api: 'google-vertex', provider: PROVIDER, model: MODEL,
+  content: [
+   { type: 'text', text: '', textSignature: JSON.stringify({ dshGoogleSignatureOnly: 1, signature: S1, contentDigest: '0'.repeat(64), historyDigest: '0'.repeat(64) }) },
+   { type: 'toolCall', id: 'call-reused', name: 'echo', arguments: { step: 1 } },
+  ],
+ }
+ const foreignResult = { role: 'toolResult', toolCallId: 'call-reused', content: [{ type: 'text', text: 'foreign-out' }] }
+ const nativeSame = {
+  role: 'assistant', api: model.api, provider: model.provider, model: model.id,
+  content: [{ type: 'toolCall', id: 'call-reused', name: 'echo', arguments: { step: 2 }, thoughtSignature: T }],
+ }
+ const nativeResult = { role: 'toolResult', toolCallId: 'call-reused', content: [{ type: 'text', text: 'native-out' }] }
+ const bridge = createGoogleSignatureBridge({
+  messages: [
+   { role: 'user', content: [{ type: 'text', text: 'turn 1' }] },
+   foreign,
+   foreignResult,
+   nativeSame,
+   nativeResult,
+  ],
+ }, model)
+ assert.equal(bridge.context.messages[2].role, 'user')
+ assert.match(bridge.context.messages[2].content[0].text, /Previously executed tool echo; call call-reused/)
+ assert.equal(bridge.context.messages[3].role, 'assistant')
+ assert.equal(bridge.context.messages[3].content[0].thoughtSignature, T)
+ assert.equal(bridge.context.messages[4].role, 'toolResult')
+ assert.equal(bridge.context.messages[4].toolCallId, 'call-reused')
+})

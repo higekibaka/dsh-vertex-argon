@@ -1,13 +1,13 @@
-# Gemini 4 Adapter（dsh-vertex-argon）实现架构与模块边界（v2.2.0）
+# Gemini 4 Adapter（dsh-vertex-argon）实现架构与模块边界（v2.2.1）
 
 本目录描述当前本地工程；实现合同见 [DECISIONS.md](<DECISIONS.md>)，本轮验证与历史实测分开记录于 [STATUS.md](<STATUS.md>)。文档更新不表示插件已安装、已发布或新增了云端验证。
 
 ## 1. 插件与宿主边界
 
 - 展示品牌名 **Gemini 4 Adapter**（诊断面板显示为 **Gemini 4 诊断** / **Gemini 4 diagnostics**）；底层 npm 包名保持 `dsh-vertex-argon`，Host 注册名 `local-vertex-argon`，Provider ID `google-vertex-argon`。
-- 当前工程版本 `2.2.0`，支持 DSH `>=0.2.0-rc.2`；Node.js `^22.19.0 || >=24.0.0`。元数据以 [package.json](<../../package.json>) 为准。
+- 当前工程版本 `2.2.1`，支持 DSH `>=0.2.0-rc.2`；Node.js `^22.19.0 || >=24.0.0`。元数据以 [package.json](<../../package.json>) 为准。
 - 仅使用宿主公开的 `llm`、`storageDomain`、`typert`、`settings`、`tools` 与 Web Client Slots，不修改宿主源码、已安装归档或 profile。
-- `installGemini4PiAiPatch` 保留对原生 `google` / `google-vertex` 的 Gemini 4 调用修正；不引入隐式辅助模型请求。
+- `installGemini4PiAiPatch` 同时守护原生 `google` / `google-vertex` 的 `PiAiAdapter.prototype.prepareCall` / `stream`、`piProvider.stream` / `streamSimple` 与已声明 Gemini 4 模型的 `thinkingLevelMap`；不引入隐式辅助模型请求。
 
 ## 2. 双官方通道、八个模型 ID、两种协议路由
 

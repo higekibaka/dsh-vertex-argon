@@ -6,7 +6,7 @@ import { createArgonDiagnosticTracker } from './diagnostics.js'
 import { createInteractionsHandler } from './interaction-adapter.js'
 import { interactionImageRequestTarget } from './interaction-image.js'
 import { SERVICE_TIERS, resolveServicePolicy, mergeServiceHeaders } from './service-level.js'
-import { generateContentHistory } from './interactions-input.js'
+import { generateContentHistory, resolveOfficialGemini4Model, resolveGemini4ReasoningLevel } from './interactions-input.js'
 import { createGoogleSignatureBridge } from './google-signatures.js'
 import { createInteractionQuery } from './interaction-query.js'
 import { assertPreparedStructuredOutput } from './structured-output.js'
@@ -29,20 +29,16 @@ export const HYDROGEN_MODEL = 'gemini-4-hydrogen'
 export const GOOGLE_API_HYDROGEN_MODEL = 'gemini-4-hydrogen-google'
 export const NEON_MODEL = 'gemini-4-neon'
 export const GOOGLE_API_NEON_MODEL = 'gemini-4-neon-google'
-/** Gemini API 官方直连模型判定（Argon、Carbon、Hydrogen 与 Neon）。 */
+/** Gemini API 官方直连模型判定（Argon、Carbon、Hydrogen 与 Neon，支持可选 models/ 前缀）。 */
 export function isGoogleApiModel(modelId) {
-  return (
-    modelId === GOOGLE_API_MODEL ||
-    modelId === GOOGLE_API_CARBON_MODEL ||
-    modelId === GOOGLE_API_HYDROGEN_MODEL ||
-    modelId === GOOGLE_API_NEON_MODEL
-  )
+  return resolveOfficialGemini4Model(modelId)?.isGoogleApi ?? false
 }
-/** 官方直连（Vertex AI / Gemini API）对应的上游模型 ID。 */
+/** 官方直连（Vertex AI / Gemini API）对应的上游模型 ID；空值回落默认 Argon，未知非空模型报错。 */
 export function officialUpstreamModel(modelId) {
-  if (modelId === NEON_MODEL || modelId === GOOGLE_API_NEON_MODEL) return NEON_MODEL
-  if (modelId === HYDROGEN_MODEL || modelId === GOOGLE_API_HYDROGEN_MODEL) return HYDROGEN_MODEL
-  return modelId === CARBON_MODEL || modelId === GOOGLE_API_CARBON_MODEL ? CARBON_MODEL : MODEL
+  if (modelId === undefined || modelId === null || modelId === '') return MODEL
+  const resolved = resolveOfficialGemini4Model(modelId)
+  if (!resolved) throw new LlmError(`Unknown Gemini 4 official model: ${String(modelId)}`, 'UNKNOWN_MODEL')
+  return resolved.upstreamModel
 }
 export const LEVELS = ['low', 'medium', 'high']
 /**
@@ -60,17 +56,17 @@ const HYDROGEN_THINKING_MAP = { off: null, minimal: null, low: 'low', medium: 'm
 
 /** Hydrogen 模型 ID 判定：同时识别 `gemini-4-hydrogen` 与 `gemini-4-hydrogen-google`（可带 models/ 前缀）。 */
 export function isHydrogenModel(modelId) {
-  return typeof modelId === 'string' && /^(?:models\/)?gemini-4-hydrogen(?:-google)?$/i.test(modelId)
+  return resolveOfficialGemini4Model(modelId)?.family === 'hydrogen'
 }
 
 /** Neon 模型 ID 判定：同时识别 `gemini-4-neon` 与 `gemini-4-neon-google`（可带 models/ 前缀）。 */
 export function isNeonModel(modelId) {
-  return typeof modelId === 'string' && /^(?:models\/)?gemini-4-neon(?:-google)?$/i.test(modelId)
+  return resolveOfficialGemini4Model(modelId)?.family === 'neon'
 }
 
 /** 判断模型是否支持 xhigh 第四档思考及对应无显式缓存限制（Hydrogen 与 Neon）。 */
 export function supportsXhighReasoning(modelId) {
-  return isHydrogenModel(modelId) || isNeonModel(modelId)
+  return resolveOfficialGemini4Model(modelId)?.supportsXhigh ?? false
 }
 
 /** 模型对应的合法思考档位集合：Hydrogen 与 Neon 放行 xhigh。 */
@@ -83,16 +79,63 @@ export function thinkingLevelMapFor(modelId) {
   return supportsXhighReasoning(modelId) ? HYDROGEN_THINKING_MAP : DEFAULT_THINKING_MAP
 }
 
+function assertPlainRequestOptions(options) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) {
+    throw new LlmError('Request options must be a plain object.', 'INVALID_REQUEST')
+  }
+  return options
+}
+
+function validateExplicitReasoningFields(options, modelId, fallback = 'medium') {
+  const result = resolveGemini4ReasoningLevel(options, modelId, fallback)
+  if (!result.ok) {
+    if (result.errorType === 'conflict') {
+      throw new LlmError(
+        `Model ${modelId ?? MODEL} received conflicting reasoning (${result.reasoning}) and reasoningEffort (${result.reasoningEffort}).`,
+        'INVALID_REQUEST',
+      )
+    }
+    throw new LlmError(
+      `Model ${modelId ?? MODEL} does not support reasoning effort "${String(result.effort)}".`,
+      'UNSUPPORTED_REASONING_EFFORT',
+    )
+  }
+  return result
+}
+
 // The host's agent/request hook already narrows 'max' to 'high'. Direct adapter
 // callers (advisor tools calling adapter.stream / prepareCall().stream) bypass
 // that hook, so the same narrowing has to happen at this boundary too.
 export function narrowMaxReasoning(options, modelId = options?.model) {
   if (!options || typeof options !== 'object') return options
-  const requested = [options.reasoning, options.reasoningEffort]
-  if (!requested.some(value => typeof value === 'string' && value.toLowerCase() === 'max')) return options
+  const validInputs = new Set([...levelsForModel(modelId), 'max'])
+  const normalize = value => (value === undefined ? undefined : typeof value === 'string' && validInputs.has(value.toLowerCase()) ? value.toLowerCase() : null)
+  const reasoning = normalize(options.reasoning)
+  const effort = normalize(options.reasoningEffort)
+  if (reasoning === null || effort === null) return options
+  if (reasoning !== 'max' && effort !== 'max') return options
   // Hydrogen 与 Neon 的最高档是 xhigh；其余模型仍是 high。
   const ceiling = supportsXhighReasoning(modelId) ? 'xhigh' : 'high'
   return { ...options, reasoning: ceiling, reasoningEffort: ceiling }
+}
+
+function pinPreparedOptions(options, expectedProvider, expectedModel) {
+  assertPlainRequestOptions(options)
+  if (expectedProvider !== undefined && options.provider !== undefined && options.provider !== expectedProvider) {
+    throw new LlmError('Prepared stream provider mismatch.', 'INVALID_REQUEST')
+  }
+  if (expectedModel !== undefined && options.model !== undefined && options.model !== expectedModel) {
+    throw new LlmError('Prepared stream model mismatch.', 'INVALID_REQUEST')
+  }
+  return expectedProvider !== undefined && expectedModel !== undefined
+    ? { ...options, provider: expectedProvider, model: expectedModel }
+    : options
+}
+function preparePinnedStreamOptions(options, expectedProvider, expectedModel) {
+  const pinned = pinPreparedOptions(options, expectedProvider, expectedModel)
+  const targetModel = pinned.model ?? expectedModel
+  validateExplicitReasoningFields(pinned, targetModel)
+  return narrowMaxReasoning(pinned, targetModel)
 }
 
 const readVal = v => (v && typeof v === 'object' && typeof v.get === 'function') ? v.get() : v
@@ -151,14 +194,14 @@ export function detectPiAiArgonRoutes(ctx, explicitRoutes) {
       const hasModel = (list, re) => Array.isArray(list) && list.some(m => re.test(String(readVal(m?.id) ?? '')))
       const googleModels = readVal(googleCfg?.models)
       const vertexModels = readVal(vertexCfg?.models)
-      const hasGoogleArgon = hasModel(googleModels, /^(?:models\/)?gemini-4-argon\b/i)
-      const hasVertexArgon = hasModel(vertexModels, /^(?:models\/)?gemini-4-argon\b/i)
-      const hasGoogleCarbon = hasModel(googleModels, /^(?:models\/)?gemini-4-carbon\b/i)
-      const hasVertexCarbon = hasModel(vertexModels, /^(?:models\/)?gemini-4-carbon\b/i)
-      const hasGoogleHydrogen = hasModel(googleModels, /^(?:models\/)?gemini-4-hydrogen\b/i)
-      const hasVertexHydrogen = hasModel(vertexModels, /^(?:models\/)?gemini-4-hydrogen\b/i)
-      const hasGoogleNeon = hasModel(googleModels, /^(?:models\/)?gemini-4-neon\b/i)
-      const hasVertexNeon = hasModel(vertexModels, /^(?:models\/)?gemini-4-neon\b/i)
+      const hasGoogleArgon = hasModel(googleModels, /^(?:models\/)?gemini-4-argon$/i)
+      const hasVertexArgon = hasModel(vertexModels, /^(?:models\/)?gemini-4-argon$/i)
+      const hasGoogleCarbon = hasModel(googleModels, /^(?:models\/)?gemini-4-carbon$/i)
+      const hasVertexCarbon = hasModel(vertexModels, /^(?:models\/)?gemini-4-carbon$/i)
+      const hasGoogleHydrogen = hasModel(googleModels, /^(?:models\/)?gemini-4-hydrogen$/i)
+      const hasVertexHydrogen = hasModel(vertexModels, /^(?:models\/)?gemini-4-hydrogen$/i)
+      const hasGoogleNeon = hasModel(googleModels, /^(?:models\/)?gemini-4-neon$/i)
+      const hasVertexNeon = hasModel(vertexModels, /^(?:models\/)?gemini-4-neon$/i)
       const hasGoogle = hasGoogleArgon || hasGoogleCarbon || hasGoogleHydrogen || hasGoogleNeon
       const hasVertex = hasVertexArgon || hasVertexCarbon || hasVertexHydrogen || hasVertexNeon || !hasGoogle
       return {
@@ -333,22 +376,17 @@ export function gemini4StreamSimple(
   const fallback = defaultLevel ?? (/cyber-permissive/i.test(requestModel?.id ?? '') ? 'high' : 'medium')
   const modelId = requestModel?.id
   const supportsXhigh = supportsXhighReasoning(modelId)
-  const requestedLevel = options.reasoning ?? fallback
-  // max 按目标模型收敛：Hydrogen 与 Neon 收到四档最高档 xhigh，Argon / Carbon 仍是 high。
-  const rawLevel = typeof requestedLevel === 'string' && requestedLevel.toLowerCase() === 'max'
-    ? (supportsXhigh ? 'xhigh' : 'high')
-    : (typeof requestedLevel === 'string' ? requestedLevel.toLowerCase() : requestedLevel)
-  const mapped = requestModel?.thinkingLevelMap?.[rawLevel] ?? rawLevel
-  const level = typeof mapped === 'string' ? mapped.toLowerCase() : fallback
-  if (!levelsForModel(modelId).includes(level)) {
+  const { level: rawLevel } = validateExplicitReasoningFields(options, modelId, fallback)
+  const hasMapped = requestModel?.thinkingLevelMap && Object.prototype.hasOwnProperty.call(requestModel.thinkingLevelMap, rawLevel)
+  const mapped = hasMapped ? requestModel.thinkingLevelMap[rawLevel] : rawLevel
+  const level = typeof mapped === 'string' ? mapped.toLowerCase() : null
+  if (!level || !levelsForModel(modelId).includes(level)) {
     throw new LlmError(
-      supportsXhigh
-        ? 'Gemini 4 (Hydrogen / Neon) requires low, medium, high or xhigh.'
-        : 'Gemini 4 (Argon / Carbon) requires low, medium or high.',
+      `Model ${modelId ?? MODEL} does not support reasoning effort "${rawLevel}".`,
       'UNSUPPORTED_REASONING_EFFORT',
     )
   }
-  const { reasoning, thinking, thinkingBudgets, temperature, onPayload: prior, onProviderStreamEvent: priorEvent, ...rest } = options
+  const { reasoning, reasoningEffort: _re, thinking, thinkingBudgets, temperature, onPayload: prior, onProviderStreamEvent: priorEvent, ...rest } = options
   const requestedMaxTokens = options.maxTokens ?? requestModel.maxTokens
   const effectiveMaxTokens =
     longDecode === false && typeof requestedMaxTokens === 'number' && requestedMaxTokens > MAX_SINGLE_CALL_TOKENS
@@ -400,6 +438,18 @@ export function gemini4StreamSimple(
           cleanConfig.httpOptions && typeof cleanConfig.httpOptions === 'object' && !Array.isArray(cleanConfig.httpOptions)
             ? cleanConfig.httpOptions
             : {}
+        const sanitizedHttpOptions = { ...prevHttpOptions }
+        if (
+          supportsXhigh &&
+          prevHttpOptions.extraBody &&
+          typeof prevHttpOptions.extraBody === 'object' &&
+          !Array.isArray(prevHttpOptions.extraBody)
+        ) {
+          const cleanExtraBody = { ...prevHttpOptions.extraBody }
+          delete cleanExtraBody.cachedContent
+          delete cleanExtraBody.cached_content
+          sanitizedHttpOptions.extraBody = cleanExtraBody
+        }
         const toolMode = shouldFallbackToAutoToolMode(retryKey) ? 'AUTO' : 'VALIDATED'
         return {
           ...body,
@@ -415,8 +465,8 @@ export function gemini4StreamSimple(
             automaticContinuation: false,
             thinkingConfig: { thinkingLevel: level.toUpperCase(), includeThoughts: true },
             httpOptions: {
-              ...prevHttpOptions,
-              ...(Object.keys(servicePolicy.headers).length ? { headers: mergeServiceHeaders(prevHttpOptions.headers, servicePolicy) } : {}),
+              ...sanitizedHttpOptions,
+              ...(Object.keys(servicePolicy.headers).length ? { headers: mergeServiceHeaders(sanitizedHttpOptions.headers, servicePolicy) } : {}),
               [ARGON_LONG_DECODE_SYMBOL]: {
                 enabled: longDecode !== false,
                 serviceTier: requestModel.api === 'google-generative-ai' ? servicePolicy.tier : undefined,
@@ -438,39 +488,67 @@ export function installGemini4PiAiPatch(recordDiagnostic, configInput = {}, resp
   const proto = PiAiAdapter?.prototype
   if (!proto || typeof proto.current !== 'function') return unpatchApiClient
   const origCurrent = proto.current
+  const origPrepareCall = typeof proto.prepareCall === 'function' ? proto.prepareCall : null
+  const origProtoStream = typeof proto.stream === 'function' ? proto.stream : null
   const patchedProviders = new Map()
   let active = true
   const ensureGemini4Capabilities = piProvider => {
     if (typeof piProvider?.getModels !== 'function') return
     try {
       for (const m of piProvider.getModels()) {
-        if (isGemini4Model(m) && !m.reasoning) {
-          m.reasoning = true
-          m.thinkingLevelMap = { ...thinkingLevelMapFor(m.id) }
+        if (isGemini4Model(m)) {
+          try {
+            m.reasoning = true
+            m.thinkingLevelMap = { ...thinkingLevelMapFor(m.id) }
+          } catch {}
         }
       }
     } catch {}
+  }
+  const mapStreamThinkingOption = options => {
+    if (!options || typeof options !== 'object' || Array.isArray(options)) return options
+    if (options.reasoning !== undefined || options.reasoningEffort !== undefined) return options
+    const thinking = options.thinking
+    if (!thinking || typeof thinking !== 'object' || Array.isArray(thinking)) return options
+    if (thinking.enabled === false || (typeof thinking.budgetTokens === 'number' && thinking.budgetTokens <= 0)) {
+      return { ...options, reasoning: 'off' }
+    }
+    if (typeof thinking.level === 'string') return { ...options, reasoning: thinking.level }
+    return options
   }
   const wrapProvider = (piProvider, defaultReasoning) => {
     if (!piProvider || typeof piProvider.streamSimple !== 'function' || typeof piProvider.stream !== 'function') return
     ensureGemini4Capabilities(piProvider)
     if (piProvider.id === PROVIDER || patchedProviders.has(piProvider)) return
+    const origStream = piProvider.stream
     const origStreamSimple = piProvider.streamSimple
+    const dispatchGemini4 = (requestModel, context, options = {}) => {
+      const cfg = resolveConfigValues(configInput)
+      return gemini4StreamSimple(
+        (m, c, o) => origStream.call(piProvider, m, c, o), requestModel, context, options,
+        defaultReasoning, requestModel.id, cfg.longDecode, recordDiagnostic,
+        resolveServicePolicy(cfg, requestModel.api, 'generate-content'),
+        { responseHub, retainRawResponses: cfg.retainRawResponses },
+      )
+    }
     function patchedStreamSimple(requestModel, context, options = {}) {
-      if (active && isGemini4Model(requestModel)) {
-        const cfg = resolveConfigValues(configInput)
-        return gemini4StreamSimple(
-          (m, c, o) => piProvider.stream(m, c, o), requestModel, context, options,
-          defaultReasoning, requestModel.id, cfg.longDecode, recordDiagnostic,
-          resolveServicePolicy(cfg, requestModel.api, 'generate-content'),
-          { responseHub, retainRawResponses: cfg.retainRawResponses },
-        )
-      }
+      if (active && isGemini4Model(requestModel)) return dispatchGemini4(requestModel, context, options)
       return origStreamSimple.call(this, requestModel, context, options)
     }
-    patchedProviders.set(piProvider, { origStreamSimple, patchedStreamSimple })
+    function patchedStream(requestModel, context, options = {}) {
+      if (active && isGemini4Model(requestModel)) return dispatchGemini4(requestModel, context, mapStreamThinkingOption(options))
+      return origStream.call(this, requestModel, context, options)
+    }
+    patchedProviders.set(piProvider, { origStream, patchedStream, origStreamSimple, patchedStreamSimple })
+    piProvider.stream = patchedStream
     piProvider.streamSimple = patchedStreamSimple
   }
+  const isNativeGemini4Target = (instance, provider, model) =>
+    active &&
+    !(instance instanceof ArgonAdapter) &&
+    (provider === 'google' || provider === NATIVE_PROVIDER) &&
+    typeof model === 'string' &&
+    /^(?:models\/)?gemini-4\b/i.test(model)
   function patchedCurrent() {
     const snapshot = origCurrent.call(this)
     if (active && snapshot?.profiles instanceof Map) {
@@ -480,13 +558,36 @@ export function installGemini4PiAiPatch(recordDiagnostic, configInput = {}, resp
     }
     return snapshot
   }
+  async function patchedPrepareCall(provider, model, signal) {
+    const prepared = await origPrepareCall.call(this, provider, model, signal)
+    if (!isNativeGemini4Target(this, provider, model)) return prepared
+    const origPreparedStream = prepared.stream
+    return {
+      ...prepared,
+      stream: options => origPreparedStream(preparePinnedStreamOptions(options, provider, model)),
+    }
+  }
+  async function* patchedProtoStream(options) {
+    assertPlainRequestOptions(options)
+    if (isNativeGemini4Target(this, options.provider, options.model)) {
+      const normalized = preparePinnedStreamOptions(options, options.provider, options.model)
+      yield* origProtoStream.call(this, normalized)
+      return
+    }
+    yield* origProtoStream.call(this, options)
+  }
   proto.current = patchedCurrent
+  if (origPrepareCall) proto.prepareCall = patchedPrepareCall
+  if (origProtoStream) proto.stream = patchedProtoStream
   return () => {
     if (!active) return
     active = false
     unpatchApiClient()
     if (proto.current === patchedCurrent) proto.current = origCurrent
-    for (const [piProvider, { origStreamSimple, patchedStreamSimple }] of patchedProviders) {
+    if (origPrepareCall && proto.prepareCall === patchedPrepareCall) proto.prepareCall = origPrepareCall
+    if (origProtoStream && proto.stream === patchedProtoStream) proto.stream = origProtoStream
+    for (const [piProvider, { origStream, patchedStream, origStreamSimple, patchedStreamSimple }] of patchedProviders) {
+      if (piProvider.stream === patchedStream) piProvider.stream = origStream
       if (piProvider.streamSimple === patchedStreamSimple) piProvider.streamSimple = origStreamSimple
     }
     patchedProviders.clear()
@@ -624,11 +725,15 @@ export class ArgonAdapter extends LlmAdapter {
     if (provider === PROVIDER && cfg) resolveServicePolicy(cfg, googleApi ? 'google-generative-ai' : 'google-vertex', protocol)
     const prepared = await this.inner.prepareCall(provider, model, signal)
     if (provider === PROVIDER && protocol === 'interactions' && this.interactionHandler) {
-      return { model: prepared.model, stream: options => this.interactionHandler(narrowMaxReasoning(options && typeof options === 'object' && !options.model ? { ...options, model } : options, model), cfg) }
+      return {
+        model: prepared.model,
+        stream: options => this.interactionHandler(narrowMaxReasoning(pinPreparedOptions(options, provider, model), model), cfg),
+      }
     }
-    return { ...prepared, stream: options => prepared.stream(generateContentHistory(narrowMaxReasoning(options, model), model)) }
+    return { ...prepared, stream: options => prepared.stream(generateContentHistory(preparePinnedStreamOptions(options, provider, model), model)) }
   }
   async *stream(options) {
+    assertPlainRequestOptions(options)
     const prepared = await this.prepareCall(options.provider, options.model, options.signal)
     yield* prepared.stream(options)
   }

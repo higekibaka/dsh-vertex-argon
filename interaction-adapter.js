@@ -4,21 +4,22 @@ import { durableInteractionTransport } from './interaction-state.js'
 import { createArgonDiagnosticTracker } from './diagnostics.js'
 import { interactionExitReason } from './interaction-lifecycle.js'
 import { resolveServicePolicy } from './service-level.js'
+import { resolveGemini4ReasoningLevel } from './interactions-input.js'
 // 循环导入：adapter.js 只在本模块的函数被调用时才读取这些绑定，函数声明本身已提升。
-import { isGoogleApiModel, officialUpstreamModel, supportsXhighReasoning, levelsForModel } from './adapter.js'
+import { isGoogleApiModel, officialUpstreamModel } from './adapter.js'
 
 const terminalStates = new Set(['completed', 'requires_action', 'incomplete', 'failed', 'cancelled', 'budget_exceeded'])
 export function assertInteractionOptions(options, cfg, route) {
   const max = options.maxTokens ?? cfg.maxTokens
   if (!Number.isSafeInteger(max) || max <= 0 || max > cfg.maxTokens) throw new Error('Interactions output budget must be a positive integer within the configured effective cap.')
-  const xhighSupported = supportsXhighReasoning(options.model)
-  const requestedLevel = options.reasoningEffort ?? cfg.reasoning
-  const normalizedRequested = typeof requestedLevel === 'string' ? requestedLevel.toLowerCase() : requestedLevel
-  // max 按目标模型收敛：Hydrogen 与 Neon 收到四档最高档 xhigh，Argon / Carbon 仍是 high。
-  const level = normalizedRequested === 'max' ? (xhighSupported ? 'xhigh' : 'high') : normalizedRequested
-  if (!levelsForModel(options.model).includes(level)) {
-    throw new Error(xhighSupported ? 'Gemini 4 (Hydrogen / Neon) requires low, medium, high, or xhigh thinking.' : 'Argon requires low, medium, or high thinking.')
+  const resolvedReasoning = resolveGemini4ReasoningLevel(options, options.model, cfg.reasoning)
+  if (!resolvedReasoning.ok) {
+    if (resolvedReasoning.errorType === 'conflict') {
+      throw new Error('Conflicting reasoning and reasoningEffort options in Interactions request.')
+    }
+    throw new Error(resolvedReasoning.supportsXhigh ? 'Gemini 4 (Hydrogen / Neon) requires low, medium, high, or xhigh thinking.' : 'Argon requires low, medium, or high thinking.')
   }
+  const level = resolvedReasoning.level
   if (cfg.interactionsBackground && !cfg.allowInteractionStorage) throw new Error('Background Interactions requires explicit cloud-storage consent in Gemini 4 Adapter settings.')
   if (max > 65536 && !cfg.interactionsBackground) throw new Error('Interactions above 65,536 tokens requires background execution; no request was sent.')
   if (route === 'google-vertex' && max > 65536) throw new Error('Vertex Interactions long decode is not verified; choose GenerateContent or explicitly lower the budget to 65,536.')
@@ -86,6 +87,7 @@ export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, get
     }
     try {
       signal.throwIfAborted()
+      const upstreamModel = officialUpstreamModel(options.model)
       const controls = assertInteractionOptions(options, cfg, route)
       const servicePolicy = resolveServicePolicy(cfg, route, 'interactions')
       if (cfg.interactionsBackground) taskHub?.requireReady()
@@ -160,7 +162,7 @@ export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, get
         return block
       }) }))
       const { streamInteractions } = await import('./interactions.js')
-      for await (const chunk of streamInteractions({ ...options, messages, signal }, { route, upstreamModel: officialUpstreamModel(options.model), ...controls, serviceTier: route === 'google-generative-ai' ? servicePolicy.tier : undefined, background: cfg.interactionsBackground, store: cfg.allowInteractionStorage, transport, resolveImage, structuredOutput, onEvent: observed, onReconnectDelay: ms => { pendingBackoffMs = ms }, onTerminal: () => { complete = true }, onExit: reason => { exitReason = reason } })) {
+      for await (const chunk of streamInteractions({ ...options, messages, signal }, { route, upstreamModel, ...controls, serviceTier: route === 'google-generative-ai' ? servicePolicy.tier : undefined, background: cfg.interactionsBackground, store: cfg.allowInteractionStorage, transport, resolveImage, structuredOutput, onEvent: observed, onReconnectDelay: ms => { pendingBackoffMs = ms }, onTerminal: () => { complete = true }, onExit: reason => { exitReason = reason } })) {
         if (chunk.type === 'usage') {
           recordUsage()
           // Only an observed first-hop input watermark can be normalized for the

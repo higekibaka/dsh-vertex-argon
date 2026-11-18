@@ -2,6 +2,20 @@
 
 All notable changes to **Gemini 4 Adapter** (`dsh-vertex-argon`) are documented in this file.
 
+## [2.2.1] - 2026-11-19
+
+### Fixed
+- **Strict 8-Model Parsing & Prepared Target Pinning (`interactions-input.js`, `adapter.js`, `interaction-adapter.js`)**:
+  - Unified official 8-model parsing (`resolveOfficialGemini4Model`) across `isGoogleApiModel`, `officialUpstreamModel`, `isHydrogenModel`, `isNeonModel`, `supportsXhighReasoning`, and `buildInteractionRequest` (`models/` prefix, case-insensitive, explicit `UNKNOWN_MODEL` / `Error` rejection for unknown non-empty IDs while retaining default `'gemini-4-argon'` when omitted, and exact model resolution when `settings.upstreamModel` is omitted in Interactions).
+  - Tightened `detectPiAiArgonRoutes` regex tails from `\b` to `$` so `-preview` / experimental suffixes are not treated as official routes.
+  - Hardened `ArgonAdapter.prepareCall` to synchronously reject non-object options or mismatched `provider` / `model` (`INVALID_REQUEST`) and pin `(provider, model)` on omitted fields across both GenerateContent and Interactions branches.
+- **Dual-Field Reasoning Guards (`interactions-input.js`, `interaction-adapter.js`, `adapter.js`)**:
+  - Added shared `resolveGemini4ReasoningLevel` so explicit `reasoning` and `reasoningEffort` are both checked at `ArgonAdapter.stream`, `prepareCall().stream`, `gemini4StreamSimple`, `assertInteractionOptions`, and `buildInteractionRequest`, rejecting explicit invalid efforts (such as `{ reasoning: 'off' }`) or conflicting non-`max` fields instead of falling back to defaults, and guarding `narrowMaxReasoning` when a sibling field is invalid.
+- **Complete Native Patch & Explicit Cache Cleanup (`adapter.js`)**:
+  - Updated `installGemini4PiAiPatch` to apply `thinkingLevelMap` to pre-enabled `isGemini4Model` entries regardless of existing `m.reasoning`, wrap `piProvider.stream` alongside `piProvider.streamSimple`, wrap `PiAiAdapter.prototype.prepareCall` / `PiAiAdapter.prototype.stream` for native `google` / `google-vertex` Gemini 4 routes, strip `httpOptions.extraBody.cachedContent` / `cached_content` non-mutatingly on Hydrogen/Neon, and cleanly restore all patched prototypes/methods on disposal.
+- **Cross-Turn Reused `toolCallId` History Isolation (`interactions-input.js`, `google-signatures.js`)**:
+  - Replaced global `Map` / `Set` tracking with per-`toolCallId` FIFO queues and unclaimed-after-position lookup in `buildInteractionRequest`, `generateContentHistory`, and `createGoogleSignatureBridge`, preventing earlier downgraded turns from corrupting reused native `toolCallId` turns or masking later unfinished calls.
+
 ## [2.2.0] - 2026-11-19
 
 ### Added

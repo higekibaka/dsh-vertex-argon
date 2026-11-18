@@ -1350,3 +1350,176 @@ test('MALFORMED_FUNCTION_CALL retry automatically downgrades functionCallingConf
     customResponder = null
   }
 })
+
+test('official 8-model resolver and route detection reject preview variants and unknown non-empty IDs', () => {
+  assert.equal(isGoogleApiModel('models/gemini-4-neon-google'), true)
+  assert.equal(isGoogleApiModel('MODELS/GEMINI-4-ARGON-GOOGLE'), true)
+  assert.equal(isGoogleApiModel('gemini-4-neon-google-preview'), false)
+  assert.equal(officialUpstreamModel(undefined), MODEL)
+  assert.equal(officialUpstreamModel(null), MODEL)
+  assert.equal(officialUpstreamModel(''), MODEL)
+  assert.equal(officialUpstreamModel('models/GEMINI-4-NEON-GOOGLE'), NEON_MODEL)
+  assert.throws(() => officialUpstreamModel('gemini-4-neon-preview'), { code: 'UNKNOWN_MODEL' })
+  assert.throws(() => officialUpstreamModel('unknown-model'), { code: 'UNKNOWN_MODEL' })
+
+  const previewCtx = {
+    get: k => k === 'configEditor' ? {
+      entries: () => [{
+        options: {
+          id: 'llm-pi-ai',
+          config: {
+            providers: {
+              google: { apiKeyEnv: 'GOOGLE_API_KEY', models: [{ id: 'gemini-4-neon-preview' }] },
+              'google-vertex': { models: [{ id: 'gemini-4-hydrogen-exp' }] },
+            },
+          },
+        },
+      }],
+    } : undefined,
+  }
+  const detected = detectPiAiArgonRoutes(previewCtx)
+  assert.equal(detected.hasGoogleNeon, false)
+  assert.equal(detected.hasVertexHydrogen, false)
+  assert.equal(detected.hasVertexArgon, true)
+})
+
+test('narrowMaxReasoning, prepareCall target freeze, and dual-field validation reject invalid or conflicting reasoning before I/O', async () => {
+  const invalidSibling = { reasoning: 'off', reasoningEffort: 'max' }
+  assert.equal(narrowMaxReasoning(invalidSibling, NEON_MODEL), invalidSibling)
+  assert.equal(narrowMaxReasoning({ reasoning: 'xhigh', reasoningEffort: 'max' }, MODEL).reasoning, 'xhigh')
+
+  const neonOfficialConfig = {
+    ...config,
+    routes: { hasGoogle: true, hasVertex: true, hasGoogleCarbon: true, hasVertexCarbon: true, hasVertexHydrogen: true, hasGoogleHydrogen: true, hasVertexNeon: true, hasGoogleNeon: true },
+  }
+  const a = createArgonAdapter(ctx, neonOfficialConfig)
+  const prepared = await a.prepareCall(PROVIDER, NEON_MODEL)
+  assert.throws(() => prepared.stream(null), { code: 'INVALID_REQUEST' })
+  assert.throws(() => prepared.stream({ ...req('high', MODEL) }), { code: 'INVALID_REQUEST' })
+  assert.throws(() => prepared.stream({ ...req('high', NEON_MODEL), provider: 'other' }), { code: 'INVALID_REQUEST' })
+
+  const before = wire.length
+  const { provider: _p, model: _m, ...omittedTarget } = req('xhigh', NEON_MODEL)
+  const pinnedOk = await collect(prepared.stream(omittedTarget))
+  assert.equal(pinnedOk.at(-1).reason.kind, 'stop')
+  assert.deepEqual(wire.at(-1).body.generationConfig.thinkingConfig, { thinkingLevel: 'XHIGH', includeThoughts: true })
+
+  const beforeBad = wire.length
+  assert.throws(() => prepared.stream({ ...req(undefined, NEON_MODEL), reasoning: 'off', reasoningEffort: 'max' }), { code: 'UNSUPPORTED_REASONING_EFFORT' })
+  assert.throws(() => prepared.stream({ ...req(undefined, NEON_MODEL), reasoning: 'low', reasoningEffort: 'high' }), { code: 'INVALID_REQUEST' })
+  await assert.rejects(collect(a.stream({ ...req(undefined, NEON_MODEL), reasoning: 'off', reasoningEffort: 'max' })), { code: 'UNSUPPORTED_REASONING_EFFORT' })
+  await assert.rejects(collect(a.stream({ ...req(undefined, NEON_MODEL), reasoning: 'low', reasoningEffort: 'high' })), { code: 'INVALID_REQUEST' })
+  assert.equal(wire.length, beforeBad)
+  assert.ok(wire.length > before)
+})
+
+test('installGemini4PiAiPatch covers pre-enabled models, provider.stream, PiAiAdapter.prepareCall, httpOptions.extraBody cleanup, and full restore', async () => {
+  const neonPreEnabled = {
+    id: NEON_MODEL, name: NEON_MODEL, provider: 'google', api: 'google-generative-ai',
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+    reasoning: true, input: ['text'], contextWindow: 1048576, maxTokens: 65536, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  }
+  const baseProvider = googleProvider()
+  const piProvider = { ...baseProvider, getModels: () => [neonPreEnabled] }
+  const origProviderStream = piProvider.stream
+  const origProviderStreamSimple = piProvider.streamSimple
+  const origProtoPrepare = PiAiAdapter.prototype.prepareCall
+  const origProtoStream = PiAiAdapter.prototype.stream
+  const unpatch = installGemini4PiAiPatch()
+  mode = 'text'
+  try {
+    const profiles = new Map([['google', {
+      provider: 'google', displayName: 'Google', piProvider, reasoning: 'medium', streamIdleTimeoutMs: 300000,
+      maxRequestImageBytes: 20971520, requestImagePixelBudget: 4194304, requestImageMaxBytes: 1048576,
+      retryPolicy: resolveRetryPolicy(undefined, 'test'), modelErrors: new Map(), configuredMaxTokens: new Map([[NEON_MODEL, 65536]]),
+    }]])
+    const piAdapter = new PiAiAdapter({
+      profiles: () => profiles,
+      resolveApiKey: async () => 'fixture-google-api-key',
+      auth: { authContext: { env: async () => undefined, fileExists: async () => false } },
+    })
+    piAdapter.current()
+    assert.equal(neonPreEnabled.thinkingLevelMap.xhigh, 'xhigh')
+
+    const callerExtra = { cachedContent: 'cachedContents/extra-camel', cached_content: 'cachedContents/extra-snake', retainedFlag: true }
+    const directStream = piProvider.stream(neonPreEnabled, { messages: [{ role: 'user', content: 'hi', timestamp: 0 }] }, {
+      apiKey: 'fixture-google-api-key',
+      reasoning: 'max',
+      onPayload: p => ({ ...p, config: { ...p.config, httpOptions: { extraBody: callerExtra } } }),
+    })
+    const directEvents = []
+    for await (const ev of directStream) directEvents.push(ev)
+    assert.equal(directEvents.at(-1).type, 'done')
+    assert.deepEqual(wire.at(-1).body.generationConfig.thinkingConfig, { thinkingLevel: 'XHIGH', includeThoughts: true })
+    assert.equal(wire.at(-1).body.retainedFlag, true)
+    assert.ok(!JSON.stringify(wire.at(-1).body).includes('cachedContent'))
+    assert.ok(!JSON.stringify(wire.at(-1).body).includes('cached_content'))
+    assert.equal(callerExtra.cachedContent, 'cachedContents/extra-camel')
+    assert.equal(callerExtra.cached_content, 'cachedContents/extra-snake')
+
+    assert.throws(() => piProvider.stream(neonPreEnabled, { messages: [] }, { apiKey: 'fixture', thinking: { enabled: false } }), /does not support/)
+    assert.throws(() => piProvider.stream(neonPreEnabled, { messages: [] }, { apiKey: 'fixture', thinking: { level: 'MINIMAL' } }), /does not support/)
+
+    const preparedNative = await piAdapter.prepareCall('google', NEON_MODEL)
+    assert.throws(() => preparedNative.stream({ ...req('high', MODEL), provider: 'google' }), { code: 'INVALID_REQUEST' })
+    assert.throws(() => preparedNative.stream({ ...req('high', NEON_MODEL), provider: 'google-vertex' }), { code: 'INVALID_REQUEST' })
+    assert.throws(() => preparedNative.stream({ ...req(undefined, NEON_MODEL), provider: 'google', reasoning: 'off', reasoningEffort: 'max' }), { code: 'UNSUPPORTED_REASONING_EFFORT' })
+    assert.throws(() => preparedNative.stream({ ...req(undefined, NEON_MODEL), provider: 'google', reasoning: 'low', reasoningEffort: 'high' }), { code: 'INVALID_REQUEST' })
+    const nativeMaxChunks = await collect(preparedNative.stream({ ...req('max', NEON_MODEL), provider: 'google' }))
+    assert.equal(nativeMaxChunks.at(-1).reason.kind, 'stop')
+    assert.deepEqual(wire.at(-1).body.generationConfig.thinkingConfig, { thinkingLevel: 'XHIGH', includeThoughts: true })
+  } finally {
+    mode = 'tool'
+    unpatch()
+  }
+  assert.equal(piProvider.stream, origProviderStream)
+  assert.equal(piProvider.streamSimple, origProviderStreamSimple)
+  assert.equal(PiAiAdapter.prototype.prepareCall, origProtoPrepare)
+  assert.equal(PiAiAdapter.prototype.stream, origProtoStream)
+})
+
+test('generate-content reused toolCallId keeps later native neon turn signature isolated from earlier demoted carbon turn', async () => {
+  const neonOfficialConfig = {
+    ...config,
+    routes: { hasGoogle: true, hasVertex: true, hasGoogleCarbon: true, hasVertexCarbon: true, hasVertexHydrogen: true, hasGoogleHydrogen: true, hasVertexNeon: true, hasGoogleNeon: true },
+  }
+  const a = createArgonAdapter(ctx, neonOfficialConfig)
+  const user1 = createUserMessage({ content: [{ type: 'text', text: 'turn 1' }], source: { kind: 'user' } })
+  const user2 = createUserMessage({ content: [{ type: 'text', text: 'turn 2' }], source: { kind: 'user' } })
+  let step = 0
+  customResponder = () => {
+    step += 1
+    if (step === 1) {
+      return sseResponse([{ candidates: [{ content: { role: 'model', parts: [{ functionCall: { id: 'call-reused', name: 'echo', args: { value: 'c' } }, thoughtSignature: crossSignature }] }, finishReason: 'STOP' }] }])
+    }
+    if (step === 2) {
+      return sseResponse([{ candidates: [{ content: { role: 'model', parts: [{ text: 'neon thinking', thought: true }, { functionCall: { id: 'call-reused', name: 'echo', args: { value: 'n' } }, thoughtSignature: crossSignature }] }, finishReason: 'STOP' }] }])
+    }
+    return sseResponse([{ candidates: [{ content: { role: 'model', parts: [{ text: 'done' }] }, finishReason: 'STOP' }] }])
+  }
+  try {
+    const asm1 = new BlockAssembler()
+    for await (const c of a.stream({ ...req('medium', CARBON_MODEL), messages: [user1], tools: crossTools })) asm1.push(c)
+    const carbonAssistant = asm1.message({ provider: PROVIDER, model: CARBON_MODEL, replayState: asm1.replayState })
+    const carbonResult = createToolResultMessage({ callId: 'call-reused', content: [{ type: 'text', text: 'carbon-res' }], isError: false })
+
+    const asm2 = new BlockAssembler()
+    for await (const c of a.stream({ ...req('medium', NEON_MODEL), messages: [user1, carbonAssistant, carbonResult, user2], tools: crossTools })) asm2.push(c)
+    const neonAssistant = asm2.message({ provider: PROVIDER, model: NEON_MODEL, replayState: asm2.replayState })
+    const neonResult = createToolResultMessage({ callId: 'call-reused', content: [{ type: 'text', text: 'neon-res' }], isError: false })
+
+    const finalOut = await collect(a.stream({ ...req('medium', NEON_MODEL), messages: [user1, carbonAssistant, carbonResult, user2, neonAssistant, neonResult], tools: crossTools }))
+    assert.equal(finalOut.at(-1).reason.kind, 'stop')
+    const contents = wire.at(-1).body.contents
+    const allParts = contents.flatMap(row => row.parts)
+    const fnCalls = allParts.filter(p => p.functionCall)
+    const fnResponses = allParts.filter(p => p.functionResponse)
+    assert.equal(fnCalls.length, 1)
+    assert.equal(fnCalls[0].thoughtSignature, crossSignature)
+    assert.equal(fnResponses.length, 1)
+    assert.equal(fnResponses[0].functionResponse.response.output, 'neon-res')
+    assert.ok(allParts.some(p => typeof p.text === 'string' && p.text.includes('[Previously executed tool echo; call call-reused]')))
+  } finally {
+    customResponder = null
+  }
+})

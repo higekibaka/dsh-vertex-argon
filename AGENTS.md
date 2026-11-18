@@ -1,6 +1,6 @@
 # Gemini 4 Adapter（dsh-vertex-argon）维护与发版说明
 
-维护前先读现有文档，再核对当前源码；不得仅据历史说明改实现。插件展示品牌名为 **Gemini 4 Adapter**，底层包名保持 `dsh-vertex-argon`，工程版本为 `2.2.0`，宿主兼容 `>=0.2.0-rc.2`，以 [package.json](<package.json>) 为准。依次查阅：
+维护前先读现有文档，再核对当前源码；不得仅据历史说明改实现。插件展示品牌名为 **Gemini 4 Adapter**，底层包名保持 `dsh-vertex-argon`，工程版本为 `2.2.1`，宿主兼容 `>=0.2.0-rc.2`，以 [package.json](<package.json>) 为准。依次查阅：
 
 1. [实现架构](<docs/implementation/README.md>)：双官方通道八模型、模块边界、13 项配置与存储域。
 2. [协议合同](<docs/implementation/DECISIONS.md>)：双通道凭据隔离、GenerateContent 四项韧性机制、基本诊断与读取兼容。

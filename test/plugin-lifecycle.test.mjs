@@ -132,30 +132,45 @@ test('repeated API-client ensure disposers preserve newer wrappers and cannot re
  } finally {ensureGemini4ApiClientPatch()();proto.requestStream=original}
 })
 
-test('native patch disposal preserves later current/provider wrappers and makes retained delegates inert', () => {
- const proto=PiAiAdapter.prototype,originalCurrent=proto.current
+test('native patch disposal preserves later current/provider wrappers and makes retained delegates inert', async () => {
+ const proto=PiAiAdapter.prototype,originalCurrent=proto.current,originalPrepareCall=proto.prepareCall,originalProtoStream=proto.stream
  const result={fixture:true}
- const provider={id:'google',getModels:()=>[],stream(){throw Error('disposed patch must not stream')},streamSimple(){return result}}
+ let rawStreamCalls=0
+ const provider={id:'google',getModels:()=>[],stream(){rawStreamCalls++;return result},streamSimple(){return result}}
  const snapshot={profiles:new Map([['google',{piProvider:provider,reasoning:'medium'}]])}
  proto.current=function(){return snapshot}
- const baseline=proto.current,baselineStream=provider.streamSimple
+ proto.prepareCall=async function(p,m){return{model:{id:m},stream:()=>result}}
+ proto.stream=async function*(o){yield o}
+ const baseline=proto.current,baselinePrepare=proto.prepareCall,baselineProtoStream=proto.stream
+ const baselineStream=provider.stream,baselineStreamSimple=provider.streamSimple
  const dispose=installGemini4PiAiPatch()
  try {
   assert.equal(proto.current(),snapshot)
-  const current=proto.current,stream=provider.streamSimple
+  const current=proto.current,prepare=proto.prepareCall,pStream=proto.stream
+  const pvdStream=provider.stream,pvdStreamSimple=provider.streamSimple
   function laterCurrent(){return current.call(this)}
-  function laterStream(...args){return stream.apply(this,args)}
-  proto.current=laterCurrent;provider.streamSimple=laterStream
+  function laterPrepare(...args){return prepare.apply(this,args)}
+  async function* laterProtoStream(...args){yield* pStream.apply(this,args)}
+  function laterPvdStream(...args){return pvdStream.apply(this,args)}
+  function laterStream(...args){return pvdStreamSimple.apply(this,args)}
+  proto.current=laterCurrent;proto.prepareCall=laterPrepare;proto.stream=laterProtoStream
+  provider.stream=laterPvdStream;provider.streamSimple=laterStream
   dispose();dispose()
-  assert.equal(proto.current,laterCurrent);assert.equal(provider.streamSimple,laterStream)
+  assert.equal(proto.current,laterCurrent);assert.equal(proto.prepareCall,laterPrepare);assert.equal(proto.stream,laterProtoStream)
+  assert.equal(provider.stream,laterPvdStream);assert.equal(provider.streamSimple,laterStream)
   assert.equal(proto.current(),snapshot)
   assert.equal(provider.streamSimple({id:MODEL,api:'google-generative-ai'},{}),result)
-  assert.equal(provider.streamSimple,laterStream)
+  assert.equal(rawStreamCalls,0)
+  assert.equal(provider.stream({id:MODEL,api:'google-generative-ai'},{}),result)
+  assert.equal(rawStreamCalls,1)
+  assert.equal(provider.stream,laterPvdStream);assert.equal(provider.streamSimple,laterStream)
   // Normal disposal must still restore exactly the methods this installation owns.
-  proto.current=baseline;provider.streamSimple=baselineStream
+  proto.current=baseline;proto.prepareCall=baselinePrepare;proto.stream=baselineProtoStream
+  provider.stream=baselineStream;provider.streamSimple=baselineStreamSimple
   const again=installGemini4PiAiPatch();proto.current();again()
-  assert.equal(proto.current,baseline);assert.equal(provider.streamSimple,baselineStream)
- } finally {dispose();proto.current=originalCurrent}
+  assert.equal(proto.current,baseline);assert.equal(proto.prepareCall,baselinePrepare);assert.equal(proto.stream,baselineProtoStream)
+  assert.equal(provider.stream,baselineStream);assert.equal(provider.streamSimple,baselineStreamSimple)
+ } finally {dispose();proto.current=originalCurrent;proto.prepareCall=originalPrepareCall;proto.stream=originalProtoStream}
 })
 
 test('plugin entry wires live native settings and its response hub into the inspection service', async () => {
