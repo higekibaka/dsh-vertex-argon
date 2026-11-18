@@ -5,15 +5,20 @@ import { createArgonDiagnosticTracker } from './diagnostics.js'
 import { interactionExitReason } from './interaction-lifecycle.js'
 import { resolveServicePolicy } from './service-level.js'
 // 循环导入：adapter.js 只在本模块的函数被调用时才读取这些绑定，函数声明本身已提升。
-import { isGoogleApiModel, officialUpstreamModel } from './adapter.js'
+import { isGoogleApiModel, officialUpstreamModel, supportsXhighReasoning, levelsForModel } from './adapter.js'
 
 const terminalStates = new Set(['completed', 'requires_action', 'incomplete', 'failed', 'cancelled', 'budget_exceeded'])
 export function assertInteractionOptions(options, cfg, route) {
   const max = options.maxTokens ?? cfg.maxTokens
   if (!Number.isSafeInteger(max) || max <= 0 || max > cfg.maxTokens) throw new Error('Interactions output budget must be a positive integer within the configured effective cap.')
+  const xhighSupported = supportsXhighReasoning(options.model)
   const requestedLevel = options.reasoningEffort ?? cfg.reasoning
-  const level = typeof requestedLevel === 'string' && requestedLevel.toLowerCase() === 'max' ? 'high' : requestedLevel
-  if (!['low', 'medium', 'high'].includes(level)) throw new Error('Argon requires low, medium, or high thinking.')
+  const normalizedRequested = typeof requestedLevel === 'string' ? requestedLevel.toLowerCase() : requestedLevel
+  // max 按目标模型收敛：Hydrogen 与 Neon 收到四档最高档 xhigh，Argon / Carbon 仍是 high。
+  const level = normalizedRequested === 'max' ? (xhighSupported ? 'xhigh' : 'high') : normalizedRequested
+  if (!levelsForModel(options.model).includes(level)) {
+    throw new Error(xhighSupported ? 'Gemini 4 (Hydrogen / Neon) requires low, medium, high, or xhigh thinking.' : 'Argon requires low, medium, or high thinking.')
+  }
   if (cfg.interactionsBackground && !cfg.allowInteractionStorage) throw new Error('Background Interactions requires explicit cloud-storage consent in Gemini 4 Adapter settings.')
   if (max > 65536 && !cfg.interactionsBackground) throw new Error('Interactions above 65,536 tokens requires background execution; no request was sent.')
   if (route === 'google-vertex' && max > 65536) throw new Error('Vertex Interactions long decode is not verified; choose GenerateContent or explicitly lower the budget to 65,536.')

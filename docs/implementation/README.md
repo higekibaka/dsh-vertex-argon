@@ -1,27 +1,27 @@
-# Gemini 4 Adapter（dsh-vertex-argon）实现架构与模块边界（v2.1.0）
+# Gemini 4 Adapter（dsh-vertex-argon）实现架构与模块边界（v2.2.0）
 
 本目录描述当前本地工程；实现合同见 [DECISIONS.md](<DECISIONS.md>)，本轮验证与历史实测分开记录于 [STATUS.md](<STATUS.md>)。文档更新不表示插件已安装、已发布或新增了云端验证。
 
 ## 1. 插件与宿主边界
 
 - 展示品牌名 **Gemini 4 Adapter**（诊断面板显示为 **Gemini 4 诊断** / **Gemini 4 diagnostics**）；底层 npm 包名保持 `dsh-vertex-argon`，Host 注册名 `local-vertex-argon`，Provider ID `google-vertex-argon`。
-- 当前工程版本 `2.1.0`，支持 DSH `>=0.2.0-rc.2`；Node.js `^22.19.0 || >=24.0.0`。元数据以 [package.json](<../../package.json>) 为准。
+- 当前工程版本 `2.2.0`，支持 DSH `>=0.2.0-rc.2`；Node.js `^22.19.0 || >=24.0.0`。元数据以 [package.json](<../../package.json>) 为准。
 - 仅使用宿主公开的 `llm`、`storageDomain`、`typert`、`settings`、`tools` 与 Web Client Slots，不修改宿主源码、已安装归档或 profile。
 - `installGemini4PiAiPatch` 保留对原生 `google` / `google-vertex` 的 Gemini 4 调用修正；不引入隐式辅助模型请求。
 
-## 2. 双官方通道、六个模型 ID、两种协议路由
+## 2. 双官方通道、八个模型 ID、两种协议路由
 
 | 模型 | 连接目标 | `route` | 配置来源 |
 |---|---|---|---|
-| `gemini-4-argon` / `gemini-4-carbon` / `gemini-4-hydrogen` | Vertex AI | `google-vertex` | `vertexProtocol` / `vertexServiceTier` |
-| `gemini-4-argon-google` / `gemini-4-carbon-google` / `gemini-4-hydrogen-google` | Gemini API | `google-generative-ai` | `googleProtocol` / `googleServiceTier` |
+| `gemini-4-argon` / `gemini-4-carbon` / `gemini-4-hydrogen` / `gemini-4-neon` | Vertex AI | `google-vertex` | `vertexProtocol` / `vertexServiceTier` |
+| `gemini-4-argon-google` / `gemini-4-carbon-google` / `gemini-4-hydrogen-google` / `gemini-4-neon-google` | Gemini API | `google-generative-ai` | `googleProtocol` / `googleServiceTier` |
 
-六个模型 ID 由两条官方通道派生：Argon、Carbon 与 Hydrogen 共用通道配置，上游基础模型 ID 由 `officialUpstreamModel` 决定（`gemini-4-argon`、`gemini-4-carbon` 或 `gemini-4-hydrogen`）。诊断 `route` 只取 `google-vertex` 与 `google-generative-ai`，Inspector 直接按 `route` 显示官方通道名；云端 ID 查询也只覆盖这两个官方通道。
+八个模型 ID 由两条官方通道派生：Argon、Carbon、Hydrogen 与 Neon 共用通道配置，上游基础模型 ID 由 `officialUpstreamModel` 决定（`gemini-4-argon`、`gemini-4-carbon`、`gemini-4-hydrogen` 或 `gemini-4-neon`）。诊断 `route` 只取 `google-vertex` 与 `google-generative-ai`，Inspector 直接按 `route` 显示官方通道名；云端 ID 查询也只覆盖这两个官方通道。
 
 ```mermaid
 flowchart TD
-    U[DSH 模型选择] --> V[Vertex AI 通道：Argon / Carbon / Hydrogen]
-    U --> G[Gemini API 通道：Argon / Carbon / Hydrogen]
+    U[DSH 模型选择] --> V[Vertex AI 通道：Argon / Carbon / Hydrogen / Neon]
+    U --> G[Gemini API 通道：Argon / Carbon / Hydrogen / Neon]
     V --> P[显式协议与服务层级校验]
     G --> P
     P --> GC[GenerateContent 长解码与四项恢复机制]
@@ -44,7 +44,7 @@ flowchart TD
 
 ### 路由、连接与服务层级
 
-- [adapter.js](<../../adapter.js>)：六模型注册、配置快照与缓存失效、凭据解析和原生适配器补丁。Gemini API Key 与 Vertex Key 各自独立解析，互不回退。
+- [adapter.js](<../../adapter.js>)：八模型注册、配置快照与缓存失效、凭据解析和原生适配器补丁。Gemini API Key 与 Vertex Key 各自独立解析，互不回退。
 - [google-connection.js](<../../google-connection.js>)：创建 `GoogleGenAI` 与 Interactions 传输；显式 Key 覆盖、环境键与自定义 `baseURL` 支持官方通道隔离。
 - [service-level.js](<../../service-level.js>)：既有服务层级/PayGo 能力矩阵与真实回执提取；两条官方通道各自使用自己的矩阵，不互相沿用。
 

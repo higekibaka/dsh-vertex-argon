@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict'
 import {test as nodeTest} from 'node:test'
-import {createArgonAdapter,PROVIDER,MODEL,GOOGLE_API_MODEL,CARBON_MODEL,GOOGLE_API_CARBON_MODEL,HYDROGEN_MODEL,GOOGLE_API_HYDROGEN_MODEL} from '../adapter.js'
-import {contentHash,historyHash} from '../interactions-input.js'
+import {createArgonAdapter,PROVIDER,MODEL,GOOGLE_API_MODEL,CARBON_MODEL,GOOGLE_API_CARBON_MODEL,HYDROGEN_MODEL,GOOGLE_API_HYDROGEN_MODEL,NEON_MODEL,GOOGLE_API_NEON_MODEL,officialUpstreamModel} from '../adapter.js'
+import {contentHash,historyHash,buildInteractionRequest} from '../interactions-input.js'
+import {assertInteractionOptions} from '../interaction-adapter.js'
 import {createInteractionStateHub} from '../interaction-state.js'
 import {createResponseHub} from '../response-store.js'
 import {recordSchema} from '../diagnostic-store.js'
 const ctx={get:k=>k==='launchEnvironment'?{get:n=>['GOOGLE_API_KEY','GOOGLE_CLOUD_API_KEY'].includes(n)?{value:'fixture'}:undefined}:undefined}
-const cfg=()=>({maxTokens:65536,reasoning:'medium',longDecode:true,googleProtocol:'interactions',vertexProtocol:'generate-content',routes:{hasGoogle:true,hasVertex:true,hasGoogleCarbon:true,hasVertexCarbon:true,hasVertexHydrogen:true,hasGoogleHydrogen:true}})
+const cfg=()=>({maxTokens:65536,reasoning:'medium',longDecode:true,googleProtocol:'interactions',vertexProtocol:'generate-content',routes:{hasGoogle:true,hasVertex:true,hasGoogleCarbon:true,hasVertexCarbon:true,hasVertexHydrogen:true,hasGoogleHydrogen:true,hasVertexNeon:true,hasGoogleNeon:true}})
 const req=model=>({provider:PROVIDER,model,maxTokens:512,sessionId:'fixture-session',messages:[{role:'user',content:[{type:'text',text:'hello'}]}]})
 const collect=async stream=>{const out=[];for await(const c of stream)out.push(c);return out}
 const wire=[]
@@ -23,7 +24,7 @@ const stubFetch=async(input,init)=>{
  return sse(interactionEvents)
 }
 const test=(name,fn)=>nodeTest(name,async(...args)=>{globalThis.fetch=stubFetch;try{return await fn(...args)}finally{globalThis.fetch=hostFetch}})
-for(const [model,route,expectedUpstream]of [[GOOGLE_API_MODEL,'google-generative-ai','gemini-4-argon'],[MODEL,'google-vertex','gemini-4-argon'],[GOOGLE_API_CARBON_MODEL,'google-generative-ai','gemini-4-carbon'],[CARBON_MODEL,'google-vertex','gemini-4-carbon'],[GOOGLE_API_HYDROGEN_MODEL,'google-generative-ai','gemini-4-hydrogen'],[HYDROGEN_MODEL,'google-vertex','gemini-4-hydrogen']])test(route+' ('+model+'): selected Interactions reaches its exact endpoint through prepared DSH calls',async()=>{
+for(const [model,route,expectedUpstream]of [[GOOGLE_API_MODEL,'google-generative-ai','gemini-4-argon'],[MODEL,'google-vertex','gemini-4-argon'],[GOOGLE_API_CARBON_MODEL,'google-generative-ai','gemini-4-carbon'],[CARBON_MODEL,'google-vertex','gemini-4-carbon'],[GOOGLE_API_HYDROGEN_MODEL,'google-generative-ai','gemini-4-hydrogen'],[HYDROGEN_MODEL,'google-vertex','gemini-4-hydrogen'],[GOOGLE_API_NEON_MODEL,'google-generative-ai','gemini-4-neon'],[NEON_MODEL,'google-vertex','gemini-4-neon']])test(route+' ('+model+'): selected Interactions reaches its exact endpoint through prepared DSH calls',async()=>{
  const config=cfg();config.googleProtocol='interactions';config.vertexProtocol='interactions';let diagnostic
  const adapter=createArgonAdapter(ctx,config,undefined,undefined,d=>diagnostic=d)
  const prepared=await adapter.prepareCall(PROVIDER,model)
@@ -61,6 +62,32 @@ test('Interactions keeps Hydrogen native replay on the same model and degrades A
   assert.ok(JSON.stringify(degraded).includes('[Result of previously executed tool call h1]'))
  }
 })
+test('Interactions keeps Neon native replay on the same model and degrades Hydrogen/Carbon/Argon history to text',async()=>{
+ const config=cfg();config.googleProtocol='interactions';config.vertexProtocol='interactions'
+ const tools=[{name:'echo',description:'offline fixture only',parameters:{type:'object',properties:{value:{type:'string'}},required:['value']}}]
+ const user={role:'user',content:[{type:'text',text:'hello'}]}
+ const tool={role:'tool',toolCallId:'n1',toolName:'echo',content:[{type:'text',text:'ok'}],isError:false}
+ const encodedSig=Buffer.from('neon-signature').toString('base64')
+ const content=[{type:'text',text:'thinking',textSignature:encodedSig},{type:'tool-call',id:'n1',name:'echo',arguments:{value:'x'}}]
+ const steps=[{type:'thought',signature:encodedSig,content:[{type:'text',text:'thinking'}]},{type:'function_call',call_id:'n1',name:'echo',arguments:{value:'x'}}]
+ const historyOf=model=>[user,{role:'assistant',content,source:{provider:PROVIDER,model,replayState:{response:{api:'google-interactions-v1',provider:PROVIDER,model,route:'google-vertex',contentHash:contentHash(content),historyHash:historyHash([user]),steps}}}},tool]
+ const adapter=createArgonAdapter(ctx,config)
+ const same=await collect(adapter.stream({...req(NEON_MODEL),messages:historyOf(NEON_MODEL),tools}))
+ assert.equal(same.at(-1).reason.kind,'stop')
+ const native=wire.at(-1).body.input
+ assert.ok(native.some(row=>row&&row.type==='function_call'&&row.call_id==='n1'))
+ assert.ok(native.some(row=>row&&row.type==='thought'&&row.signature===encodedSig))
+ assert.equal(JSON.stringify(native).includes('[Previously executed tool'),false)
+ for(const from of [HYDROGEN_MODEL,GOOGLE_API_CARBON_MODEL,MODEL]){
+  const crossed=await collect(adapter.stream({...req(NEON_MODEL),messages:historyOf(from),tools}))
+  assert.equal(crossed.at(-1).reason.kind,'stop')
+  const degraded=wire.at(-1).body.input
+  assert.equal(degraded.some(row=>row&&(row.type==='function_call'||row.type==='function_result')),false)
+  assert.equal(JSON.stringify(degraded).includes(encodedSig),false)
+  assert.ok(JSON.stringify(degraded).includes('[Previously executed tool echo; call n1]'))
+  assert.ok(JSON.stringify(degraded).includes('[Result of previously executed tool call n1]'))
+ }
+})
 test('one route can use Interactions while the other retains GenerateContent',async()=>{
  const adapter=createArgonAdapter(ctx,cfg())
  await collect(adapter.stream(req(GOOGLE_API_MODEL)));assert.ok(wire.at(-1).url.endsWith('/interactions'))
@@ -83,6 +110,48 @@ test('Interactions narrows max to high on both Carbon routes regardless of the c
    const out=await collect(adapter.stream({...req(model),reasoningEffort:bad}))
    assert.equal(out.at(-1).reason.kind,'error')
    assert.match(JSON.stringify(out.at(-1).reason),/requires low, medium, or high thinking/)
+   assert.equal(wire.length,before)
+  }
+ }
+})
+test('Interactions allows xhigh and narrows max to xhigh on all Hydrogen and Neon routes regardless of default level',async()=>{
+ for(const model of [HYDROGEN_MODEL,GOOGLE_API_HYDROGEN_MODEL,NEON_MODEL,GOOGLE_API_NEON_MODEL]){
+  const expectedUpstream=officialUpstreamModel(model)
+  const route=model.endsWith('-google')?'google-generative-ai':'google-vertex'
+  const config={...cfg(),reasoning:'low'};config.googleProtocol='interactions';config.vertexProtocol='interactions'
+  assert.deepEqual(assertInteractionOptions({model,reasoningEffort:'xhigh',maxTokens:512},config,route),{maxTokens:512,reasoning:'xhigh'})
+  assert.deepEqual(assertInteractionOptions({model,reasoningEffort:'max',maxTokens:512},config,route),{maxTokens:512,reasoning:'xhigh'})
+  assert.throws(()=>assertInteractionOptions({model,reasoningEffort:'minimal',maxTokens:512},config,route),/requires low, medium, high, or xhigh thinking/)
+  const directBuilt=await buildInteractionRequest({...req(model),reasoningEffort:'xhigh'},{route,upstreamModel:expectedUpstream})
+  assert.equal(directBuilt.generation_config.thinking_level,'xhigh')
+  const directMax=await buildInteractionRequest({...req(model),reasoningEffort:'max'},{route,upstreamModel:expectedUpstream})
+  assert.equal(directMax.generation_config.thinking_level,'xhigh')
+
+  const adapter=createArgonAdapter(ctx,config)
+  const viaXhigh=await collect(adapter.stream({...req(model),reasoningEffort:'xhigh'}))
+  assert.equal(viaXhigh.at(-1).reason.kind,'stop')
+  assert.equal(wire.at(-1).body.generation_config.thinking_level,'xhigh')
+  assert.equal(wire.at(-1).body.model,expectedUpstream)
+
+  const viaMax=await collect(adapter.stream({...req(model),reasoningEffort:'max'}))
+  assert.equal(viaMax.at(-1).reason.kind,'stop')
+  assert.equal(wire.at(-1).body.generation_config.thinking_level,'xhigh')
+  assert.equal(wire.at(-1).body.model,expectedUpstream)
+
+  const prepared=await adapter.prepareCall(PROVIDER,model)
+  const preparedXhigh=await collect(prepared.stream({...req(model),reasoningEffort:'xhigh'}))
+  assert.equal(preparedXhigh.at(-1).reason.kind,'stop')
+  assert.equal(wire.at(-1).body.generation_config.thinking_level,'xhigh')
+
+  const preparedMax=await collect(prepared.stream({...req(model),reasoning:'max'}))
+  assert.equal(preparedMax.at(-1).reason.kind,'stop')
+  assert.equal(wire.at(-1).body.generation_config.thinking_level,'xhigh')
+
+  for(const bad of ['minimal','off']){
+   const before=wire.length
+   const out=await collect(adapter.stream({...req(model),reasoningEffort:bad}))
+   assert.equal(out.at(-1).reason.kind,'error')
+   assert.match(JSON.stringify(out.at(-1).reason),/requires low, medium, high, or xhigh thinking/)
    assert.equal(wire.length,before)
   }
  }

@@ -13,7 +13,14 @@ import {
   GOOGLE_API_CARBON_MODEL,
   HYDROGEN_MODEL,
   GOOGLE_API_HYDROGEN_MODEL,
+  NEON_MODEL,
+  GOOGLE_API_NEON_MODEL,
   isGoogleApiModel,
+  isHydrogenModel,
+  isNeonModel,
+  supportsXhighReasoning,
+  levelsForModel,
+  thinkingLevelMapFor,
   officialUpstreamModel,
   LEVELS,
   MAX_SINGLE_CALL_TOKENS,
@@ -304,24 +311,174 @@ test('auto-detects google & google-vertex Hydrogen configs and exposes all six o
   assert.equal(wire.length, before)
 })
 
-test('explicit routes and fallback detection carry Hydrogen flags without changing Argon defaults', () => {
-  const explicit = detectPiAiArgonRoutes(ctx, { hasVertex: true, hasGoogle: true, hasVertexHydrogen: true, hasGoogleHydrogen: true })
-  assert.deepEqual({ v: explicit.hasVertex, g: explicit.hasGoogle, va: explicit.hasVertexArgon, ga: explicit.hasGoogleArgon, vh: explicit.hasVertexHydrogen, gh: explicit.hasGoogleHydrogen }, { v: true, g: true, va: true, ga: true, vh: true, gh: true })
+test('auto-detects google & google-vertex Neon configs and exposes all eight official models', async () => {
+  assert.equal(isNeonModel(NEON_MODEL), true)
+  assert.equal(isNeonModel(GOOGLE_API_NEON_MODEL), true)
+  assert.equal(isNeonModel('models/gemini-4-neon'), true)
+  assert.equal(isNeonModel('models/gemini-4-neon-google'), true)
+  assert.equal(isNeonModel(HYDROGEN_MODEL), false)
+  assert.equal(isNeonModel(MODEL), false)
+  assert.equal(isHydrogenModel(NEON_MODEL), false)
+  assert.equal(supportsXhighReasoning(HYDROGEN_MODEL), true)
+  assert.equal(supportsXhighReasoning(GOOGLE_API_HYDROGEN_MODEL), true)
+  assert.equal(supportsXhighReasoning('models/gemini-4-hydrogen'), true)
+  assert.equal(supportsXhighReasoning(NEON_MODEL), true)
+  assert.equal(supportsXhighReasoning(GOOGLE_API_NEON_MODEL), true)
+  assert.equal(supportsXhighReasoning('models/gemini-4-neon'), true)
+  assert.equal(supportsXhighReasoning(MODEL), false)
+  assert.equal(supportsXhighReasoning(GOOGLE_API_CARBON_MODEL), false)
+  assert.deepEqual(levelsForModel(NEON_MODEL), ['low', 'medium', 'high', 'xhigh'])
+  assert.deepEqual(levelsForModel(CARBON_MODEL), ['low', 'medium', 'high'])
+  assert.equal(thinkingLevelMapFor(NEON_MODEL).xhigh, 'xhigh')
+  assert.equal(thinkingLevelMapFor(MODEL).xhigh, null)
+
+  assert.equal(isGoogleApiModel(NEON_MODEL), false)
+  assert.equal(isGoogleApiModel(GOOGLE_API_NEON_MODEL), true)
+  assert.equal(officialUpstreamModel(NEON_MODEL), NEON_MODEL)
+  assert.equal(officialUpstreamModel(GOOGLE_API_NEON_MODEL), NEON_MODEL)
+  assert.equal(officialUpstreamModel(HYDROGEN_MODEL), HYDROGEN_MODEL)
+  assert.equal(officialUpstreamModel(GOOGLE_API_CARBON_MODEL), CARBON_MODEL)
+  assert.equal(officialUpstreamModel(MODEL), MODEL)
+
+  const mockCtx = {
+    get: k => {
+      if (k === 'launchEnvironment') return { get: n => n === 'GOOGLE_CLOUD_API_KEY' || n === 'GOOGLE_API_KEY' ? { value: 'fixture-key' } : undefined }
+      if (k === 'configEditor') return {
+        entries: () => [{
+          options: {
+            id: 'llm-pi-ai',
+            config: {
+              providers: {
+                google: { apiKeyEnv: 'GOOGLE_API_KEY', models: [{ id: 'gemini-4-argon' }, { id: 'gemini-4-carbon' }, { id: 'models/gemini-4-hydrogen' }, { id: 'models/gemini-4-neon' }] },
+                'google-vertex': { models: [{ id: 'gemini-4-argon' }, { id: 'gemini-4-carbon' }, { id: 'models/gemini-4-hydrogen' }, { id: 'models/gemini-4-neon' }] },
+              },
+            },
+          },
+        }],
+      }
+    },
+  }
+  const detected = detectPiAiArgonRoutes(mockCtx)
+  assert.equal(detected.hasVertex, true)
+  assert.equal(detected.hasGoogle, true)
+  assert.equal(detected.hasVertexNeon, true)
+  assert.equal(detected.hasGoogleNeon, true)
+  const a = createArgonAdapter(mockCtx, { ...config, reasoning: 'low' })
+  const models = await a.listModels(PROVIDER)
+  assert.deepEqual(models.map(m => ({ id: m.id, name: m.name })), [
+    { id: MODEL, name: 'Gemini 4 Argon (Vertex AI)' },
+    { id: CARBON_MODEL, name: 'Gemini 4 Carbon (Vertex AI)' },
+    { id: HYDROGEN_MODEL, name: 'Gemini 4 Hydrogen (Vertex AI)' },
+    { id: NEON_MODEL, name: 'Gemini 4 Neon (Vertex AI)' },
+    { id: GOOGLE_API_MODEL, name: 'Gemini 4 Argon (Gemini API)' },
+    { id: GOOGLE_API_CARBON_MODEL, name: 'Gemini 4 Carbon (Gemini API)' },
+    { id: GOOGLE_API_HYDROGEN_MODEL, name: 'Gemini 4 Hydrogen (Gemini API)' },
+    { id: GOOGLE_API_NEON_MODEL, name: 'Gemini 4 Neon (Gemini API)' },
+  ])
+  for (const [id, api] of [[NEON_MODEL, 'google-vertex'], [GOOGLE_API_NEON_MODEL, 'google-generative-ai']]) {
+    const spec = a.inner.current().profiles.get(PROVIDER).piProvider.getModels().find(m => m.id === id)
+    assert.deepEqual({
+      api: spec.api,
+      reasoning: spec.reasoning,
+      input: spec.input,
+      contextWindow: spec.contextWindow,
+      maxTokens: spec.maxTokens,
+      thinkingLevelMap: spec.thinkingLevelMap,
+    }, {
+      api,
+      reasoning: true,
+      input: ['text', 'image'],
+      contextWindow: 1048576,
+      maxTokens: 65536,
+      thinkingLevelMap: { off: null, minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: null },
+    })
+    const resolved = await a.resolveModel(PROVIDER, id)
+    assert.deepEqual(resolved.reasoning.efforts.map(e => e.id), ['low', 'medium', 'high', 'xhigh'])
+  }
+
+  mode = 'text'
+  const outVertex = await collect(a.stream(req('high', NEON_MODEL)))
+  assert.deepEqual(outVertex.at(-1).reason, { kind: 'stop' })
+  assert.ok(wire.at(-1).url.includes('/v1beta1/'))
+  assert.ok(wire.at(-1).url.includes('models/gemini-4-neon:streamGenerateContent'))
+  assert.deepEqual(wire.at(-1).body.generationConfig.thinkingConfig, { thinkingLevel: 'HIGH', includeThoughts: true })
+
+  const outGoogle = await collect(a.stream(req('medium', GOOGLE_API_NEON_MODEL)))
+  assert.deepEqual(outGoogle.at(-1).reason, { kind: 'stop' })
+  assert.ok(wire.at(-1).url.includes('generativelanguage.googleapis.com'))
+  assert.ok(wire.at(-1).url.includes('models/gemini-4-neon:streamGenerateContent'))
+  assert.deepEqual(wire.at(-1).body.generationConfig.thinkingConfig, { thinkingLevel: 'MEDIUM', includeThoughts: true })
+
+  // Neon 同 Hydrogen 放行 xhigh、max -> xhigh，并剥离显式 cachedContent / cached_content。
+  for (const model of [NEON_MODEL, GOOGLE_API_NEON_MODEL]) {
+    const injectCache = payload => ({
+      ...payload,
+      cachedContent: 'cachedContents/fixture-top',
+      cached_content: 'cachedContents/fixture_top_snake',
+      config: {
+        ...payload.config,
+        cachedContent: 'cachedContents/fixture-cfg',
+        cached_content: 'cachedContents/fixture_cfg_snake',
+      },
+    })
+    const outXhigh = await collect(a.stream({ ...req('xhigh', model), onPayload: injectCache }))
+    assert.deepEqual(outXhigh.at(-1).reason, { kind: 'stop' })
+    assert.deepEqual(wire.at(-1).body.generationConfig.thinkingConfig, { thinkingLevel: 'XHIGH', includeThoughts: true })
+    assert.ok(!JSON.stringify(wire.at(-1).body).includes('thinkingBudget'))
+    assert.ok(!JSON.stringify(wire.at(-1).body).includes('cachedContent'))
+    assert.ok(!JSON.stringify(wire.at(-1).body).includes('cached_content'))
+
+    const viaEffort = await collect(a.stream(req('max', model)))
+    assert.deepEqual(viaEffort.at(-1).reason, { kind: 'stop' })
+    assert.deepEqual(wire.at(-1).body.generationConfig.thinkingConfig, { thinkingLevel: 'XHIGH', includeThoughts: true })
+
+    const prepared = await a.prepareCall(PROVIDER, model)
+    const viaReasoning = await collect(prepared.stream({ ...req(undefined, model), reasoning: 'max' }))
+    assert.deepEqual(viaReasoning.at(-1).reason, { kind: 'stop' })
+    assert.deepEqual(wire.at(-1).body.generationConfig.thinkingConfig, { thinkingLevel: 'XHIGH', includeThoughts: true })
+
+    const before = wire.length
+    for (const level of ['minimal', 'off']) await assert.rejects(collect(a.stream(req(level, model))), /does not support/)
+    assert.equal(wire.length, before)
+  }
+  mode = 'tool'
+})
+
+test('explicit routes and fallback detection carry Hydrogen and Neon flags without changing Argon defaults', () => {
+  const explicit = detectPiAiArgonRoutes(ctx, { hasVertex: true, hasGoogle: true, hasVertexHydrogen: true, hasGoogleHydrogen: true, hasVertexNeon: true, hasGoogleNeon: true })
+  assert.deepEqual({ v: explicit.hasVertex, g: explicit.hasGoogle, va: explicit.hasVertexArgon, ga: explicit.hasGoogleArgon, vh: explicit.hasVertexHydrogen, gh: explicit.hasGoogleHydrogen, vn: explicit.hasVertexNeon, gn: explicit.hasGoogleNeon }, { v: true, g: true, va: true, ga: true, vh: true, gh: true, vn: true, gn: true })
   assert.equal(detectPiAiArgonRoutes(ctx, { hasGoogle: true, hasGoogleHydrogen: true }).hasVertexHydrogen, false)
   assert.equal(detectPiAiArgonRoutes(ctx, { hasVertex: true, hasVertexHydrogen: true }).hasGoogleHydrogen, false)
+  assert.equal(detectPiAiArgonRoutes(ctx, { hasGoogle: true, hasGoogleNeon: true }).hasVertexNeon, false)
+  assert.equal(detectPiAiArgonRoutes(ctx, { hasVertex: true, hasVertexNeon: true }).hasGoogleNeon, false)
+  assert.equal(detectPiAiArgonRoutes(ctx, { hasVertex: false, hasVertexNeon: true }).hasVertex, true)
+  assert.equal(detectPiAiArgonRoutes(ctx, { hasGoogle: false, hasGoogleNeon: true }).hasGoogle, true)
 
-  // 无 configEditor 的兜底分支：保持只暴露 Vertex Argon，Hydrogen 明确关闭。
+  // 无 configEditor 的兜底分支：保持只暴露 Vertex Argon，Hydrogen 与 Neon 明确关闭。
   const fallback = detectPiAiArgonRoutes(ctx)
-  assert.deepEqual({ v: fallback.hasVertex, g: fallback.hasGoogle, va: fallback.hasVertexArgon, vh: fallback.hasVertexHydrogen, gh: fallback.hasGoogleHydrogen }, { v: true, g: false, va: true, vh: false, gh: false })
+  assert.deepEqual({ v: fallback.hasVertex, g: fallback.hasGoogle, va: fallback.hasVertexArgon, vh: fallback.hasVertexHydrogen, gh: fallback.hasGoogleHydrogen, vn: fallback.hasVertexNeon, gn: fallback.hasGoogleNeon }, { v: true, g: false, va: true, vh: false, gh: false, vn: false, gn: false })
 
-  // configEditor 里没有任何 gemini-4 模型时，Argon 默认回退必须同时排除 Carbon 与 Hydrogen。
+  // configEditor 里没有任何 gemini-4 模型时，Argon 默认回退必须同时排除 Carbon、Hydrogen 与 Neon。
   const emptyProviderCtx = {
     get: k => k === 'configEditor' ? {
       entries: () => [{ options: { id: 'llm-pi-ai', config: { providers: { google: { models: [] }, 'google-vertex': { models: [] } } } } }],
     } : undefined,
   }
   const empty = detectPiAiArgonRoutes(emptyProviderCtx)
-  assert.deepEqual({ v: empty.hasVertex, g: empty.hasGoogle, va: empty.hasVertexArgon, vh: empty.hasVertexHydrogen, gh: empty.hasGoogleHydrogen }, { v: true, g: false, va: true, vh: false, gh: false })
+  assert.deepEqual({ v: empty.hasVertex, g: empty.hasGoogle, va: empty.hasVertexArgon, vh: empty.hasVertexHydrogen, gh: empty.hasGoogleHydrogen, vn: empty.hasVertexNeon, gn: empty.hasGoogleNeon }, { v: true, g: false, va: true, vh: false, gh: false, vn: false, gn: false })
+
+  // 仅配置 Vertex Neon 时，不应强行回退注册 Vertex Argon，且名称不带 (Vertex AI) 后缀。
+  const neonOnlyCtx = {
+    get: k => k === 'configEditor' ? {
+      entries: () => [{ options: { id: 'llm-pi-ai', config: { providers: { google: { models: [] }, 'google-vertex': { models: [{ id: 'gemini-4-neon' }] } } } } }],
+    } : undefined,
+  }
+  const neonOnly = detectPiAiArgonRoutes(neonOnlyCtx)
+  assert.deepEqual({ v: neonOnly.hasVertex, g: neonOnly.hasGoogle, va: neonOnly.hasVertexArgon, vn: neonOnly.hasVertexNeon, gn: neonOnly.hasGoogleNeon }, { v: true, g: false, va: false, vn: true, gn: false })
+  const neonOnlyAdapter = createArgonAdapter(neonOnlyCtx, config)
+  assert.deepEqual(neonOnlyAdapter.inner.current().profiles.get(PROVIDER).piProvider.getModels().map(m => ({ id: m.id, name: m.name })), [
+    { id: NEON_MODEL, name: 'Gemini 4 Neon' },
+  ])
 })
 
 test('all three official levels survive SDK serialization with no thinkingBudget and use v1beta1 on Vertex', async () => {
@@ -351,6 +508,10 @@ test('narrowMaxReasoning only rewrites a max request and leaves other options un
   assert.deepEqual(narrowed, { reasoningEffort: 'high', reasoning: 'high', model: 'fixture' })
   assert.equal(narrowMaxReasoning({ reasoning: 'Max' }).reasoningEffort, 'high')
   assert.deepEqual(narrowMaxReasoning({ reasoning: 'medium', reasoningEffort: 'max' }), { reasoning: 'high', reasoningEffort: 'high' })
+  assert.equal(narrowMaxReasoning({ reasoningEffort: 'max', model: HYDROGEN_MODEL }).reasoningEffort, 'xhigh')
+  assert.equal(narrowMaxReasoning({ reasoningEffort: 'max', model: NEON_MODEL }).reasoningEffort, 'xhigh')
+  assert.equal(narrowMaxReasoning({ reasoning: 'MAX' }, GOOGLE_API_NEON_MODEL).reasoningEffort, 'xhigh')
+  assert.equal(narrowMaxReasoning({ reasoning: 'max' }, 'models/gemini-4-neon').reasoningEffort, 'xhigh')
   assert.equal(narrowMaxReasoning(undefined), undefined)
   assert.equal(narrowMaxReasoning(null), null)
   assert.equal(narrowMaxReasoning('max'), 'max')
@@ -425,6 +586,67 @@ test('installGemini4PiAiPatch also protects direct google/gemini-4-argon calls',
     const out = await collect(piAdapter.stream({ ...req('high'), provider: 'google' }))
     assert.deepEqual(out.at(-1).reason, { kind: 'tool-calls' })
     assert.deepEqual(wire.at(-1).body.generationConfig.thinkingConfig, { thinkingLevel: 'HIGH', includeThoughts: true })
+  } finally {
+    unpatch()
+  }
+})
+
+test('installGemini4PiAiPatch supports xhigh and strips cachedContent on native google/gemini-4-neon', async () => {
+  const unpatch = installGemini4PiAiPatch()
+  try {
+    const baseGoogle = googleProvider()
+    const rawNeon = {
+      id: NEON_MODEL,
+      name: 'Gemini 4 Neon',
+      provider: 'google',
+      api: 'google-generative-ai',
+      baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+      reasoning: false,
+      input: ['text', 'image'],
+      contextWindow: 1048576,
+      maxTokens: 65536,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    }
+    const customGoogle = { ...baseGoogle, id: 'google', name: 'Google', getModels: () => [rawNeon] }
+    const profiles = new Map([['google', {
+      provider: 'google',
+      displayName: 'Google',
+      piProvider: customGoogle,
+      reasoning: 'medium',
+      streamIdleTimeoutMs: 300000,
+      maxRequestImageBytes: 20971520,
+      requestImagePixelBudget: 4194304,
+      requestImageMaxBytes: 1048576,
+      retryPolicy: resolveRetryPolicy(undefined, 'test'),
+      modelErrors: new Map(),
+      configuredMaxTokens: new Map([[NEON_MODEL, 65536]]),
+    }]])
+    const piAdapter = new PiAiAdapter({
+      profiles: () => profiles,
+      resolveApiKey: async () => 'fixture-google-api-key',
+      auth: { authContext: { env: async () => undefined, fileExists: async () => false } },
+    })
+    const resolved = await piAdapter.resolveModel('google', NEON_MODEL)
+    assert.deepEqual(resolved.reasoning.efforts.map(e => e.id), ['low', 'medium', 'high', 'xhigh'])
+    mode = 'text'
+    const out = await collect(piAdapter.stream({
+      ...req('xhigh', NEON_MODEL),
+      provider: 'google',
+      onPayload: payload => ({
+        ...payload,
+        cachedContent: 'cachedContents/native-top',
+        cached_content: 'cachedContents/native_top',
+        config: { ...payload.config, cachedContent: 'cachedContents/native-cfg', cached_content: 'cachedContents/native_cfg' },
+      }),
+    }))
+    assert.deepEqual(out.at(-1).reason, { kind: 'stop' })
+    assert.deepEqual(wire.at(-1).body.generationConfig.thinkingConfig, { thinkingLevel: 'XHIGH', includeThoughts: true })
+    assert.ok(!JSON.stringify(wire.at(-1).body).includes('cachedContent'))
+    assert.ok(!JSON.stringify(wire.at(-1).body).includes('cached_content'))
+    const before = wire.length
+    for (const bad of ['minimal', 'off']) await assert.rejects(collect(piAdapter.stream({ ...req(bad, NEON_MODEL), provider: 'google' })), /does not support/)
+    assert.equal(wire.length, before)
+    mode = 'tool'
   } finally {
     unpatch()
   }
@@ -681,11 +903,19 @@ test('abort, config validation, legacy max listener migration and scoped registr
   }, Config({}))
   const migrated1 = await requestListener({}, async () => ({ provider: PROVIDER, model: GOOGLE_API_MODEL, reasoningEffort: 'max' }))
   assert.equal(migrated1.reasoningEffort, 'high')
-  // 钩子层也必须模型感知：Hydrogen 的 max 收敛到独有 xhigh，其余 Gemini 4 模型仍是 high。
+  // 钩子层也必须模型感知：Hydrogen 与 Neon 的 max 收敛到第四档 xhigh，其余 Gemini 4 模型仍是 high。
   const hydrogenNarrowed = await requestListener({}, async () => ({ provider: PROVIDER, model: HYDROGEN_MODEL, reasoningEffort: 'max' }))
   assert.equal(hydrogenNarrowed.reasoningEffort, 'xhigh')
   const nativeHydrogenNarrowed = await requestListener({}, async () => ({ provider: 'google-vertex', model: HYDROGEN_MODEL, reasoningEffort: 'max' }))
   assert.equal(nativeHydrogenNarrowed.reasoningEffort, 'xhigh')
+  const neonNarrowed = await requestListener({}, async () => ({ provider: PROVIDER, model: NEON_MODEL, reasoningEffort: 'max' }))
+  assert.equal(neonNarrowed.reasoningEffort, 'xhigh')
+  const googleNeonNarrowed = await requestListener({}, async () => ({ provider: PROVIDER, model: GOOGLE_API_NEON_MODEL, reasoningEffort: 'max' }))
+  assert.equal(googleNeonNarrowed.reasoningEffort, 'xhigh')
+  const nativeVertexNeon = await requestListener({}, async () => ({ provider: 'google-vertex', model: NEON_MODEL, reasoningEffort: 'max' }))
+  assert.equal(nativeVertexNeon.reasoningEffort, 'xhigh')
+  const nativeGoogleNeon = await requestListener({}, async () => ({ provider: 'google', model: 'models/gemini-4-neon', reasoningEffort: 'max' }))
+  assert.equal(nativeGoogleNeon.reasoningEffort, 'xhigh')
   const nativeCarbon = await requestListener({}, async () => ({ provider: 'google', model: 'gemini-4-carbon', reasoningEffort: 'max' }))
   assert.equal(nativeCarbon.reasoningEffort, 'high')
   cleanup()
@@ -915,7 +1145,7 @@ for (const route of ['google-generative-ai', 'google-vertex']) test(route + ': n
 })
 
 // —— 由已删除的 test/proxy-route.test.mjs 迁移：官方双通道凭据隔离 ——
-const officialConfig = { ...config, routes: { hasGoogle: true, hasVertex: true, hasVertexCarbon: true, hasGoogleCarbon: true, hasVertexHydrogen: true, hasGoogleHydrogen: true } }
+const officialConfig = { ...config, routes: { hasGoogle: true, hasVertex: true, hasVertexCarbon: true, hasGoogleCarbon: true, hasVertexHydrogen: true, hasGoogleHydrogen: true, hasVertexNeon: true, hasGoogleNeon: true } }
 test('Gemini API and Vertex AI official channels never share credentials', async () => {
   const channelKeys = { GOOGLE_API_KEY: 'google-only-key', GOOGLE_CLOUD_API_KEY: 'vertex-only-key' }
   const channelCtx = values => ({ get: k => k === 'launchEnvironment' ? { get: name => values[name] ? { value: values[name] } : undefined } : undefined })
@@ -965,6 +1195,10 @@ const crossSignature = Buffer.from('cross-model-tool-signature').toString('base6
 for (const [from, to] of [
   [CARBON_MODEL, CARBON_MODEL], [MODEL, CARBON_MODEL], [GOOGLE_API_MODEL, GOOGLE_API_CARBON_MODEL],
   [HYDROGEN_MODEL, HYDROGEN_MODEL], [HYDROGEN_MODEL, CARBON_MODEL], [GOOGLE_API_CARBON_MODEL, GOOGLE_API_HYDROGEN_MODEL],
+  [NEON_MODEL, NEON_MODEL], [GOOGLE_API_NEON_MODEL, GOOGLE_API_NEON_MODEL],
+  [NEON_MODEL, HYDROGEN_MODEL], [HYDROGEN_MODEL, NEON_MODEL],
+  [NEON_MODEL, CARBON_MODEL], [MODEL, NEON_MODEL],
+  [GOOGLE_API_MODEL, GOOGLE_API_NEON_MODEL], [NEON_MODEL, GOOGLE_API_NEON_MODEL],
 ]) test('generate-content signed tool history ' + from + ' -> ' + to, async () => {
   const a = createArgonAdapter(ctx, officialConfig)
   const user = createUserMessage({ content: [{ type: 'text', text: 'fixture' }], source: { kind: 'user' } })

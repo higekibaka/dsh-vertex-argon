@@ -2,6 +2,21 @@
 
 All notable changes to **Gemini 4 Adapter** (`dsh-vertex-argon`) are documented in this file.
 
+## [2.2.0] - 2026-11-19
+
+### Added
+- **Gemini 4 Neon Support Across Both Official Channels (`adapter.js`, `index.js`, `package.json`)**:
+  - Added `NEON_MODEL = 'gemini-4-neon'` (Vertex AI) and `GOOGLE_API_NEON_MODEL = 'gemini-4-neon-google'` (Gemini API), `isNeonModel()`, and `supportsXhighReasoning()` (`isHydrogenModel(modelId) || isNeonModel(modelId)`).
+  - Updated `isGoogleApiModel`, `officialUpstreamModel`, `detectPiAiArgonRoutes` (`hasVertexNeon` / `hasGoogleNeon` explicit, auto-detection, and empty Argon fallback), and `createArgonAdapter().getProfiles()` (`vn` / `gn` cache keys, `HYDROGEN_THINKING_MAP`), expanding the official matrix to 8 models with 1M context window (`1,048,576`), `65,536` single-hop / `1,048,576` long decode, four reasoning levels (`low` / `medium` / `high` / `xhigh`, `max` → `xhigh`, rejecting `minimal` / `off`), and outbound `cachedContent` / `cached_content` stripping.
+
+### Fixed
+- **Interactions `xhigh` & `max` → `xhigh` Convergence Parity (`interaction-adapter.js`, `interactions-input.js`, `adapter.js`, `index.js`)**:
+  - Updated `assertInteractionOptions` and `buildInteractionRequest` to share model-scoped validation (`supportsXhighReasoning`), allowing `['low', 'medium', 'high', 'xhigh']` and narrowing `max` → `xhigh` for both `gemini-4-hydrogen*` and `gemini-4-neon*` across `adapter.stream`, `prepareCall().stream`, and `agent/request` hooks, while keeping Argon and Carbon strictly 3-level (`max` → `high`) and rejecting unsupported efforts before dispatch.
+
+### Changed
+- **Settings UI, Locale & Documentation (`client.js`, `locale/zh.json`, `locale/en.json`, `README.md`, `AGENTS.md`, `docs/implementation/`)**:
+  - Bumped version to `2.2.0`, added `gemini-4-neon` keyword, and updated Chinese and English descriptions and setup instructions for the 8-model matrix and Hydrogen/Neon `XHigh` support.
+
 ## [2.1.0] - 2026-11-15
 
 ### Added

@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Gemini 4 Adapter",
-    "description": "Official Vertex AI and Gemini API Gemini 4 adapter for DSH (Argon, Carbon and Hydrogen): resilient multi-hop long decode, explicit protocols and service tiers, background recovery, and request diagnostics."
+    "description": "Official Vertex AI and Gemini API Gemini 4 adapter for DSH (Argon, Carbon, Hydrogen and Neon): resilient multi-hop long decode, explicit protocols and service tiers, background recovery, and request diagnostics."
   }
 }

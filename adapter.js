@@ -27,18 +27,26 @@ export const CARBON_MODEL = 'gemini-4-carbon'
 export const GOOGLE_API_CARBON_MODEL = 'gemini-4-carbon-google'
 export const HYDROGEN_MODEL = 'gemini-4-hydrogen'
 export const GOOGLE_API_HYDROGEN_MODEL = 'gemini-4-hydrogen-google'
-/** Gemini API 官方直连模型判定（Argon、Carbon 与 Hydrogen）。 */
+export const NEON_MODEL = 'gemini-4-neon'
+export const GOOGLE_API_NEON_MODEL = 'gemini-4-neon-google'
+/** Gemini API 官方直连模型判定（Argon、Carbon、Hydrogen 与 Neon）。 */
 export function isGoogleApiModel(modelId) {
-  return modelId === GOOGLE_API_MODEL || modelId === GOOGLE_API_CARBON_MODEL || modelId === GOOGLE_API_HYDROGEN_MODEL
+  return (
+    modelId === GOOGLE_API_MODEL ||
+    modelId === GOOGLE_API_CARBON_MODEL ||
+    modelId === GOOGLE_API_HYDROGEN_MODEL ||
+    modelId === GOOGLE_API_NEON_MODEL
+  )
 }
 /** 官方直连（Vertex AI / Gemini API）对应的上游模型 ID。 */
 export function officialUpstreamModel(modelId) {
+  if (modelId === NEON_MODEL || modelId === GOOGLE_API_NEON_MODEL) return NEON_MODEL
   if (modelId === HYDROGEN_MODEL || modelId === GOOGLE_API_HYDROGEN_MODEL) return HYDROGEN_MODEL
   return modelId === CARBON_MODEL || modelId === GOOGLE_API_CARBON_MODEL ? CARBON_MODEL : MODEL
 }
 export const LEVELS = ['low', 'medium', 'high']
 /**
- * Gemini 4 Hydrogen 独有的第四档 xhigh（官方默认 high）。
+ * Gemini 4 Hydrogen 与 Neon 支持的第四档 xhigh（官方默认 high）。
  * Argon / Carbon 的允许集合必须严格维持三档，绝不泄漏 xhigh。
  */
 export const HYDROGEN_LEVELS = ['low', 'medium', 'high', 'xhigh']
@@ -47,7 +55,7 @@ export const MAX_LONG_DECODE_TOKENS = 1048576
 const COMPACTION_HEADROOM_FLOOR = 131072
 const ENV_KEYS = ['GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_CLOUD_PROJECT', 'GCLOUD_PROJECT', 'GOOGLE_CLOUD_LOCATION', 'GOOGLE_CLOUD_API_KEY']
 const DEFAULT_THINKING_MAP = { off: null, minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: null, max: null }
-/** Hydrogen 的档位映射：唯一一处把 xhigh 放行到 thinkingConfig 的地方。 */
+/** Hydrogen 与 Neon 的档位映射：把 xhigh 放行到 thinkingConfig。 */
 const HYDROGEN_THINKING_MAP = { off: null, minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: null }
 
 /** Hydrogen 模型 ID 判定：同时识别 `gemini-4-hydrogen` 与 `gemini-4-hydrogen-google`（可带 models/ 前缀）。 */
@@ -55,14 +63,24 @@ export function isHydrogenModel(modelId) {
   return typeof modelId === 'string' && /^(?:models\/)?gemini-4-hydrogen(?:-google)?$/i.test(modelId)
 }
 
-/** 模型对应的合法思考档位集合：只有 Hydrogen 拿到 xhigh。 */
-export function levelsForModel(modelId) {
-  return isHydrogenModel(modelId) ? HYDROGEN_LEVELS : LEVELS
+/** Neon 模型 ID 判定：同时识别 `gemini-4-neon` 与 `gemini-4-neon-google`（可带 models/ 前缀）。 */
+export function isNeonModel(modelId) {
+  return typeof modelId === 'string' && /^(?:models\/)?gemini-4-neon(?:-google)?$/i.test(modelId)
 }
 
-/** 模型对应的档位映射表：Hydrogen 放行 xhigh，其余模型仍为 null。 */
+/** 判断模型是否支持 xhigh 第四档思考及对应无显式缓存限制（Hydrogen 与 Neon）。 */
+export function supportsXhighReasoning(modelId) {
+  return isHydrogenModel(modelId) || isNeonModel(modelId)
+}
+
+/** 模型对应的合法思考档位集合：Hydrogen 与 Neon 放行 xhigh。 */
+export function levelsForModel(modelId) {
+  return supportsXhighReasoning(modelId) ? HYDROGEN_LEVELS : LEVELS
+}
+
+/** 模型对应的档位映射表：Hydrogen 与 Neon 放行 xhigh，其余模型仍为 null。 */
 export function thinkingLevelMapFor(modelId) {
-  return isHydrogenModel(modelId) ? HYDROGEN_THINKING_MAP : DEFAULT_THINKING_MAP
+  return supportsXhighReasoning(modelId) ? HYDROGEN_THINKING_MAP : DEFAULT_THINKING_MAP
 }
 
 // The host's agent/request hook already narrows 'max' to 'high'. Direct adapter
@@ -72,8 +90,8 @@ export function narrowMaxReasoning(options, modelId = options?.model) {
   if (!options || typeof options !== 'object') return options
   const requested = [options.reasoning, options.reasoningEffort]
   if (!requested.some(value => typeof value === 'string' && value.toLowerCase() === 'max')) return options
-  // Hydrogen 的最高档是 xhigh；其余模型仍是 high。
-  const ceiling = isHydrogenModel(modelId) ? 'xhigh' : 'high'
+  // Hydrogen 与 Neon 的最高档是 xhigh；其余模型仍是 high。
+  const ceiling = supportsXhighReasoning(modelId) ? 'xhigh' : 'high'
   return { ...options, reasoning: ceiling, reasoningEffort: ceiling }
 }
 
@@ -99,6 +117,8 @@ export function detectPiAiArgonRoutes(ctx, explicitRoutes) {
     const hasGoogleCarbon = Boolean(explicitRoutes.hasGoogleCarbon)
     const hasVertexHydrogen = Boolean(explicitRoutes.hasVertexHydrogen)
     const hasGoogleHydrogen = Boolean(explicitRoutes.hasGoogleHydrogen)
+    const hasVertexNeon = Boolean(explicitRoutes.hasVertexNeon)
+    const hasGoogleNeon = Boolean(explicitRoutes.hasGoogleNeon)
     const hasVertexArgon = explicitRoutes.hasVertexArgon !== undefined
       ? Boolean(explicitRoutes.hasVertexArgon)
       : explicitRoutes.hasVertex !== false
@@ -106,14 +126,16 @@ export function detectPiAiArgonRoutes(ctx, explicitRoutes) {
       ? Boolean(explicitRoutes.hasGoogleArgon)
       : Boolean(explicitRoutes.hasGoogle)
     return {
-      hasVertex: hasVertexArgon || hasVertexCarbon || hasVertexHydrogen,
-      hasGoogle: hasGoogleArgon || hasGoogleCarbon || hasGoogleHydrogen,
+      hasVertex: hasVertexArgon || hasVertexCarbon || hasVertexHydrogen || hasVertexNeon,
+      hasGoogle: hasGoogleArgon || hasGoogleCarbon || hasGoogleHydrogen || hasGoogleNeon,
       hasVertexArgon,
       hasGoogleArgon,
       hasVertexCarbon,
       hasGoogleCarbon,
       hasVertexHydrogen,
       hasGoogleHydrogen,
+      hasVertexNeon,
+      hasGoogleNeon,
       googleApiKeyEnv: googleKeyEnvironment(explicitRoutes.googleApiKeyEnv),
       googleBaseUrl: explicitRoutes.googleBaseUrl,
       vertexBaseUrl: explicitRoutes.vertexBaseUrl,
@@ -135,17 +157,21 @@ export function detectPiAiArgonRoutes(ctx, explicitRoutes) {
       const hasVertexCarbon = hasModel(vertexModels, /^(?:models\/)?gemini-4-carbon\b/i)
       const hasGoogleHydrogen = hasModel(googleModels, /^(?:models\/)?gemini-4-hydrogen\b/i)
       const hasVertexHydrogen = hasModel(vertexModels, /^(?:models\/)?gemini-4-hydrogen\b/i)
-      const hasGoogle = hasGoogleArgon || hasGoogleCarbon || hasGoogleHydrogen
-      const hasVertex = hasVertexArgon || hasVertexCarbon || hasVertexHydrogen || !hasGoogle
+      const hasGoogleNeon = hasModel(googleModels, /^(?:models\/)?gemini-4-neon\b/i)
+      const hasVertexNeon = hasModel(vertexModels, /^(?:models\/)?gemini-4-neon\b/i)
+      const hasGoogle = hasGoogleArgon || hasGoogleCarbon || hasGoogleHydrogen || hasGoogleNeon
+      const hasVertex = hasVertexArgon || hasVertexCarbon || hasVertexHydrogen || hasVertexNeon || !hasGoogle
       return {
         hasVertex,
         hasGoogle,
-        hasVertexArgon: hasVertexArgon || (!hasGoogle && !hasVertexCarbon && !hasVertexHydrogen),
+        hasVertexArgon: hasVertexArgon || (!hasGoogle && !hasVertexCarbon && !hasVertexHydrogen && !hasVertexNeon),
         hasGoogleArgon,
         hasVertexCarbon,
         hasGoogleCarbon,
         hasVertexHydrogen,
         hasGoogleHydrogen,
+        hasVertexNeon,
+        hasGoogleNeon,
         googleApiKeyEnv: googleKeyEnvironment(readVal(googleCfg?.apiKeyEnv)),
         googleBaseUrl: readVal(googleCfg?.baseURL),
         vertexBaseUrl: readVal(vertexCfg?.baseURL),
@@ -161,6 +187,8 @@ export function detectPiAiArgonRoutes(ctx, explicitRoutes) {
     hasGoogleCarbon: false,
     hasVertexHydrogen: false,
     hasGoogleHydrogen: false,
+    hasVertexNeon: false,
+    hasGoogleNeon: false,
     googleApiKeyEnv: 'GOOGLE_API_KEY',
   }
 }
@@ -304,19 +332,19 @@ export function gemini4StreamSimple(
   ensureGemini4ApiClientPatch()
   const fallback = defaultLevel ?? (/cyber-permissive/i.test(requestModel?.id ?? '') ? 'high' : 'medium')
   const modelId = requestModel?.id
-  const hydrogen = isHydrogenModel(modelId)
+  const supportsXhigh = supportsXhighReasoning(modelId)
   const requestedLevel = options.reasoning ?? fallback
-  // max 按目标模型收敛：Hydrogen 收到独有最高档 xhigh，其余模型仍是 high。
+  // max 按目标模型收敛：Hydrogen 与 Neon 收到四档最高档 xhigh，Argon / Carbon 仍是 high。
   const rawLevel = typeof requestedLevel === 'string' && requestedLevel.toLowerCase() === 'max'
-    ? (hydrogen ? 'xhigh' : 'high')
+    ? (supportsXhigh ? 'xhigh' : 'high')
     : (typeof requestedLevel === 'string' ? requestedLevel.toLowerCase() : requestedLevel)
   const mapped = requestModel?.thinkingLevelMap?.[rawLevel] ?? rawLevel
   const level = typeof mapped === 'string' ? mapped.toLowerCase() : fallback
   if (!levelsForModel(modelId).includes(level)) {
     throw new LlmError(
-      hydrogen
-        ? 'Gemini 4 Hydrogen requires low, medium, high or xhigh.'
-        : 'Gemini 4 (Argon / Carbon / Hydrogen) requires low, medium or high.',
+      supportsXhigh
+        ? 'Gemini 4 (Hydrogen / Neon) requires low, medium, high or xhigh.'
+        : 'Gemini 4 (Argon / Carbon) requires low, medium or high.',
       'UNSUPPORTED_REASONING_EFFORT',
     )
   }
@@ -358,13 +386,13 @@ export function gemini4StreamSimple(
         }
         body = signatures.restorePayload(body)
         if (structuredOutput) body = structuredOutput.generateContent(body)
-        // Gemini 4 Hydrogen 官方不支持显式缓存（cachedContents），残留字段会被上游拒绝。
-        if (hydrogen) {
+        // Gemini 4 Hydrogen / Neon 官方不支持显式缓存（cachedContents），残留字段会被上游拒绝。
+        if (supportsXhigh) {
           delete body.cachedContent
           delete body.cached_content
         }
         const { temperature: _t, topP: _tp, topK: _tk, candidateCount: _cc, frequencyPenalty: _fp, presencePenalty: _pp, ...cleanConfig } = body.config
-        if (hydrogen) {
+        if (supportsXhigh) {
           delete cleanConfig.cachedContent
           delete cleanConfig.cached_content
         }
@@ -596,7 +624,7 @@ export class ArgonAdapter extends LlmAdapter {
     if (provider === PROVIDER && cfg) resolveServicePolicy(cfg, googleApi ? 'google-generative-ai' : 'google-vertex', protocol)
     const prepared = await this.inner.prepareCall(provider, model, signal)
     if (provider === PROVIDER && protocol === 'interactions' && this.interactionHandler) {
-      return { model: prepared.model, stream: options => this.interactionHandler(narrowMaxReasoning(options, model), cfg) }
+      return { model: prepared.model, stream: options => this.interactionHandler(narrowMaxReasoning(options && typeof options === 'object' && !options.model ? { ...options, model } : options, model), cfg) }
     }
     return { ...prepared, stream: options => prepared.stream(generateContentHistory(narrowMaxReasoning(options, model), model)) }
   }
@@ -666,6 +694,8 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
       gc: detected.hasGoogleCarbon,
       vh: detected.hasVertexHydrogen,
       gh: detected.hasGoogleHydrogen,
+      vn: detected.hasVertexNeon,
+      gn: detected.hasGoogleNeon,
       ge: detected.googleApiKeyEnv,
       gb: detected.googleBaseUrl,
       vb: detected.vertexBaseUrl,
@@ -742,6 +772,21 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       })
     }
+    if (detected.hasVertexNeon) {
+      models.push({
+        id: NEON_MODEL,
+        name: detected.hasGoogle ? 'Gemini 4 Neon (Vertex AI)' : 'Gemini 4 Neon',
+        provider: PROVIDER,
+        api: 'google-vertex',
+        baseUrl: detected.vertexBaseUrl || 'https://{location}-aiplatform.googleapis.com',
+        reasoning: true,
+        input: ['text', 'image'],
+        contextWindow: cfg.contextWindow,
+        maxTokens: cfg.maxTokens,
+        thinkingLevelMap: { ...HYDROGEN_THINKING_MAP },
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      })
+    }
     if (detected.hasGoogleArgon ?? detected.hasGoogle) {
       models.push({
         id: GOOGLE_API_MODEL,
@@ -776,6 +821,21 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
       models.push({
         id: GOOGLE_API_HYDROGEN_MODEL,
         name: 'Gemini 4 Hydrogen (Gemini API)',
+        provider: PROVIDER,
+        api: 'google-generative-ai',
+        baseUrl: detected.googleBaseUrl || 'https://generativelanguage.googleapis.com/v1beta',
+        reasoning: true,
+        input: ['text', 'image'],
+        contextWindow: cfg.contextWindow,
+        maxTokens: cfg.maxTokens,
+        thinkingLevelMap: { ...HYDROGEN_THINKING_MAP },
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      })
+    }
+    if (detected.hasGoogleNeon) {
+      models.push({
+        id: GOOGLE_API_NEON_MODEL,
+        name: 'Gemini 4 Neon (Gemini API)',
         provider: PROVIDER,
         api: 'google-generative-ai',
         baseUrl: detected.googleBaseUrl || 'https://generativelanguage.googleapis.com/v1beta',
