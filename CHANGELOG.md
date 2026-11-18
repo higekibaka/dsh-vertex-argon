@@ -2,6 +2,17 @@
 
 All notable changes to **Gemini 4 Adapter** (`dsh-vertex-argon`) are documented in this file.
 
+## [2.2.5] - 2026-11-19
+
+### Fixed
+- **Same-Chunk Unsigned-to-Signed Part Boundaries (`google-signatures.js`)**:
+  - Tracked `currentFromThisChunk` inside `observe(chunk)` so an unsigned part followed immediately by a signed part (`text` or `thinking`) within the same `candidates[0].content.parts` array always splits 1:1 into separate blocks while preserving cross-chunk delta merging.
+- **Strict `extraBody` Effort/Null Hardening & Direct-Provider Origin Pinning (`adapter.js`)**:
+  - Added `'reasoningEffort'`, `'reasoning_effort'`, `'thinkingLevel'`, and `'thinking_level'` to `EXTRA_BODY_STRIPPED_KEYS` (and stripped `reasoningEffort` / `reasoning_effort` on `body` & `cleanConfig` in `gemini4StreamSimple`), and rejected explicit `null` / non-plain-object values for `httpOptions.extraBody`, `extraBody.generationConfig`, and `extraBody.generation_config` with `INVALID_REQUEST`.
+  - Pinned `baseUrl` and `contextWindow` on `effectiveModel` in `argonProvider.streamSimple` from `configured` alongside `id`, `provider`, `api`, `maxTokens`, `thinkingLevelMap`, and `[MAX_TOKENS_CEILING]`.
+- **Two-Stage `apply()` Cleanup Rollback (`index.js`)**:
+  - Rolled back both `registration?.()` and `unpatchPiAi()` in `try/finally` inside both the `ctx.effect` disposer and `catch` handler if `ctx.effect(...)` throws after `ctx.llm.registerAdapter()` has succeeded.
+
 ## [2.2.4] - 2026-11-19
 
 ### Fixed

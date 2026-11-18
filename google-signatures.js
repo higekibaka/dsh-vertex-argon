@@ -115,7 +115,7 @@ export function createGoogleSignatureBridge(context, model) {
   const historyDigest = history.digest('hex')
   const content = [], pending = [], standalone = new Map(), usedToolIds = new Set()
   const partial = { role: 'assistant', api: model.api, provider: model.provider, model: model.id, content }
-  let current, currentSignedInThisChunk = false, seen = false, bytes = 0
+  let current, currentFromThisChunk = false, seen = false, bytes = 0
   const emit = event => {
     if (pending.length >= 32768) throw failure('Google response exceeded the bounded pending event count.')
     pending.push({ ...event, partial })
@@ -136,7 +136,7 @@ export function createGoogleSignatureBridge(context, model) {
       ...(sig ? { contentSignature: sig } : {}),
     })
     current = undefined
-    currentSignedInThisChunk = false
+    currentFromThisChunk = false
   }
   const finishMessage = message => {
     close()
@@ -160,7 +160,7 @@ export function createGoogleSignatureBridge(context, model) {
     },
     observe(chunk) {
       seen = true
-      currentSignedInThisChunk = false
+      currentFromThisChunk = false
       for (const part of chunk.candidates?.[0]?.content?.parts ?? []) {
         bytes += Buffer.byteLength(JSON.stringify(part))
         if (bytes > 64 * 1024 * 1024) throw failure('Google response exceeded the bounded signature replay buffer.')
@@ -180,10 +180,12 @@ export function createGoogleSignatureBridge(context, model) {
         if (part.text !== undefined) {
           const type = part.thought === true ? 'thinking' : 'text'
           const sigKey = type === 'text' ? 'textSignature' : 'thinkingSignature'
+          const sameChunkSigBoundary = currentFromThisChunk && (Boolean(current?.[sigKey]) || Boolean(sig))
           const splitSigned = type === 'text'
-            ? (Boolean(current?.textSignature) || (Boolean(sig) && part.text === ''))
-            : ((Boolean(sig) && (Boolean(current?.thinkingSignature) || part.text === '')) ||
-               (Boolean(current?.thinkingSignature) && (currentSignedInThisChunk || current.thinking === '')))
+            ? (Boolean(current?.textSignature) || sameChunkSigBoundary || (Boolean(sig) && part.text === ''))
+            : (sameChunkSigBoundary ||
+               (Boolean(sig) && (Boolean(current?.thinkingSignature) || part.text === '')) ||
+               (Boolean(current?.thinkingSignature) && current.thinking === ''))
           if (!current || current.type !== type || splitSigned) {
             close(); current = type === 'text' ? { type, text: '' } : { type, thinking: '' }
             const index = start(current)
@@ -191,10 +193,8 @@ export function createGoogleSignatureBridge(context, model) {
           }
           const key = type === 'text' ? 'text' : 'thinking'
           current[key] += part.text
-          if (sig) {
-            current[sigKey] = sig
-            if (type === 'thinking') currentSignedInThisChunk = true
-          }
+          currentFromThisChunk = true
+          if (sig) current[sigKey] = sig
           emit({ type: type === 'text' ? 'text_delta' : 'thinking_delta', contentIndex: content.length - 1, delta: part.text })
         }
         if (part.functionCall) {

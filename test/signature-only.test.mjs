@@ -206,6 +206,8 @@ test('createGoogleSignatureBridge scopes demoted toolCallId FIFO queue across tu
 for (const [label, wireParts] of [
   ['adjacent signed text parts', [{ text: 'A', thoughtSignature: S1 }, { text: 'B', thoughtSignature: S2 }]],
   ['plain text followed by signed empty text part', [{ text: 'A' }, { text: '', thoughtSignature: S1 }]],
+  ['same-chunk unsigned text followed by signed text part', [{ text: 'A' }, { text: 'B', thoughtSignature: S1 }]],
+  ['same-chunk unsigned thinking followed by signed thinking part', [{ thought: true, text: 'T1' }, { thought: true, text: 'T2', thoughtSignature: S2 }, { text: 'ans' }]],
 ]) test(GOOGLE_API_MODEL + ': ' + label + ' preserve 1:1 part boundaries on next turn', async () => {
   const sent = []; let calls = 0
   globalThis.fetch = async (_url, init) => { sent.push(JSON.parse(init.body)); return sse(++calls === 1 ? wireParts : [{ text: 'next' }]) }

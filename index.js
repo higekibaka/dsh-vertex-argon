@@ -123,11 +123,18 @@ export function apply(ctx, config) {
   try {
     registration = ctx.llm.registerAdapter([PROVIDER], adapter)
     ctx.effect(() => () => {
-      unpatchPiAi()
-      registration?.()
+      try {
+        registration?.()
+      } finally {
+        unpatchPiAi()
+      }
     })
   } catch (error) {
-    unpatchPiAi()
+    try {
+      registration?.()
+    } finally {
+      unpatchPiAi()
+    }
     throw error
   }
   if (typeof ctx.on === 'function') {

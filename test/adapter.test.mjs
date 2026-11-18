@@ -1824,3 +1824,117 @@ test('fourth review fixes: extraBody thinking sanitization, omitted onPayload ma
     mode = 'tool'
   }
 })
+
+test('fifth review fixes: extraBody reasoningEffort/null validation, pinned baseUrl/contextWindow, and two-stage apply rollback', async () => {
+  mode = 'text'
+  try {
+    const adapter5 = createArgonAdapter(ctx, { longDecode: true, maxTokens: 32768, routes: { hasVertexNeon: true } })
+    const snap5 = adapter5.inner.current()
+    const provider5 = snap5.profiles.get(PROVIDER).piProvider
+    const neon5 = snap5.models.getModel(PROVIDER, NEON_MODEL)
+
+    // 1. extraBody 剥离 reasoningEffort / reasoning_effort / thinkingLevel，且 null 一律按 INVALID_REQUEST 拒收。
+    const evEffort = []
+    for await (const ev of provider5.streamSimple(neon5, { messages: [{ role: 'user', content: 'hi', timestamp: 0 }] }, {
+      apiKey: 'fixture-key',
+      reasoning: 'low',
+      maxTokens: 1024,
+      onPayload: p => ({
+        ...p,
+        config: {
+          ...p.config,
+          reasoningEffort: 'MAX',
+          httpOptions: {
+            extraBody: {
+              reasoningEffort: 'MAX',
+              reasoning_effort: 'xhigh',
+              generationConfig: { reasoningEffort: 'HIGH', thinkingLevel: 'HIGH', customFlag: 'keep-5' },
+            },
+          },
+        },
+      }),
+    })) evEffort.push(ev)
+    assert.equal(evEffort.at(-1).type, 'done')
+    assert.deepEqual(wire.at(-1).body.generationConfig.thinkingConfig, { thinkingLevel: 'LOW', includeThoughts: true })
+    assert.equal(wire.at(-1).body.reasoningEffort, undefined)
+    assert.equal(wire.at(-1).body.reasoning_effort, undefined)
+    assert.equal(wire.at(-1).body.generationConfig.reasoningEffort, undefined)
+    assert.equal(wire.at(-1).body.generationConfig.thinkingLevel, undefined)
+    assert.equal(wire.at(-1).body.generationConfig.customFlag, 'keep-5')
+
+    for (const badHttp of [
+      { extraBody: null },
+      { extraBody: { generationConfig: null } },
+      { extraBody: { generation_config: null } },
+    ]) {
+      const beforeNullWire = wire.length
+      const errEvents = []
+      for await (const ev of provider5.streamSimple(neon5, { messages: [{ role: 'user', content: 'hi', timestamp: 0 }] }, {
+        apiKey: 'fixture-key',
+        maxTokens: 512,
+        onPayload: p => ({ ...p, config: { ...p.config, httpOptions: badHttp } }),
+      })) errEvents.push(ev)
+      assert.equal(errEvents.at(-1).type, 'error')
+      assert.match(errEvents.at(-1).error?.errorMessage ?? '', /must be a plain object/)
+      assert.equal(wire.length, beforeNullWire)
+    }
+
+    // 2. argonProvider.streamSimple 钉死 configured.baseUrl 与 configured.contextWindow，克隆描述符无法改写出站地址。
+    const clonedEvil = {
+      ...JSON.parse(JSON.stringify(neon5)),
+      baseUrl: 'https://evil.example/v1',
+      contextWindow: 4096,
+    }
+    const pinnedEvents = []
+    for await (const ev of provider5.streamSimple(clonedEvil, { messages: [{ role: 'user', content: 'hi', timestamp: 0 }] }, {
+      apiKey: 'fixture-key',
+      maxTokens: 512,
+    })) pinnedEvents.push(ev)
+    assert.equal(pinnedEvents.at(-1).type, 'done')
+    assert.ok(!wire.at(-1).url.startsWith('https://evil.example'))
+
+    // 3. apply(): registerAdapter 成功后 ctx.effect 抛错时同时撤销 registration() 与全局补丁租约。
+    ensureGemini4ApiClientPatch()()
+    const apiProto = Object.getPrototypeOf(new GoogleGenAI({ apiKey: 'probe' }).apiClient)
+    const origRequestStream = apiProto.requestStream
+    const baseGoogle = googleProvider()
+    const rawNeon = {
+      id: NEON_MODEL, name: 'Gemini 4 Neon', provider: 'google', api: 'google-generative-ai',
+      baseUrl: 'https://generativelanguage.googleapis.com/v1beta', reasoning: false, input: ['text'], contextWindow: 1048576, maxTokens: 131072,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    }
+    const piProvider = { ...baseGoogle, id: 'google', name: 'Google', getModels: () => [rawNeon] }
+    const profiles = new Map([['google', {
+      provider: 'google', displayName: 'Google', piProvider, reasoning: undefined, streamIdleTimeoutMs: 300000,
+      maxRequestImageBytes: 20971520, requestImagePixelBudget: 4194304, requestImageMaxBytes: 1048576,
+      retryPolicy: resolveRetryPolicy(undefined, 'test'), modelErrors: new Map(), configuredMaxTokens: new Map([[NEON_MODEL, 131072]]),
+    }]])
+    const piAdapter = new PiAiAdapter({
+      profiles: () => profiles,
+      resolveApiKey: async () => 'fixture-google-api-key',
+      auth: { authContext: { env: async () => undefined, fileExists: async () => false } },
+    })
+    let registered = false
+    let unregistered = 0
+    assert.throws(() => apply({
+      llm: {
+        registerAdapter: () => {
+          registered = true
+          return () => { unregistered++ }
+        },
+      },
+      effect: fn => {
+        if (registered) throw new Error('effect mount boom')
+        return fn?.()
+      },
+      get: () => undefined,
+    }, {}), /effect mount boom/)
+    assert.equal(unregistered, 1)
+    piAdapter.current()
+    assert.equal(rawNeon.reasoning, false)
+    assert.equal('thinkingLevelMap' in rawNeon, false)
+    assert.equal(apiProto.requestStream, origRequestStream)
+  } finally {
+    mode = 'tool'
+  }
+})

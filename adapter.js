@@ -423,6 +423,10 @@ const EXTRA_BODY_STRIPPED_KEYS = [
   'thinking_config',
   'thinkingBudget',
   'thinking_budget',
+  'thinkingLevel',
+  'thinking_level',
+  'reasoningEffort',
+  'reasoning_effort',
   'includeThoughts',
   'include_thoughts',
   'temperature',
@@ -439,7 +443,7 @@ const EXTRA_BODY_STRIPPED_KEYS = [
 ]
 
 function sanitizeGemini4ExtraBody(extraBody, stripExplicitCache) {
-  if (extraBody === undefined || extraBody === null) return extraBody
+  if (extraBody === undefined) return extraBody
   if (!isPlainObjectRecord(extraBody)) {
     throw new LlmError('Gemini 4 httpOptions.extraBody must be a plain object.', 'INVALID_REQUEST')
   }
@@ -450,7 +454,7 @@ function sanitizeGemini4ExtraBody(extraBody, stripExplicitCache) {
     delete cleanExtraBody.cached_content
   }
   for (const cfgKey of ['generationConfig', 'generation_config']) {
-    if (cleanExtraBody[cfgKey] === undefined || cleanExtraBody[cfgKey] === null) continue
+    if (!Object.hasOwn(cleanExtraBody, cfgKey) || cleanExtraBody[cfgKey] === undefined) continue
     if (!isPlainObjectRecord(cleanExtraBody[cfgKey])) {
       throw new LlmError(`Gemini 4 httpOptions.extraBody.${cfgKey} must be a plain object.`, 'INVALID_REQUEST')
     }
@@ -580,7 +584,9 @@ export function gemini4StreamSimple(
           delete body.cachedContent
           delete body.cached_content
         }
-        const { temperature: _t, topP: _tp, topK: _tk, candidateCount: _cc, frequencyPenalty: _fp, presencePenalty: _pp, ...cleanConfig } = body.config
+        delete body.reasoningEffort
+        delete body.reasoning_effort
+        const { temperature: _t, topP: _tp, topK: _tk, candidateCount: _cc, frequencyPenalty: _fp, presencePenalty: _pp, reasoningEffort: _reBody, reasoning_effort: _reSnake, ...cleanConfig } = body.config
         if (supportsXhigh) {
           delete cleanConfig.cachedContent
           delete cleanConfig.cached_content
@@ -868,6 +874,8 @@ export function argonProvider(nativeVertex, models, defaultLevel = undefined, na
         id: configured.id,
         provider: PROVIDER,
         api: configured.api,
+        baseUrl: configured.baseUrl,
+        contextWindow: configured.contextWindow,
         maxTokens: configured.maxTokens,
         thinkingLevelMap: configured.thinkingLevelMap,
         [MAX_TOKENS_CEILING]: configured[MAX_TOKENS_CEILING] ?? (Number.isSafeInteger(configured.maxTokens) ? configured.maxTokens : undefined),
