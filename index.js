@@ -12,10 +12,10 @@ import {
   installGemini4PiAiPatch,
   resolveConfigValues,
   detectPiAiArgonRoutes,
+  syncGemini4ReasoningOptions,
   PROVIDER,
   NATIVE_PROVIDER,
   LEVELS,
-  supportsXhighReasoning,
   MAX_SINGLE_CALL_TOKENS,
   MAX_LONG_DECODE_TOKENS,
 } from './adapter.js'
@@ -132,16 +132,11 @@ export function apply(ctx, config) {
     ctx.on('agent/request', async (_payload, next) => {
       const proposed = await next()
       if (
-        (proposed?.provider === PROVIDER ||
-          ((proposed?.provider === 'google' || proposed?.provider === 'google-vertex') &&
-            /^(?:models\/)?gemini-4\b/i.test(proposed?.model ?? ''))) &&
-        proposed.reasoningEffort === 'max'
+        proposed?.provider === PROVIDER ||
+        ((proposed?.provider === 'google' || proposed?.provider === NATIVE_PROVIDER) &&
+          /^(?:models\/)?gemini-4\b/i.test(proposed?.model ?? ''))
       ) {
-        // Hydrogen 与 Neon 的最高档是第四档 xhigh；其余 Gemini 4 模型仍是 high。
-        return {
-          ...proposed,
-          reasoningEffort: supportsXhighReasoning(proposed?.model) ? 'xhigh' : 'high',
-        }
+        return syncGemini4ReasoningOptions(proposed, proposed?.model)
       }
       return proposed
     })

@@ -49,6 +49,7 @@ export const HYDROGEN_LEVELS = ['low', 'medium', 'high', 'xhigh']
 export const MAX_SINGLE_CALL_TOKENS = 65536
 export const MAX_LONG_DECODE_TOKENS = 1048576
 const COMPACTION_HEADROOM_FLOOR = 131072
+const MAX_TOKENS_CEILING = Symbol('argonMaxTokensCeiling')
 const ENV_KEYS = ['GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_CLOUD_PROJECT', 'GCLOUD_PROJECT', 'GOOGLE_CLOUD_LOCATION', 'GOOGLE_CLOUD_API_KEY']
 const DEFAULT_THINKING_MAP = { off: null, minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: null, max: null }
 /** Hydrogen 与 Neon 的档位映射：把 xhigh 放行到 thinkingConfig。 */
@@ -119,6 +120,14 @@ export function narrowMaxReasoning(options, modelId = options?.model) {
   return { ...options, reasoning: ceiling, reasoningEffort: ceiling }
 }
 
+export function syncGemini4ReasoningOptions(options, modelId = options?.model) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) return options
+  if (options.reasoning === undefined && options.reasoningEffort === undefined) return options
+  const result = resolveGemini4ReasoningLevel(options, modelId)
+  if (!result.ok) return options
+  return { ...options, reasoning: result.level, reasoningEffort: result.level }
+}
+
 function pinPreparedOptions(options, expectedProvider, expectedModel) {
   assertPlainRequestOptions(options)
   if (expectedProvider !== undefined && options.provider !== undefined && options.provider !== expectedProvider) {
@@ -135,7 +144,7 @@ function preparePinnedStreamOptions(options, expectedProvider, expectedModel) {
   const pinned = pinPreparedOptions(options, expectedProvider, expectedModel)
   const targetModel = pinned.model ?? expectedModel
   validateExplicitReasoningFields(pinned, targetModel)
-  return narrowMaxReasoning(pinned, targetModel)
+  return syncGemini4ReasoningOptions(pinned, targetModel)
 }
 
 const readVal = v => (v && typeof v === 'object' && typeof v.get === 'function') ? v.get() : v
@@ -358,6 +367,26 @@ function wrapGemini4Stream(rawStream, tracker, signal, retryKey) {
   }
 }
 
+export function assertGemini4MaxTokens(options, requestModel, longDecode = true) {
+  if (!options || options.maxTokens === undefined) return
+  const routeCeiling = requestModel?.provider === PROVIDER
+    ? (requestModel?.[MAX_TOKENS_CEILING] ?? MAX_LONG_DECODE_TOKENS)
+    : (Number.isSafeInteger(requestModel?.maxTokens) && requestModel.maxTokens > 0
+      ? Math.min(MAX_LONG_DECODE_TOKENS, requestModel.maxTokens)
+      : (longDecode === false ? MAX_SINGLE_CALL_TOKENS : MAX_LONG_DECODE_TOKENS))
+  if (
+    !Number.isSafeInteger(options.maxTokens) ||
+    options.maxTokens < 1 ||
+    options.maxTokens > MAX_LONG_DECODE_TOKENS ||
+    options.maxTokens > routeCeiling
+  ) {
+    throw new LlmError(
+      `Gemini 4 maxTokens must be an integer between 1 and ${Math.min(MAX_LONG_DECODE_TOKENS, routeCeiling)}.`,
+      'INVALID_REQUEST',
+    )
+  }
+}
+
 export function gemini4StreamSimple(
   nativeStream,
   requestModel,
@@ -387,7 +416,11 @@ export function gemini4StreamSimple(
     )
   }
   const { reasoning, reasoningEffort: _re, thinking, thinkingBudgets, temperature, onPayload: prior, onProviderStreamEvent: priorEvent, ...rest } = options
+  assertGemini4MaxTokens(options, requestModel, longDecode)
   const requestedMaxTokens = options.maxTokens ?? requestModel.maxTokens
+  if (requestedMaxTokens !== undefined && (!Number.isSafeInteger(requestedMaxTokens) || requestedMaxTokens < 1 || requestedMaxTokens > MAX_LONG_DECODE_TOKENS)) {
+    throw new LlmError('Invalid Gemini 4 maxTokens budget.', 'INVALID_REQUEST')
+  }
   const effectiveMaxTokens =
     longDecode === false && typeof requestedMaxTokens === 'number' && requestedMaxTokens > MAX_SINGLE_CALL_TOKENS
       ? MAX_SINGLE_CALL_TOKENS
@@ -491,6 +524,7 @@ export function installGemini4PiAiPatch(recordDiagnostic, configInput = {}, resp
   const origPrepareCall = typeof proto.prepareCall === 'function' ? proto.prepareCall : null
   const origProtoStream = typeof proto.stream === 'function' ? proto.stream : null
   const patchedProviders = new Map()
+  const patchedModels = new Map()
   let active = true
   const ensureGemini4Capabilities = piProvider => {
     if (typeof piProvider?.getModels !== 'function') return
@@ -498,6 +532,14 @@ export function installGemini4PiAiPatch(recordDiagnostic, configInput = {}, resp
       for (const m of piProvider.getModels()) {
         if (isGemini4Model(m)) {
           try {
+            if (!patchedModels.has(m)) {
+              patchedModels.set(m, {
+                hadReasoning: Object.prototype.hasOwnProperty.call(m, 'reasoning'),
+                reasoning: m.reasoning,
+                hadMap: Object.prototype.hasOwnProperty.call(m, 'thinkingLevelMap'),
+                thinkingLevelMap: m.thinkingLevelMap,
+              })
+            }
             m.reasoning = true
             m.thinkingLevelMap = { ...thinkingLevelMapFor(m.id) }
           } catch {}
@@ -562,15 +604,23 @@ export function installGemini4PiAiPatch(recordDiagnostic, configInput = {}, resp
     const prepared = await origPrepareCall.call(this, provider, model, signal)
     if (!isNativeGemini4Target(this, provider, model)) return prepared
     const origPreparedStream = prepared.stream
+    const resolvedModel = this.current?.()?.models?.getModel?.(provider, model)
     return {
       ...prepared,
-      stream: options => origPreparedStream(preparePinnedStreamOptions(options, provider, model)),
+      stream: options => {
+        if (!active) return origPreparedStream(options)
+        const pinned = preparePinnedStreamOptions(options, provider, model)
+        if (resolvedModel) assertGemini4MaxTokens(pinned, resolvedModel, resolveConfigValues(configInput).longDecode)
+        return origPreparedStream(generateContentHistory(pinned, model))
+      },
     }
   }
   async function* patchedProtoStream(options) {
-    assertPlainRequestOptions(options)
-    if (isNativeGemini4Target(this, options.provider, options.model)) {
-      const normalized = preparePinnedStreamOptions(options, options.provider, options.model)
+    if (options && typeof options === 'object' && !Array.isArray(options) && isNativeGemini4Target(this, options.provider, options.model)) {
+      const resolvedModel = this.current?.()?.models?.getModel?.(options.provider, options.model)
+      const pinned = preparePinnedStreamOptions(options, options.provider, options.model)
+      if (resolvedModel) assertGemini4MaxTokens(pinned, resolvedModel, resolveConfigValues(configInput).longDecode)
+      const normalized = generateContentHistory(pinned, options.model)
       yield* origProtoStream.call(this, normalized)
       return
     }
@@ -591,6 +641,15 @@ export function installGemini4PiAiPatch(recordDiagnostic, configInput = {}, resp
       if (piProvider.streamSimple === patchedStreamSimple) piProvider.streamSimple = origStreamSimple
     }
     patchedProviders.clear()
+    for (const [m, saved] of patchedModels) {
+      try {
+        if (saved.hadReasoning) m.reasoning = saved.reasoning
+        else delete m.reasoning
+        if (saved.hadMap) m.thinkingLevelMap = saved.thinkingLevelMap
+        else delete m.thinkingLevelMap
+      } catch {}
+    }
+    patchedModels.clear()
   }
 }
 
@@ -620,16 +679,22 @@ export function resolveConfigValues(raw = {}) {
   for (const [key, val] of [['contextWindow', contextWindow], ['maxTokens', rawMaxTokens]]) {
     if (!Number.isSafeInteger(val) || val <= 0 || val > MAX_LONG_DECODE_TOKENS) throw new LlmError('Invalid Argon ' + key, 'INVALID_CONFIG')
   }
+  const hasExplicitMaxTokens = source?.maxTokens !== undefined && readVal(source?.maxTokens) !== undefined
   const enabledLongDecode = Boolean(longDecode)
   const capByMode = enabledLongDecode ? Math.min(rawMaxTokens, MAX_LONG_DECODE_TOKENS) : Math.min(rawMaxTokens, MAX_SINGLE_CALL_TOKENS)
   const safeCompactionCap = contextWindow > COMPACTION_HEADROOM_FLOOR ? contextWindow - COMPACTION_HEADROOM_FLOOR : contextWindow
   const maxTokens = Math.max(1, Math.min(capByMode, safeCompactionCap))
+  const explicitMaxTokensCap = hasExplicitMaxTokens
+    ? Math.max(1, Math.min(rawMaxTokens, safeCompactionCap))
+    : Math.max(1, Math.min(MAX_LONG_DECODE_TOKENS, safeCompactionCap))
   return {
     showInModelPicker: Boolean(showInModelPicker),
     reasoning,
     longDecode: enabledLongDecode,
     contextWindow,
     maxTokens,
+    hasExplicitMaxTokens,
+    explicitMaxTokensCap,
     googleProtocol,
     vertexProtocol,
     googleServiceTier,
@@ -727,10 +792,20 @@ export class ArgonAdapter extends LlmAdapter {
     if (provider === PROVIDER && protocol === 'interactions' && this.interactionHandler) {
       return {
         model: prepared.model,
-        stream: options => this.interactionHandler(narrowMaxReasoning(pinPreparedOptions(options, provider, model), model), cfg),
+        stream: options => this.interactionHandler(syncGemini4ReasoningOptions(pinPreparedOptions(options, provider, model), model), cfg),
       }
     }
-    return { ...prepared, stream: options => prepared.stream(generateContentHistory(preparePinnedStreamOptions(options, provider, model), model)) }
+    const resolvedModel = provider === PROVIDER
+      ? (this.inner.current?.()?.models?.getModel?.(provider, model) ?? (cfg ? { provider, id: model, [MAX_TOKENS_CEILING]: cfg.explicitMaxTokensCap } : undefined))
+      : undefined
+    return {
+      ...prepared,
+      stream: options => {
+        const pinned = preparePinnedStreamOptions(options, provider, model)
+        if (provider === PROVIDER) assertGemini4MaxTokens(pinned, resolvedModel, cfg?.longDecode)
+        return prepared.stream(generateContentHistory(pinned, model))
+      },
+    }
   }
   async *stream(options) {
     assertPlainRequestOptions(options)
@@ -782,6 +857,8 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
       ld: cfg.longDecode,
       cw: cfg.contextWindow,
       mt: cfg.maxTokens,
+      explicitMt: cfg.hasExplicitMaxTokens,
+      capMt: cfg.explicitMaxTokensCap,
       visible: cfg.showInModelPicker,
       gp: cfg.googleProtocol,
       vp: cfg.vertexProtocol,
@@ -951,6 +1028,9 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
         thinkingLevelMap: { ...HYDROGEN_THINKING_MAP },
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       })
+    }
+    for (const modelDescriptor of models) {
+      modelDescriptor[MAX_TOKENS_CEILING] = cfg.explicitMaxTokensCap
     }
     const configuredMaxTokens = new Map(models.map(m => [m.id, cfg.maxTokens]))
     const provider = argonProvider({ ...nativeVertex, auth }, models, cfg.reasoning, nativeGoogle, cfg.longDecode, recordDiagnostic, cfg, responseHub, structuredOutput)

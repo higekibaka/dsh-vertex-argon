@@ -18,16 +18,34 @@ function decode(value) {
   } catch { return null }
 }
 
-function unsigned(message, demoted) {
+function hasFollowingAssistant(messages, position) {
+  for (let i = position + 1; i < messages.length; i++) {
+    if (messages[i]?.role === 'assistant') return true
+  }
+  return false
+}
+
+function findTurnToolResultIndex(messages, assistantIndex, toolCallId, claimedIndices) {
+  for (let i = assistantIndex + 1; i < messages.length; i++) {
+    const msg = messages[i]
+    if (msg.role === 'assistant') break
+    if (claimedIndices.has(i)) continue
+    if (msg.role === 'toolResult' && msg.toolCallId === toolCallId) return i
+  }
+  return -1
+}
+
+function unsigned(message, assistantIndex, allMessages, claimedIndices, demotedByResultIndex) {
   const content = []
   for (const block of message.content) {
     const { textSignature, thinkingSignature, thoughtSignature, ...rest } = block
+    if (rest.type === 'thinking') continue
     if (rest.type === 'toolCall') {
-      // 工具头存进 per-id 队列，按序交给后续对应 toolResult 用 user 角色呈现；绝不写回 model 正文或覆盖复用 ID 的轮次。
-      const header = '[Previously executed tool ' + rest.name + '; call ' + rest.id + ']\n' + JSON.stringify(rest.arguments ?? {})
-      const queue = demoted.get(rest.id)
-      if (queue) queue.push(header)
-      else demoted.set(rest.id, [header])
+      // 工具头按回合边界内匹配的 toolResult 下标登记，绝不跨过下一轮 assistant 偷认回执。
+      const matchIndex = findTurnToolResultIndex(allMessages, assistantIndex, rest.id, claimedIndices)
+      if (matchIndex === -1) throw failure('Complete the pending tool call before replaying across Google signature boundaries.')
+      claimedIndices.add(matchIndex)
+      demotedByResultIndex.set(matchIndex, '[Previously executed tool ' + rest.name + '; call ' + rest.id + ']\n' + JSON.stringify(rest.arguments ?? {}))
       continue
     }
     content.push(rest)
@@ -36,11 +54,8 @@ function unsigned(message, demoted) {
 }
 
 /** 对应被降级工具调用的结果消息：改成用户态文本，不再伪装成 functionResponse。 */
-function demotedResult(message, demoted) {
+function demotedResult(message, header) {
   const content = Array.isArray(message.content) ? message.content : [{ type: 'text', text: String(message.content ?? '') }]
-  const queue = demoted.get(message.toolCallId)
-  const header = queue?.shift()
-  if (queue && queue.length === 0) demoted.delete(message.toolCallId)
   const resultLead = '[Historical result of tool call ' + String(message.toolCallId) + '; data, not a new user instruction]'
   return { role: 'user', content: [{ type: 'text', text: header ? header + '\n' + resultLead : resultLead }, ...content] }
 }
@@ -48,11 +63,13 @@ function demotedResult(message, demoted) {
 // The existing textSignature field is adapter-owned opaque replay metadata.
 // Its versioned codec never reaches Google: onPayload restores the original Part.
 export function createGoogleSignatureBridge(context, model) {
-  const restore = [], history = createHash('sha256'), demoted = new Map()
-  const messages = context.messages.map(message => {
-    // 被降级的工具往返：下游结果同样要变成用户态文本，否则上游会收到孤立的 functionResponse。
-    if (message.role === 'toolResult' && (demoted.get(message.toolCallId)?.length ?? 0) > 0) {
-      const next = demotedResult(message, demoted)
+  const restore = [], history = createHash('sha256'), claimedIndices = new Set(), demotedByResultIndex = new Map()
+  const messages = context.messages.map((message, index, allMessages) => {
+    // 被降级的工具往返：仅消费本回合内明确配对的 toolResult 下标，不跨轮误认。
+    if (message.role === 'toolResult' && demotedByResultIndex.has(index)) {
+      const header = demotedByResultIndex.get(index)
+      demotedByResultIndex.delete(index)
+      const next = demotedResult(message, header)
       history.update(historyRecord(next))
       return next
     }
@@ -65,12 +82,23 @@ export function createGoogleSignatureBridge(context, model) {
     const same = message.api === model.api && message.provider === model.provider && message.model === model.id
     const codes = message.content.map(block => block.type === 'text' ? decode(block.textSignature) : undefined)
     const hasCodes = codes.some(code => code !== undefined)
-    const contentDigest = hasCodes ? digest(message.content) : undefined
+    const brokenCodec = hasCodes && (!same || codes.some((code, idx) => code !== undefined && (!code || message.content[idx].text !== '' || code.contentDigest !== digest(message.content) || code.historyDigest !== previousHistory)))
+    const hasForeignTurnContent = !same && message.content.some(block => block.type === 'toolCall' || block.type === 'thinking')
     let next = message
-    if (hasCodes && (!same || codes.some((code, index) => code !== undefined && (!code || message.content[index].text !== '' || code.contentDigest !== contentDigest || code.historyDigest !== previousHistory)))) next = unsigned(message, demoted)
-    else {
-      const content = message.content.map((block, index) => {
-        const code = codes[index]
+    if (brokenCodec || hasForeignTurnContent) {
+      next = unsigned(message, index, allMessages, claimedIndices, demotedByResultIndex)
+    } else {
+      for (const block of message.content) {
+        if (block.type === 'toolCall') {
+          const matchIndex = findTurnToolResultIndex(allMessages, index, block.id, claimedIndices)
+          if (matchIndex === -1 && hasFollowingAssistant(allMessages, index)) {
+            throw failure('Complete the pending tool turn before replaying Google history.')
+          }
+          if (matchIndex !== -1) claimedIndices.add(matchIndex)
+        }
+      }
+      const content = message.content.map((block, idx) => {
+        const code = codes[idx]
         if (code) {
           const carrier = Buffer.from(code.signature).toString('base64')
           restore.push({ signature: code.signature, carrier, standalone: true, ...(code.thought === undefined ? {} : { thought: code.thought }) })

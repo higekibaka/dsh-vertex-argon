@@ -1,8 +1,8 @@
-# Gemini 4 Adapter（dsh-vertex-argon）发版状态与验证账本（v2.2.1）
+# Gemini 4 Adapter（dsh-vertex-argon）发版状态与验证账本（v2.2.2）
 
-- **用户工程版本**：`2.2.1`（展示品牌名 **Gemini 4 Adapter**，底层包名保持 `dsh-vertex-argon`），以 [package.json](<../../package.json>) 为准。
+- **用户工程版本**：`2.2.2`（展示品牌名 **Gemini 4 Adapter**，底层包名保持 `dsh-vertex-argon`），以 [package.json](<../../package.json>) 为准。
 - **声明兼容**：DSH `>=0.2.0-rc.2`；Node.js `^22.19.0 || >=24.0.0`。以 [package.json](<../../package.json>) 为准。
-- **本轮范围**：`v2.2.1` 在 `v2.2.0` 八模型基础上统一官方 8 模型解析器 `resolveOfficialGemini4Model`（支持可选 `models/` 前缀与大小写不敏感，非空未知 ID 抛 `UNKNOWN_MODEL`，收紧 `detectPiAiArgonRoutes` 为 `$` 精确结尾排除 `-preview`），加固 `ArgonAdapter.prepareCall` 目标绑定与 `buildInteractionRequest` 模型解析及双字段（`reasoning` / `reasoningEffort`）严格校验（共享 `resolveGemini4ReasoningLevel` 拦截显式非法及冲突档位），补全 `installGemini4PiAiPatch` 对预声明模型、`piProvider.stream` 与 `PiAiAdapter.prototype.prepareCall` / `stream` 的守护与完整恢复及 `httpOptions.extraBody` 缓存字段清洗，并将 `buildInteractionRequest`、`generateContentHistory` 与 `createGoogleSignatureBridge` 的历史降级改用 per-`toolCallId` FIFO 队列隔离，同步更新测试与文档。
+- **本轮范围**：`v2.2.2` 在 `v2.2.1` 基础上进一步统一 `agent/request` 钩子与适配器/原生补丁的双字段推理同步（`syncGemini4ReasoningOptions`），在 `gemini4StreamSimple` 入口强制校验正安全整数及路由 `maxTokens` 上限，将 `buildInteractionRequest`、`generateContentHistory` 与 `createGoogleSignatureBridge` 的 `toolCallId` 匹配收紧至 `[assistantIndex + 1, nextAssistant)` 回合边界并拒绝跨轮中断偷认，为原生 `google` / `google-vertex` `PiAiAdapter` 入口补接 `generateContentHistory` 跨模型转录，并在 `installGemini4PiAiPatch` 卸载时还原模型属性与停用残留 prepared 校验。
 - **验证状态**：2026-11-19 完成 `v2.2.1` 离线全量回归（详见下方 2026-11-19 `v2.2.1` 补记）：挂载本机既有 React `19.2.0` 路径作为 `NODE_PATH` 时，36 个测试文件 **671 项测试全部通过（671 passed, 0 failed, 0 skipped）**；`git diff --check` 退出码 `0`。本阶段未执行 `git commit` / `git push` 或修改桌面 profile。
 
 ## 1. 生产文件边界

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import {test as nodeTest} from 'node:test'
 import {createArgonAdapter,PROVIDER,MODEL,GOOGLE_API_MODEL,CARBON_MODEL,GOOGLE_API_CARBON_MODEL,HYDROGEN_MODEL,GOOGLE_API_HYDROGEN_MODEL,NEON_MODEL,GOOGLE_API_NEON_MODEL,officialUpstreamModel} from '../adapter.js'
-import {contentHash,historyHash,buildInteractionRequest} from '../interactions-input.js'
+import {contentHash,historyHash,buildInteractionRequest,INTERACTIONS_REPLAY_API,generateContentHistory} from '../interactions-input.js'
 import {assertInteractionOptions} from '../interaction-adapter.js'
 import {createInteractionStateHub} from '../interaction-state.js'
 import {createResponseHub} from '../response-store.js'
@@ -510,5 +510,32 @@ test('buildInteractionRequest isolates reused toolCallId FIFO queues across fore
    { route: 'google-vertex', upstreamModel: 'gemini-4-neon' },
   ),
   /unfinished foreign or edited tool call/,
+ )
+
+ // 旧未完成调用 A(id='x') 后紧跟新一轮原生/外来 B(id='x') + 唯一回执：必须按回合边界拒绝 A，不能偷认 B 的回执。
+ const interruptedNative = {
+  role: 'assistant',
+  source: {
+   provider: PROVIDER,
+   model: NEON_MODEL,
+   replayState: {
+    response: { api: INTERACTIONS_REPLAY_API, provider: PROVIDER, model: NEON_MODEL, route: 'google-vertex', contentHash: contentHash(nativeCallBlocks), historyHash: historyHash([user1]), steps: replaySteps },
+   },
+  },
+  content: nativeCallBlocks,
+ }
+ await assert.rejects(
+  buildInteractionRequest(
+   { provider: PROVIDER, model: NEON_MODEL, messages: [user1, { role: 'assistant', source: { provider: PROVIDER, model: CARBON_MODEL }, content: [{ type: 'tool-call', id: 'call-reused', name: 'echo', arguments: '{"step":"A"}' }] }, interruptedNative, neonTool] },
+   { route: 'google-vertex', upstreamModel: 'gemini-4-neon' },
+  ),
+  /unfinished foreign or edited tool call/,
+ )
+ assert.throws(
+  () => generateContentHistory(
+   { provider: PROVIDER, model: NEON_MODEL, messages: [user1, { role: 'assistant', source: { provider: PROVIDER, model: CARBON_MODEL }, content: [{ type: 'tool-call', id: 'call-reused', name: 'echo', arguments: '{"step":"A"}' }] }, interruptedNative, neonTool] },
+   NEON_MODEL,
+  ),
+  /Complete the pending Interactions tool call/,
  )
 })

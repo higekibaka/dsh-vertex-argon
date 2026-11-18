@@ -2,6 +2,16 @@
 
 All notable changes to **Gemini 4 Adapter** (`dsh-vertex-argon`) are documented in this file.
 
+## [2.2.2] - 2026-11-19
+
+### Fixed
+- **Hook/Adapter Dual-Field Reasoning Parity & `maxTokens` Guard (`index.js`, `adapter.js`)**:
+  - Added `syncGemini4ReasoningOptions` so `agent/request`, `ArgonAdapter.prepareCall().stream` (both GenerateContent and Interactions), and native `PiAiAdapter` wrappers agree on explicit `{ reasoning, reasoningEffort }` pairs (e.g., `{ reasoning: 'low', reasoningEffort: 'max' }` resolves cleanly while keeping invalid inputs rejected), and write both fields when explicit so omitted `reasoningEffort` cannot fall back to profile defaults.
+  - Enforced positive safe integer and declared route `maxTokens` ceiling (`<= 1,048,576`, honoring explicit route/config limits while preserving `longDecode=false` 64K clamping) in `gemini4StreamSimple`.
+- **Turn-Scoped `toolCallId` Pairing & Complete Native `google`/`google-vertex` Coverage (`interactions-input.js`, `google-signatures.js`, `adapter.js`)**:
+  - Scoped tool-call result pairing in `buildInteractionRequest`, `generateContentHistory`, and `createGoogleSignatureBridge` strictly to `[assistantIndex + 1, nextAssistant)` turn boundaries so an interrupted prior call with a reused `toolCallId` cannot claim a subsequent turn's result, and upgraded `createGoogleSignatureBridge` to downgrade cross-model `toolCall` / `thinking` turns even without standalone codecs.
+  - Routed native `google` / `google-vertex` `PiAiAdapter.prototype.prepareCall` and `stream` through `generateContentHistory`, tracked modified model descriptors so `unpatch` restores original `reasoning` / `thinkingLevelMap` properties, and honored `active` inside retained prepared closures.
+
 ## [2.2.1] - 2026-11-19
 
 ### Fixed

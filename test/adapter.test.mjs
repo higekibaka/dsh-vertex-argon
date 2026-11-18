@@ -28,6 +28,7 @@ import {
   computeReconnectDelayMs,
   ensureGemini4ApiClientPatch,
   narrowMaxReasoning,
+  syncGemini4ReasoningOptions,
 } from '../adapter.js'
 import { Config, apply } from '../index.js'
 import { bodyBytes, fetchErrorCodes } from '../diagnostics.js'
@@ -1521,5 +1522,107 @@ test('generate-content reused toolCallId keeps later native neon turn signature 
     assert.ok(allParts.some(p => typeof p.text === 'string' && p.text.includes('[Previously executed tool echo; call call-reused]')))
   } finally {
     customResponder = null
+  }
+})
+
+test('agent/request and native PiAiAdapter sync dual reasoning fields, protect native Carbon->Neon tool history, and enforce maxTokens cap', async () => {
+  const cleanups = []
+  let requestListener
+  const disposeApply = () => {
+    while (cleanups.length) {
+      try { cleanups.pop()() } catch {}
+    }
+  }
+  let unpatch
+  try {
+    apply({
+      ...ctx,
+      effect: f => { const d = f(); if (typeof d === 'function') cleanups.push(d); return d },
+      on: (ev, fn) => { if (ev === 'agent/request') requestListener = fn },
+      llm: { registerAdapter: () => () => {} },
+    }, Config({}))
+    const mixed = await requestListener({}, async () => ({
+      provider: PROVIDER, model: NEON_MODEL, reasoning: 'low', reasoningEffort: 'max',
+    }))
+    assert.equal(mixed.reasoning, 'xhigh')
+    assert.equal(mixed.reasoningEffort, 'xhigh')
+    disposeApply()
+
+    unpatch = installGemini4PiAiPatch()
+
+    const baseGoogle = googleProvider()
+    const rawCarbon = {
+      id: CARBON_MODEL, name: 'Gemini 4 Carbon', provider: 'google', api: 'google-generative-ai',
+      baseUrl: 'https://generativelanguage.googleapis.com/v1beta', reasoning: false, input: ['text'], contextWindow: 1048576, maxTokens: 65536,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    }
+    const rawNeon = { ...rawCarbon, id: NEON_MODEL, name: 'Gemini 4 Neon' }
+    const piProvider = { ...baseGoogle, id: 'google', name: 'Google', getModels: () => [rawCarbon, rawNeon] }
+    const profiles = new Map([['google', {
+      provider: 'google', displayName: 'Google', piProvider, reasoning: 'high', streamIdleTimeoutMs: 300000,
+      maxRequestImageBytes: 20971520, requestImagePixelBudget: 4194304, requestImageMaxBytes: 1048576,
+      retryPolicy: resolveRetryPolicy(undefined, 'test'), modelErrors: new Map(), configuredMaxTokens: new Map([[CARBON_MODEL, 65536], [NEON_MODEL, 65536]]),
+    }]])
+    const piAdapter = new PiAiAdapter({
+      profiles: () => profiles,
+      resolveApiKey: async () => 'fixture-google-api-key',
+      auth: { authContext: { env: async () => undefined, fileExists: async () => false } },
+    })
+
+    // 触发补丁写入模型属性，验证后续 unpatch 会完整恢复原属性状态，且卸载前创建的 prepared 闭包不再拦截校验。
+    piAdapter.current()
+    assert.equal(rawNeon.reasoning, true)
+    assert.equal(rawNeon.thinkingLevelMap.xhigh, 'xhigh')
+
+    mode = 'text'
+    // 1. native google 下只传 { reasoning: 'low' } 不被 profile default 'high' 覆盖。
+    const lowChunks = await collect(piAdapter.stream({ ...req(undefined, NEON_MODEL), provider: 'google', reasoning: 'low' }))
+    assert.equal(lowChunks.at(-1).reason.kind, 'stop')
+    assert.deepEqual(wire.at(-1).body.generationConfig.thinkingConfig, { thinkingLevel: 'LOW', includeThoughts: true })
+
+    // 2. native google Carbon (含普通 toolCall.thoughtSignature，不含独立签名 Part) -> Neon 跨模型切换走 generateContentHistory 降级转录。
+    const carbonAssistant = {
+      role: 'assistant',
+      source: {
+        provider: 'google',
+        model: CARBON_MODEL,
+        replayState: {
+          response: { kind: 'pi-ai', version: 2, api: 'google-generative-ai', provider: 'google', model: CARBON_MODEL, stopReason: 'toolUse' },
+          blocks: [{ type: 'tool-call', thoughtSignature: crossSignature }],
+        },
+      },
+      content: [{ type: 'tool-call', id: 'plain-tc-1', name: 'echo', arguments: '{"k":"v"}' }],
+    }
+    const carbonResult = createToolResultMessage({ callId: 'plain-tc-1', content: [{ type: 'text', text: 'carbon-out' }], isError: false })
+    const userMsg = createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+    const crossPrepared = await piAdapter.prepareCall('google', NEON_MODEL)
+    const switched = await collect(crossPrepared.stream({
+      provider: 'google', model: NEON_MODEL, reasoning: 'medium', maxTokens: 512, messages: [userMsg, carbonAssistant, carbonResult], tools: crossTools,
+    }))
+    assert.equal(switched.at(-1).reason.kind, 'stop')
+    const wireStr = JSON.stringify(wire.at(-1).body.contents)
+    assert.ok(wireStr.includes('[Previously executed tool echo; call plain-tc-1]'))
+    assert.equal(wire.at(-1).body.contents.some(r => r.parts.some(p => p.functionCall)), false)
+
+    // 3. maxTokens 上限护栏：原生 google maxTokens=65536 拒绝 65537，自定义 longDecode 拒绝 1048577，显式 cap 拒绝超限请求。
+    await assert.rejects(() => collect(piAdapter.stream({ ...req('medium', NEON_MODEL, 65537), provider: 'google' })), { code: 'INVALID_REQUEST' })
+    const argonAdapter = createArgonAdapter(ctx, { ...config, longDecode: true, maxTokens: MAX_LONG_DECODE_TOKENS, routes: { hasVertexNeon: true } })
+    await assert.rejects(() => collect(argonAdapter.stream(req('medium', NEON_MODEL, MAX_LONG_DECODE_TOKENS + 1))), { code: 'INVALID_REQUEST' })
+    const cappedArgonAdapter = createArgonAdapter(ctx, { ...config, longDecode: true, maxTokens: 32768, routes: { hasVertexNeon: true } })
+    await assert.rejects(() => collect(cappedArgonAdapter.stream(req('medium', NEON_MODEL, 32769))), { code: 'INVALID_REQUEST' })
+
+    // 获取卸载前的 prepared 句柄，测试 unpatch 后属性与闭包恢复。
+    const preparedBeforeDispose = await piAdapter.prepareCall('google', NEON_MODEL)
+    disposeApply()
+    unpatch?.()
+    assert.equal(rawNeon.reasoning, false)
+    assert.equal('thinkingLevelMap' in rawNeon, false)
+    // 卸载后 prepared 闭包不再阻止原本原生透传调用（使用恢复后的原生模型唯一档位 'off' 验证补丁未触发 INVALID_REQUEST 校验逻辑）
+    const afterDisposeOut = await collect(preparedBeforeDispose.stream({ ...req('off', NEON_MODEL), provider: 'google', reasoning: 'low' }))
+    assert.equal(afterDisposeOut.at(-1).reason.kind, 'stop')
+  } finally {
+    disposeApply()
+    unpatch?.()
+    mode = 'tool'
   }
 })

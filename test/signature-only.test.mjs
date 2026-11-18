@@ -186,4 +186,17 @@ test('createGoogleSignatureBridge scopes demoted toolCallId FIFO queue across tu
  assert.equal(bridge.context.messages[3].content[0].thoughtSignature, T)
  assert.equal(bridge.context.messages[4].role, 'toolResult')
  assert.equal(bridge.context.messages[4].toolCallId, 'call-reused')
+
+ // A(id='call-reused') 中断无回执、B(id='call-reused') 有回执 -> 绝不跨回合偷认 B 的回执。
+ assert.throws(
+  () => createGoogleSignatureBridge({
+   messages: [
+    { role: 'user', content: [{ type: 'text', text: 'turn 1' }] },
+    { role: 'assistant', api: 'google-vertex', provider: PROVIDER, model: MODEL, content: [{ type: 'toolCall', id: 'call-reused', name: 'echo', arguments: { step: 1 }, thoughtSignature: T }] },
+    nativeSame,
+    nativeResult,
+   ],
+  }, model),
+  e => e?.code === 'ARGON_SIGNATURE_REPLAY',
+ )
 })
