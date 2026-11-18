@@ -200,3 +200,22 @@ test('createGoogleSignatureBridge scopes demoted toolCallId FIFO queue across tu
   e => e?.code === 'ARGON_SIGNATURE_REPLAY',
  )
 })
+
+for (const [label, wireParts] of [
+  ['adjacent signed text parts', [{ text: 'A', thoughtSignature: S1 }, { text: 'B', thoughtSignature: S2 }]],
+  ['plain text followed by signed empty text part', [{ text: 'A' }, { text: '', thoughtSignature: S1 }]],
+]) test(GOOGLE_API_MODEL + ': ' + label + ' preserve 1:1 part boundaries on next turn', async () => {
+  const sent = []; let calls = 0
+  globalThis.fetch = async (_url, init) => { sent.push(JSON.parse(init.body)); return sse(++calls === 1 ? wireParts : [{ text: 'next' }]) }
+  try {
+    const adapter = createArgonAdapter(ctx, config), session = Session.create('sig-boundary')
+    const user = createUserMessage({ content: [{ type: 'text', text: 'turn 1' }], source: { kind: 'user' } })
+    session.append('turn/start', { turn: 1 }); session.append('user/message', user, { surfaceOp: 'append' })
+    const { message } = await generation(adapter, GOOGLE_API_MODEL, session.deriveMessages())
+    session.append('assistant/message', { turn: 1, step: 1, stream: [], message }, { surfaceOp: 'append' })
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    const cold = Session.create('sig-boundary-cold', JSON.parse(JSON.stringify(session.snapshotEvents())))
+    await generation(adapter, GOOGLE_API_MODEL, [...cold.deriveMessages(), createUserMessage({ content: [{ type: 'text', text: 'turn 2' }], source: { kind: 'user' } })])
+    assert.deepEqual(sent[1].contents.find(c => c.role === 'model').parts, wireParts)
+  } finally { globalThis.fetch = originalFetch }
+})

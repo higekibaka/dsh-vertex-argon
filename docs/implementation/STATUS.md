@@ -1,9 +1,9 @@
-# Gemini 4 Adapter（dsh-vertex-argon）发版状态与验证账本（v2.2.2）
+# Gemini 4 Adapter（dsh-vertex-argon）发版状态与验证账本（v2.2.3）
 
-- **用户工程版本**：`2.2.2`（展示品牌名 **Gemini 4 Adapter**，底层包名保持 `dsh-vertex-argon`），以 [package.json](<../../package.json>) 为准。
+- **用户工程版本**：`2.2.3`（展示品牌名 **Gemini 4 Adapter**，底层包名保持 `dsh-vertex-argon`），以 [package.json](<../../package.json>) 为准。
 - **声明兼容**：DSH `>=0.2.0-rc.2`；Node.js `^22.19.0 || >=24.0.0`。以 [package.json](<../../package.json>) 为准。
-- **本轮范围**：`v2.2.2` 在 `v2.2.1` 基础上进一步统一 `agent/request` 钩子与适配器/原生补丁的双字段推理同步（`syncGemini4ReasoningOptions`），在 `gemini4StreamSimple` 入口强制校验正安全整数及路由 `maxTokens` 上限，将 `buildInteractionRequest`、`generateContentHistory` 与 `createGoogleSignatureBridge` 的 `toolCallId` 匹配收紧至 `[assistantIndex + 1, nextAssistant)` 回合边界并拒绝跨轮中断偷认，为原生 `google` / `google-vertex` `PiAiAdapter` 入口补接 `generateContentHistory` 跨模型转录，并在 `installGemini4PiAiPatch` 卸载时还原模型属性与停用残留 prepared 校验。
-- **验证状态**：2026-11-19 完成 `v2.2.1` 离线全量回归（详见下方 2026-11-19 `v2.2.1` 补记）：挂载本机既有 React `19.2.0` 路径作为 `NODE_PATH` 时，36 个测试文件 **671 项测试全部通过（671 passed, 0 failed, 0 skipped）**；`git diff --check` 退出码 `0`。本阶段未执行 `git commit` / `git push` 或修改桌面 profile。
+- **本轮范围**：`v2.2.3` 进一步加固独立/普通签名 Part 边界切分、`onPayload` 改写后含 `extraBody` 的出站 `maxOutputTokens` 路由上限校验、`1,048,576` 协议请求上限与宿主压缩预留分离、Interactions `stream(options)` 入口同步预算/冲突校验、未配置时 Hydrogen/Neon 模型级 `high` 缺省思考档位，以及多实例重叠安装/逆序卸载 `installGemini4PiAiPatch` 与 `ensureGemini4ApiClientPatch` 的引用计数保护。
+- **验证状态**：2026-11-19 完成 `v2.2.3` 离线全量回归（详见 [CHANGELOG.md](<../../CHANGELOG.md>)）：挂载本机既有 React `19.2.0` 路径作为 `NODE_PATH` 时，36 个测试文件全量通过；`git diff --check` 退出码 `0`。
 
 ## 1. 生产文件边界
 

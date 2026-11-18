@@ -1626,3 +1626,116 @@ test('agent/request and native PiAiAdapter sync dual reasoning fields, protect n
     mode = 'tool'
   }
 })
+
+test('third review fixes: onPayload maxOutputTokens cap, 1M long-decode ceiling, Neon high default, and overlapping patch refcount cleanup', async () => {
+  mode = 'text'
+  try {
+    // 1. onPayload 篡改 config.maxOutputTokens / extraBody.generationConfig.maxOutputTokens 超出路由上限必须中止于发网前，且 1,048,576 完整长解码预算可达。
+    const beforeCapWire = wire.length
+    const capped = createArgonAdapter(ctx, { longDecode: true, maxTokens: 1024, routes: { hasVertexNeon: true } })
+    const cappedSnap = capped.inner.current()
+    const cappedProvider = cappedSnap.profiles.get(PROVIDER).piProvider
+    const cappedModel = cappedSnap.models.getModel(PROVIDER, NEON_MODEL)
+    const errOverConfig = []
+    for await (const ev of cappedProvider.streamSimple(cappedModel, { messages: [{ role: 'user', content: 'hi', timestamp: 0 }] }, {
+      apiKey: 'fixture-key',
+      maxTokens: 512,
+      onPayload: p => ({ ...p, config: { ...p.config, maxOutputTokens: 4096 } }),
+    })) errOverConfig.push(ev)
+    assert.equal(errOverConfig.at(-1).type, 'error')
+    assert.match(errOverConfig.at(-1).error?.errorMessage ?? '', /payload maxOutputTokens must be an integer between 1 and 1024/)
+    const errOverExtra = []
+    for await (const ev of cappedProvider.streamSimple(cappedModel, { messages: [{ role: 'user', content: 'hi', timestamp: 0 }] }, {
+      apiKey: 'fixture-key',
+      maxTokens: 512,
+      onPayload: p => ({ ...p, config: { ...p.config, httpOptions: { extraBody: { generationConfig: { maxOutputTokens: 4096 } } } } }),
+    })) errOverExtra.push(ev)
+    assert.equal(errOverExtra.at(-1).type, 'error')
+    assert.match(errOverExtra.at(-1).error?.errorMessage ?? '', /payload maxOutputTokens must be an integer between 1 and 1024/)
+    assert.equal(wire.length, beforeCapWire)
+
+    const fullLongDecode = createArgonAdapter(ctx, { longDecode: true, contextWindow: 1048576, maxTokens: 1048576, routes: { hasVertexNeon: true } })
+    const out1m = await collect(fullLongDecode.stream(req('high', NEON_MODEL, 1048576)))
+    assert.equal(out1m.at(-1).reason.kind, 'stop')
+    assert.equal(wire.at(-1).body.generationConfig.maxOutputTokens, 1048576)
+
+    // 关闭长解码时：显式 maxTokens 32768 在入口拒绝 32769；若 onPayload 试图绕过到 70000 须在出站处被 65536 上限拦截。
+    const noLongCapped = createArgonAdapter(ctx, { longDecode: false, maxTokens: 32768, routes: { hasVertexNeon: true } })
+    await assert.rejects(() => collect(noLongCapped.stream(req('medium', NEON_MODEL, 32769))), { code: 'INVALID_REQUEST' })
+    const beforeNoLongWire = wire.length
+    const noLongDefault = createArgonAdapter(ctx, { longDecode: false, routes: { hasVertexNeon: true } })
+    const noLongSnap = noLongDefault.inner.current()
+    const noLongProvider = noLongSnap.profiles.get(PROVIDER).piProvider
+    const noLongModel = noLongSnap.models.getModel(PROVIDER, NEON_MODEL)
+    const errOverSingle = []
+    for await (const ev of noLongProvider.streamSimple(noLongModel, { messages: [{ role: 'user', content: 'hi', timestamp: 0 }] }, {
+      apiKey: 'fixture-key',
+      maxTokens: 1024,
+      onPayload: p => ({ ...p, config: { ...p.config, maxOutputTokens: 70000 } }),
+    })) errOverSingle.push(ev)
+    assert.equal(errOverSingle.at(-1).type, 'error')
+    assert.match(errOverSingle.at(-1).error?.errorMessage ?? '', /payload maxOutputTokens must be an integer between 1 and 65536/)
+    assert.equal(wire.length, beforeNoLongWire)
+
+    // 2. 未显式配置 reasoning 时，Neon 缺省为 high 而 Argon 仍为 medium。
+    const neonDefaultAdapter = createArgonAdapter(ctx, { routes: { hasVertexNeon: true } })
+    await collect(neonDefaultAdapter.stream(req(undefined, NEON_MODEL)))
+    assert.deepEqual(wire.at(-1).body.generationConfig.thinkingConfig, { thinkingLevel: 'HIGH', includeThoughts: true })
+    const argonDefaultAdapter = createArgonAdapter(ctx, { routes: { hasVertex: true } })
+    await collect(argonDefaultAdapter.stream(req(undefined, MODEL)))
+    assert.deepEqual(wire.at(-1).body.generationConfig.thinkingConfig, { thinkingLevel: 'MEDIUM', includeThoughts: true })
+
+    // 3. 重叠安装 installGemini4PiAiPatch (A, B)：先卸 A 时 B 与 ApiClient 补丁与模型属性均维持有效；再卸 B 才完整恢复原状态。
+    ensureGemini4ApiClientPatch()()
+    const apiProto = Object.getPrototypeOf(new GoogleGenAI({ apiKey: 'probe' }).apiClient)
+    const origRequestStream = apiProto.requestStream
+    const baseGoogle = googleProvider()
+    const rawNeon = {
+      id: NEON_MODEL, name: 'Gemini 4 Neon', provider: 'google', api: 'google-generative-ai',
+      baseUrl: 'https://generativelanguage.googleapis.com/v1beta', reasoning: false, input: ['text'], contextWindow: 1048576, maxTokens: 131072,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    }
+    const piProvider = { ...baseGoogle, id: 'google', name: 'Google', getModels: () => [rawNeon] }
+    const profiles = new Map([['google', {
+      provider: 'google', displayName: 'Google', piProvider, reasoning: undefined, streamIdleTimeoutMs: 300000,
+      maxRequestImageBytes: 20971520, requestImagePixelBudget: 4194304, requestImageMaxBytes: 1048576,
+      retryPolicy: resolveRetryPolicy(undefined, 'test'), modelErrors: new Map(), configuredMaxTokens: new Map([[NEON_MODEL, 131072]]),
+    }]])
+    const piAdapter = new PiAiAdapter({
+      profiles: () => profiles,
+      resolveApiKey: async () => 'fixture-google-api-key',
+      auth: { authContext: { env: async () => undefined, fileExists: async () => false } },
+    })
+
+    const recsA = [], recsB = []
+    const disposeA = installGemini4PiAiPatch(r => recsA.push(r), { longDecode: false })
+    const disposeB = installGemini4PiAiPatch(r => recsB.push(r), { longDecode: true })
+    try {
+      piAdapter.current()
+      assert.equal(rawNeon.reasoning, true)
+      assert.notEqual(apiProto.requestStream, origRequestStream)
+
+      disposeA()
+      // A 已卸载，B 仍生效：rawNeon 与 apiProto.requestStream 维持补丁，B 的 longDecode: true 正常生效。
+      assert.equal(rawNeon.reasoning, true)
+      assert.equal(rawNeon.thinkingLevelMap.xhigh, 'xhigh')
+      assert.notEqual(apiProto.requestStream, origRequestStream)
+      const outB = await collect(piAdapter.stream({ ...req(undefined, NEON_MODEL, 131072), provider: 'google' }))
+      assert.equal(outB.at(-1).reason.kind, 'stop')
+      assert.equal(recsA.length, 0)
+      assert.equal(recsB.length, 1)
+      assert.equal(recsB[0].thinkingLevel, 'HIGH')
+      assert.equal(recsB[0].longDecodeEnabled, true)
+
+      disposeB()
+      assert.equal(rawNeon.reasoning, false)
+      assert.equal('thinkingLevelMap' in rawNeon, false)
+      assert.equal(apiProto.requestStream, origRequestStream)
+    } finally {
+      disposeA()
+      disposeB()
+    }
+  } finally {
+    mode = 'tool'
+  }
+})

@@ -2,6 +2,19 @@
 
 All notable changes to **Gemini 4 Adapter** (`dsh-vertex-argon`) are documented in this file.
 
+## [2.2.3] - 2026-11-19
+
+### Fixed
+- **Signature Part Boundary Preservation (`google-signatures.js`)**:
+  - Split consecutive signed parts (`text` / `thinking`) and signed empty-text parts in `observe()` so distinct signatures and original wire Part boundaries round-trip 1:1 without merging.
+- **Outbound Payload Cap Enforcement & Full `1,048,576` Long-Decode Headroom (`adapter.js`)**:
+  - Enforced the resolved route/mode `maxOutputTokens` ceiling after `onPayload` transforms (including `httpOptions.extraBody` and `config.maxOutputTokens` / `max_output_tokens`) and separated host compaction headroom (`contextWindow - 131,072`) from the protocol ceiling (`1,048,576`) so explicit `1,048,576` long-decode budgets are reachable.
+- **Eager Interactions Budget/Option Validation & Model-Aware Defaults (`adapter.js`, `interaction-adapter.js`, `interactions-input.js`)**:
+  - Validated `maxTokens` (including `null` and configured caps) and explicit conflicting dual reasoning fields synchronously in `ArgonAdapter.prepareCall` before entering the Interactions async generator.
+  - Added `defaultReasoningForModel` (`'high'` for Hydrogen / Neon when user config omits `reasoning`, keeping `'medium'` for Argon / Carbon and channel-level UI defaults).
+- **Overlapping `installGemini4PiAiPatch` / `ensureGemini4ApiClientPatch` Safety (`adapter.js`)**:
+  - Managed active installers via an ordered owner stack + shared first-touch model state and reference-counted `ApiClient.prototype.requestStream` leases so out-of-order disposal preserves remaining active patches and restores original properties cleanly when the last installer unmounts.
+
 ## [2.2.2] - 2026-11-19
 
 ### Fixed

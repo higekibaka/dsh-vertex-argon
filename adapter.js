@@ -6,7 +6,7 @@ import { createArgonDiagnosticTracker } from './diagnostics.js'
 import { createInteractionsHandler } from './interaction-adapter.js'
 import { interactionImageRequestTarget } from './interaction-image.js'
 import { SERVICE_TIERS, resolveServicePolicy, mergeServiceHeaders } from './service-level.js'
-import { generateContentHistory, resolveOfficialGemini4Model, resolveGemini4ReasoningLevel } from './interactions-input.js'
+import { generateContentHistory, resolveOfficialGemini4Model, resolveGemini4ReasoningLevel, defaultReasoningForModel } from './interactions-input.js'
 import { createGoogleSignatureBridge } from './google-signatures.js'
 import { createInteractionQuery } from './interaction-query.js'
 import { assertPreparedStructuredOutput } from './structured-output.js'
@@ -277,6 +277,7 @@ function clearAutoToolModeFallback(key) {
 
 let apiClientProtoRef = null
 let apiClientPatch = null
+const apiClientLeases = new Set()
 
 function getApiClientPrototype() {
   if (apiClientProtoRef) return apiClientProtoRef
@@ -289,29 +290,65 @@ function getApiClientPrototype() {
   return apiClientProtoRef
 }
 
-export function ensureGemini4ApiClientPatch() {
+function isGemini4ApiClientPatched() {
+  return Boolean(apiClientPatch?.isActive?.())
+}
+
+export function ensureGemini4ApiClientPatch({ lease = false } = {}) {
   const proto = getApiClientPrototype()
   if (!proto || typeof proto.requestStream !== 'function') return () => {}
-  if (apiClientPatch) return apiClientPatch.dispose
+  if (apiClientPatch && apiClientPatch.isActive()) {
+    const patch = apiClientPatch
+    if (lease) {
+      const token = Symbol('argonApiClientLease')
+      apiClientLeases.add(token)
+      return () => {
+        if (!apiClientLeases.delete(token)) return
+        patch.maybeDispose()
+      }
+    }
+    return patch.disposeUnowned
+  }
   const orig = proto.requestStream
   let active = true
+  let unowned = !lease
+  const token = lease ? Symbol('argonApiClientLease') : null
+  if (token) apiClientLeases.add(token)
   function patchedRequestStream(request) {
     const meta = request?.httpOptions?.[ARGON_LONG_DECODE_SYMBOL]
     if (!active || !meta) return orig.call(this, request)
     return continueArgonRequestStream(this, orig, request, meta)
   }
+  const deactivate = () => {
+    if (!active) return
+    active = false
+    unowned = false
+    apiClientLeases.clear()
+    // A later wrapper belongs to its installer, even when it delegates to us.
+    if (proto.requestStream === patchedRequestStream) proto.requestStream = orig
+    if (apiClientPatch === patch) apiClientPatch = null
+  }
   const patch = {
-    dispose() {
+    isActive: () => active,
+    disposeUnowned() {
       if (!active) return
-      active = false
-      // A later wrapper belongs to its installer, even when it delegates to us.
-      if (proto.requestStream === patchedRequestStream) proto.requestStream = orig
-      if (apiClientPatch === patch) apiClientPatch = null
+      unowned = false
+      if (apiClientLeases.size === 0) deactivate()
+    },
+    maybeDispose() {
+      if (!active) return
+      if (!unowned && apiClientLeases.size === 0) deactivate()
     },
   }
   proto.requestStream = patchedRequestStream
   apiClientPatch = patch
-  return patch.dispose
+  if (lease) {
+    return () => {
+      if (!apiClientLeases.delete(token)) return
+      patch.maybeDispose()
+    }
+  }
+  return patch.disposeUnowned
 }
 
 function wrapGemini4Stream(rawStream, tracker, signal, retryKey) {
@@ -367,13 +404,39 @@ function wrapGemini4Stream(rawStream, tracker, signal, retryKey) {
   }
 }
 
-export function assertGemini4MaxTokens(options, requestModel, longDecode = true) {
-  if (!options || options.maxTokens === undefined) return
-  const routeCeiling = requestModel?.provider === PROVIDER
+function routeCeilingFor(requestModel, longDecode = true) {
+  return requestModel?.provider === PROVIDER
     ? (requestModel?.[MAX_TOKENS_CEILING] ?? MAX_LONG_DECODE_TOKENS)
     : (Number.isSafeInteger(requestModel?.maxTokens) && requestModel.maxTokens > 0
       ? Math.min(MAX_LONG_DECODE_TOKENS, requestModel.maxTokens)
       : (longDecode === false ? MAX_SINGLE_CALL_TOKENS : MAX_LONG_DECODE_TOKENS))
+}
+
+function assertOutboundMaxOutputTokens(body, cleanConfig, extraBody, ceiling) {
+  const locations = [
+    cleanConfig?.maxOutputTokens,
+    cleanConfig?.max_output_tokens,
+    body?.maxOutputTokens,
+    body?.max_output_tokens,
+    body?.generationConfig?.maxOutputTokens,
+    body?.generationConfig?.max_output_tokens,
+    extraBody?.maxOutputTokens,
+    extraBody?.max_output_tokens,
+    extraBody?.generationConfig?.maxOutputTokens,
+    extraBody?.generationConfig?.max_output_tokens,
+    extraBody?.generation_config?.maxOutputTokens,
+    extraBody?.generation_config?.max_output_tokens,
+  ]
+  for (const val of locations) {
+    if (val !== undefined && (!Number.isSafeInteger(val) || val < 1 || val > ceiling)) {
+      throw new LlmError(`Gemini 4 payload maxOutputTokens must be an integer between 1 and ${ceiling}.`, 'INVALID_REQUEST')
+    }
+  }
+}
+
+export function assertGemini4MaxTokens(options, requestModel, longDecode = true) {
+  if (!options || options.maxTokens === undefined) return
+  const routeCeiling = routeCeilingFor(requestModel, longDecode)
   if (
     !Number.isSafeInteger(options.maxTokens) ||
     options.maxTokens < 1 ||
@@ -392,7 +455,7 @@ export function gemini4StreamSimple(
   requestModel,
   context,
   options = {},
-  defaultLevel = 'medium',
+  defaultLevel = undefined,
   upstreamModelId = requestModel.id,
   longDecode = true,
   recordDiagnostic,
@@ -401,8 +464,8 @@ export function gemini4StreamSimple(
   structuredOutput,
 ) {
   assertPreparedStructuredOutput(structuredOutput)
-  ensureGemini4ApiClientPatch()
-  const fallback = defaultLevel ?? (/cyber-permissive/i.test(requestModel?.id ?? '') ? 'high' : 'medium')
+  if (!isGemini4ApiClientPatched()) ensureGemini4ApiClientPatch()
+  const fallback = defaultLevel ?? defaultReasoningForModel(requestModel?.id)
   const modelId = requestModel?.id
   const supportsXhigh = supportsXhighReasoning(modelId)
   const { level: rawLevel } = validateExplicitReasoningFields(options, modelId, fallback)
@@ -417,6 +480,8 @@ export function gemini4StreamSimple(
   }
   const { reasoning, reasoningEffort: _re, thinking, thinkingBudgets, temperature, onPayload: prior, onProviderStreamEvent: priorEvent, ...rest } = options
   assertGemini4MaxTokens(options, requestModel, longDecode)
+  const routeCeiling = routeCeilingFor(requestModel, longDecode)
+  const outboundCeiling = longDecode === false ? Math.min(routeCeiling, MAX_SINGLE_CALL_TOKENS) : routeCeiling
   const requestedMaxTokens = options.maxTokens ?? requestModel.maxTokens
   if (requestedMaxTokens !== undefined && (!Number.isSafeInteger(requestedMaxTokens) || requestedMaxTokens < 1 || requestedMaxTokens > MAX_LONG_DECODE_TOKENS)) {
     throw new LlmError('Invalid Gemini 4 maxTokens budget.', 'INVALID_REQUEST')
@@ -481,8 +546,17 @@ export function gemini4StreamSimple(
           const cleanExtraBody = { ...prevHttpOptions.extraBody }
           delete cleanExtraBody.cachedContent
           delete cleanExtraBody.cached_content
+          for (const cfgKey of ['generationConfig', 'generation_config']) {
+            if (cleanExtraBody[cfgKey] && typeof cleanExtraBody[cfgKey] === 'object' && !Array.isArray(cleanExtraBody[cfgKey])) {
+              const sub = { ...cleanExtraBody[cfgKey] }
+              delete sub.cachedContent
+              delete sub.cached_content
+              cleanExtraBody[cfgKey] = sub
+            }
+          }
           sanitizedHttpOptions.extraBody = cleanExtraBody
         }
+        assertOutboundMaxOutputTokens(body, cleanConfig, sanitizedHttpOptions.extraBody, outboundCeiling)
         const toolMode = shouldFallbackToAutoToolMode(retryKey) ? 'AUTO' : 'VALIDATED'
         return {
           ...body,
@@ -516,16 +590,25 @@ export function gemini4StreamSimple(
   )
 }
 
+let activePiAiPatchGeneration = null
+
 export function installGemini4PiAiPatch(recordDiagnostic, configInput = {}, responseHub) {
-  const unpatchApiClient = ensureGemini4ApiClientPatch()
+  const unpatchApiClient = ensureGemini4ApiClientPatch({ lease: true })
   const proto = PiAiAdapter?.prototype
   if (!proto || typeof proto.current !== 'function') return unpatchApiClient
+  const owner = { recordDiagnostic, configInput, responseHub }
+  if (activePiAiPatchGeneration && activePiAiPatchGeneration.active) {
+    const existing = activePiAiPatchGeneration
+    existing.owners.push(owner)
+    return () => existing.removeOwner(owner, unpatchApiClient)
+  }
   const origCurrent = proto.current
   const origPrepareCall = typeof proto.prepareCall === 'function' ? proto.prepareCall : null
   const origProtoStream = typeof proto.stream === 'function' ? proto.stream : null
   const patchedProviders = new Map()
   const patchedModels = new Map()
-  let active = true
+  const owners = [owner]
+  const currentOwner = () => owners.at(-1)
   const ensureGemini4Capabilities = piProvider => {
     if (typeof piProvider?.getModels !== 'function') return
     try {
@@ -565,20 +648,21 @@ export function installGemini4PiAiPatch(recordDiagnostic, configInput = {}, resp
     const origStream = piProvider.stream
     const origStreamSimple = piProvider.streamSimple
     const dispatchGemini4 = (requestModel, context, options = {}) => {
-      const cfg = resolveConfigValues(configInput)
+      const activeOwner = currentOwner()
+      const cfg = resolveConfigValues(activeOwner?.configInput)
       return gemini4StreamSimple(
         (m, c, o) => origStream.call(piProvider, m, c, o), requestModel, context, options,
-        defaultReasoning, requestModel.id, cfg.longDecode, recordDiagnostic,
+        defaultReasoning, requestModel.id, cfg.longDecode, activeOwner?.recordDiagnostic,
         resolveServicePolicy(cfg, requestModel.api, 'generate-content'),
-        { responseHub, retainRawResponses: cfg.retainRawResponses },
+        { responseHub: activeOwner?.responseHub, retainRawResponses: cfg.retainRawResponses },
       )
     }
     function patchedStreamSimple(requestModel, context, options = {}) {
-      if (active && isGemini4Model(requestModel)) return dispatchGemini4(requestModel, context, options)
+      if (gen.active && isGemini4Model(requestModel)) return dispatchGemini4(requestModel, context, options)
       return origStreamSimple.call(this, requestModel, context, options)
     }
     function patchedStream(requestModel, context, options = {}) {
-      if (active && isGemini4Model(requestModel)) return dispatchGemini4(requestModel, context, mapStreamThinkingOption(options))
+      if (gen.active && isGemini4Model(requestModel)) return dispatchGemini4(requestModel, context, mapStreamThinkingOption(options))
       return origStream.call(this, requestModel, context, options)
     }
     patchedProviders.set(piProvider, { origStream, patchedStream, origStreamSimple, patchedStreamSimple })
@@ -586,14 +670,14 @@ export function installGemini4PiAiPatch(recordDiagnostic, configInput = {}, resp
     piProvider.streamSimple = patchedStreamSimple
   }
   const isNativeGemini4Target = (instance, provider, model) =>
-    active &&
+    gen.active &&
     !(instance instanceof ArgonAdapter) &&
     (provider === 'google' || provider === NATIVE_PROVIDER) &&
     typeof model === 'string' &&
     /^(?:models\/)?gemini-4\b/i.test(model)
   function patchedCurrent() {
     const snapshot = origCurrent.call(this)
-    if (active && snapshot?.profiles instanceof Map) {
+    if (gen.active && snapshot?.profiles instanceof Map) {
       for (const profile of snapshot.profiles.values()) {
         if (profile?.piProvider) wrapProvider(profile.piProvider, profile.reasoning)
       }
@@ -608,9 +692,9 @@ export function installGemini4PiAiPatch(recordDiagnostic, configInput = {}, resp
     return {
       ...prepared,
       stream: options => {
-        if (!active) return origPreparedStream(options)
+        if (!gen.active) return origPreparedStream(options)
         const pinned = preparePinnedStreamOptions(options, provider, model)
-        if (resolvedModel) assertGemini4MaxTokens(pinned, resolvedModel, resolveConfigValues(configInput).longDecode)
+        if (resolvedModel) assertGemini4MaxTokens(pinned, resolvedModel, resolveConfigValues(currentOwner()?.configInput).longDecode)
         return origPreparedStream(generateContentHistory(pinned, model))
       },
     }
@@ -619,44 +703,56 @@ export function installGemini4PiAiPatch(recordDiagnostic, configInput = {}, resp
     if (options && typeof options === 'object' && !Array.isArray(options) && isNativeGemini4Target(this, options.provider, options.model)) {
       const resolvedModel = this.current?.()?.models?.getModel?.(options.provider, options.model)
       const pinned = preparePinnedStreamOptions(options, options.provider, options.model)
-      if (resolvedModel) assertGemini4MaxTokens(pinned, resolvedModel, resolveConfigValues(configInput).longDecode)
+      if (resolvedModel) assertGemini4MaxTokens(pinned, resolvedModel, resolveConfigValues(currentOwner()?.configInput).longDecode)
       const normalized = generateContentHistory(pinned, options.model)
       yield* origProtoStream.call(this, normalized)
       return
     }
     yield* origProtoStream.call(this, options)
   }
+  const gen = {
+    active: true,
+    owners,
+    removeOwner(targetOwner, ownerApiUnpatch) {
+      const idx = owners.indexOf(targetOwner)
+      if (idx === -1) return
+      owners.splice(idx, 1)
+      ownerApiUnpatch()
+      if (owners.length > 0 || !gen.active) return
+      gen.active = false
+      if (activePiAiPatchGeneration === gen) activePiAiPatchGeneration = null
+      if (proto.current === patchedCurrent) proto.current = origCurrent
+      if (origPrepareCall && proto.prepareCall === patchedPrepareCall) proto.prepareCall = origPrepareCall
+      if (origProtoStream && proto.stream === patchedProtoStream) proto.stream = origProtoStream
+      for (const [piProvider, { origStream, patchedStream, origStreamSimple, patchedStreamSimple }] of patchedProviders) {
+        if (piProvider.stream === patchedStream) piProvider.stream = origStream
+        if (piProvider.streamSimple === patchedStreamSimple) piProvider.streamSimple = origStreamSimple
+      }
+      patchedProviders.clear()
+      for (const [m, saved] of patchedModels) {
+        try {
+          if (saved.hadReasoning) m.reasoning = saved.reasoning
+          else delete m.reasoning
+          if (saved.hadMap) m.thinkingLevelMap = saved.thinkingLevelMap
+          else delete m.thinkingLevelMap
+        } catch {}
+      }
+      patchedModels.clear()
+    },
+  }
+  activePiAiPatchGeneration = gen
   proto.current = patchedCurrent
   if (origPrepareCall) proto.prepareCall = patchedPrepareCall
   if (origProtoStream) proto.stream = patchedProtoStream
-  return () => {
-    if (!active) return
-    active = false
-    unpatchApiClient()
-    if (proto.current === patchedCurrent) proto.current = origCurrent
-    if (origPrepareCall && proto.prepareCall === patchedPrepareCall) proto.prepareCall = origPrepareCall
-    if (origProtoStream && proto.stream === patchedProtoStream) proto.stream = origProtoStream
-    for (const [piProvider, { origStream, patchedStream, origStreamSimple, patchedStreamSimple }] of patchedProviders) {
-      if (piProvider.stream === patchedStream) piProvider.stream = origStream
-      if (piProvider.streamSimple === patchedStreamSimple) piProvider.streamSimple = origStreamSimple
-    }
-    patchedProviders.clear()
-    for (const [m, saved] of patchedModels) {
-      try {
-        if (saved.hadReasoning) m.reasoning = saved.reasoning
-        else delete m.reasoning
-        if (saved.hadMap) m.thinkingLevelMap = saved.thinkingLevelMap
-        else delete m.thinkingLevelMap
-      } catch {}
-    }
-    patchedModels.clear()
-  }
+  return () => gen.removeOwner(owner, unpatchApiClient)
 }
 
 export function resolveConfigValues(raw = {}) {
   const source = typeof raw === 'function' ? raw() : raw
   const showInModelPicker = readVal(source?.showInModelPicker) ?? true
-  const reasoning = readVal(source?.reasoning) ?? 'medium'
+  const rawReasoning = readVal(source?.reasoning)
+  const hasExplicitReasoning = rawReasoning !== undefined
+  const reasoning = rawReasoning ?? 'medium'
   const longDecode = readVal(source?.longDecode) ?? true
   const contextWindow = readVal(source?.contextWindow) ?? 1048576
   const rawMaxTokens = readVal(source?.maxTokens) ?? MAX_SINGLE_CALL_TOKENS
@@ -685,11 +781,12 @@ export function resolveConfigValues(raw = {}) {
   const safeCompactionCap = contextWindow > COMPACTION_HEADROOM_FLOOR ? contextWindow - COMPACTION_HEADROOM_FLOOR : contextWindow
   const maxTokens = Math.max(1, Math.min(capByMode, safeCompactionCap))
   const explicitMaxTokensCap = hasExplicitMaxTokens
-    ? Math.max(1, Math.min(rawMaxTokens, safeCompactionCap))
-    : Math.max(1, Math.min(MAX_LONG_DECODE_TOKENS, safeCompactionCap))
+    ? Math.max(1, Math.min(rawMaxTokens, contextWindow, MAX_LONG_DECODE_TOKENS))
+    : Math.max(1, Math.min(MAX_LONG_DECODE_TOKENS, contextWindow))
   return {
     showInModelPicker: Boolean(showInModelPicker),
     reasoning,
+    hasExplicitReasoning,
     longDecode: enabledLongDecode,
     contextWindow,
     maxTokens,
@@ -708,7 +805,7 @@ export function resolveConfigValues(raw = {}) {
 }
 
 /** Serve the official Vertex AI and Gemini API models in one plugin group. */
-export function argonProvider(nativeVertex, models, defaultLevel = 'medium', nativeGoogle = googleProvider(), longDecode = true, recordDiagnostic, serviceConfig = {}, responseHub, structuredOutput) {
+export function argonProvider(nativeVertex, models, defaultLevel = undefined, nativeGoogle = googleProvider(), longDecode = true, recordDiagnostic, serviceConfig = {}, responseHub, structuredOutput) {
   const modelMap = new Map((Array.isArray(models) ? models : [models]).map(m => [m.id, m]))
   return {
     id: PROVIDER,
@@ -789,15 +886,19 @@ export class ArgonAdapter extends LlmAdapter {
     const protocol = googleApi ? cfg?.googleProtocol : cfg?.vertexProtocol
     if (provider === PROVIDER && cfg) resolveServicePolicy(cfg, googleApi ? 'google-generative-ai' : 'google-vertex', protocol)
     const prepared = await this.inner.prepareCall(provider, model, signal)
-    if (provider === PROVIDER && protocol === 'interactions' && this.interactionHandler) {
-      return {
-        model: prepared.model,
-        stream: options => this.interactionHandler(syncGemini4ReasoningOptions(pinPreparedOptions(options, provider, model), model), cfg),
-      }
-    }
     const resolvedModel = provider === PROVIDER
       ? (this.inner.current?.()?.models?.getModel?.(provider, model) ?? (cfg ? { provider, id: model, [MAX_TOKENS_CEILING]: cfg.explicitMaxTokensCap } : undefined))
       : undefined
+    if (provider === PROVIDER && protocol === 'interactions' && this.interactionHandler) {
+      return {
+        model: prepared.model,
+        stream: options => {
+          const pinned = pinPreparedOptions(options, provider, model)
+          assertGemini4MaxTokens(pinned, resolvedModel, cfg?.longDecode)
+          return this.interactionHandler(syncGemini4ReasoningOptions(pinned, model), cfg)
+        },
+      }
+    }
     return {
       ...prepared,
       stream: options => {
@@ -854,6 +955,7 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
     const detected = detectPiAiArgonRoutes(ctx, cfg.routes)
     const key = JSON.stringify({
       r: cfg.reasoning,
+      explicitR: cfg.hasExplicitReasoning,
       ld: cfg.longDecode,
       cw: cfg.contextWindow,
       mt: cfg.maxTokens,
@@ -1033,13 +1135,14 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
       modelDescriptor[MAX_TOKENS_CEILING] = cfg.explicitMaxTokensCap
     }
     const configuredMaxTokens = new Map(models.map(m => [m.id, cfg.maxTokens]))
-    const provider = argonProvider({ ...nativeVertex, auth }, models, cfg.reasoning, nativeGoogle, cfg.longDecode, recordDiagnostic, cfg, responseHub, structuredOutput)
+    const configuredReasoning = cfg.hasExplicitReasoning ? cfg.reasoning : undefined
+    const provider = argonProvider({ ...nativeVertex, auth }, models, configuredReasoning, nativeGoogle, cfg.longDecode, recordDiagnostic, cfg, responseHub, structuredOutput)
     cachedKey = key
     cachedProfiles = new Map([[PROVIDER, {
       provider: PROVIDER,
       displayName: 'Gemini 4 Adapter',
       piProvider: provider,
-      reasoning: cfg.reasoning,
+      reasoning: configuredReasoning,
       streamIdleTimeoutMs: cfg.longDecode ? STREAM_READ_TIMEOUT_MS + 60000 : STREAM_READ_TIMEOUT_MS,
       maxRequestImageBytes: 20 * 1024 * 1024,
       requestImagePixelBudget: 2048 * 2048,

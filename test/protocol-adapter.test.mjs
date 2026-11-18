@@ -539,3 +539,19 @@ test('buildInteractionRequest isolates reused toolCallId FIFO queues across fore
   /Complete the pending Interactions tool call/,
  )
 })
+
+test('Interactions prepared.stream rejects out-of-cap or null maxTokens eagerly and defaults Neon to high', async () => {
+  const config = { maxTokens: 32768, longDecode: true, googleProtocol: 'interactions', vertexProtocol: 'interactions', routes: { hasVertexNeon: true, hasGoogleNeon: true } }
+  const adapter = createArgonAdapter(ctx, config)
+  const prepared = await adapter.prepareCall(PROVIDER, NEON_MODEL)
+  const before = wire.length
+  assert.throws(() => prepared.stream({ ...req(NEON_MODEL), maxTokens: 40000 }), e => e?.code === 'INVALID_REQUEST')
+  assert.throws(() => prepared.stream({ ...req(NEON_MODEL), maxTokens: null }), e => e?.code === 'INVALID_REQUEST')
+  await assert.rejects(() => collect(adapter.stream({ ...req(NEON_MODEL), maxTokens: 40000 })), e => e?.code === 'INVALID_REQUEST')
+  assert.equal(wire.length, before)
+
+  const neonBuilt = await buildInteractionRequest(req(NEON_MODEL), { route: 'google-vertex', upstreamModel: 'gemini-4-neon' })
+  assert.equal(neonBuilt.generation_config.thinking_level, 'high')
+  const argonBuilt = await buildInteractionRequest(req(MODEL), { route: 'google-vertex', upstreamModel: 'gemini-4-argon' })
+  assert.equal(argonBuilt.generation_config.thinking_level, 'medium')
+})

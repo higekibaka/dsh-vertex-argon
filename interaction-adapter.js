@@ -4,15 +4,17 @@ import { durableInteractionTransport } from './interaction-state.js'
 import { createArgonDiagnosticTracker } from './diagnostics.js'
 import { interactionExitReason } from './interaction-lifecycle.js'
 import { resolveServicePolicy } from './service-level.js'
-import { resolveGemini4ReasoningLevel } from './interactions-input.js'
+import { resolveGemini4ReasoningLevel, defaultReasoningForModel } from './interactions-input.js'
 // 循环导入：adapter.js 只在本模块的函数被调用时才读取这些绑定，函数声明本身已提升。
 import { isGoogleApiModel, officialUpstreamModel } from './adapter.js'
 
 const terminalStates = new Set(['completed', 'requires_action', 'incomplete', 'failed', 'cancelled', 'budget_exceeded'])
 export function assertInteractionOptions(options, cfg, route) {
-  const max = options.maxTokens ?? cfg.maxTokens
-  if (!Number.isSafeInteger(max) || max <= 0 || max > cfg.maxTokens) throw new Error('Interactions output budget must be a positive integer within the configured effective cap.')
-  const resolvedReasoning = resolveGemini4ReasoningLevel(options, options.model, cfg.reasoning)
+  const max = options.maxTokens === undefined ? cfg.maxTokens : options.maxTokens
+  const maxCeiling = cfg.explicitMaxTokensCap ?? cfg.maxTokens
+  if (!Number.isSafeInteger(max) || max <= 0 || max > maxCeiling) throw new Error('Interactions output budget must be a positive integer within the configured effective cap.')
+  const defaultReasoning = cfg?.hasExplicitReasoning === false ? defaultReasoningForModel(options.model) : cfg.reasoning
+  const resolvedReasoning = resolveGemini4ReasoningLevel(options, options.model, defaultReasoning)
   if (!resolvedReasoning.ok) {
     if (resolvedReasoning.errorType === 'conflict') {
       throw new Error('Conflicting reasoning and reasoningEffort options in Interactions request.')

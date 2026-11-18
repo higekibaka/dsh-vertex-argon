@@ -128,7 +128,13 @@ export function createGoogleSignatureBridge(context, model) {
   const close = () => {
     if (!current) return
     const index = content.length - 1
-    emit({ type: current.type === 'text' ? 'text_end' : 'thinking_end', contentIndex: index, content: current.type === 'text' ? current.text : current.thinking })
+    const sig = current.type === 'text' ? current.textSignature : current.thinkingSignature
+    emit({
+      type: current.type === 'text' ? 'text_end' : 'thinking_end',
+      contentIndex: index,
+      content: current.type === 'text' ? current.text : current.thinking,
+      ...(sig ? { contentSignature: sig } : {}),
+    })
     current = undefined
   }
   const finishMessage = message => {
@@ -171,14 +177,18 @@ export function createGoogleSignatureBridge(context, model) {
         }
         if (part.text !== undefined) {
           const type = part.thought === true ? 'thinking' : 'text'
-          if (!current || current.type !== type) {
+          const sigKey = type === 'text' ? 'textSignature' : 'thinkingSignature'
+          const splitSigned = type === 'text'
+            ? (Boolean(current?.textSignature) || (Boolean(sig) && part.text === ''))
+            : (Boolean(sig) && (Boolean(current?.thinkingSignature) || part.text === ''))
+          if (!current || current.type !== type || splitSigned) {
             close(); current = type === 'text' ? { type, text: '' } : { type, thinking: '' }
             const index = start(current)
             emit({ type: type === 'text' ? 'text_start' : 'thinking_start', contentIndex: index })
           }
           const key = type === 'text' ? 'text' : 'thinking'
           current[key] += part.text
-          if (sig) current[type === 'text' ? 'textSignature' : 'thinkingSignature'] = sig
+          if (sig) current[sigKey] = sig
           emit({ type: type === 'text' ? 'text_delta' : 'thinking_delta', contentIndex: content.length - 1, delta: part.text })
         }
         if (part.functionCall) {

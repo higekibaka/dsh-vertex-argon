@@ -4,7 +4,7 @@
 
 **面向 [DeepSeek Harness](<https://github.com/deepseek-ai/deepseek-harness>) 的 Google 官方双通道（Vertex AI + Gemini Developer API）Gemini 4 适配器，原生支持 Argon、Carbon、Hydrogen 与 Neon 八模型路由、GenerateContent / Interactions 双协议、65K+ 多跳长解码与请求级诊断。**
 
-- **当前版本**：`2.2.2`（[CHANGELOG.md](<CHANGELOG.md>)）
+- **当前版本**：`2.2.3`（[CHANGELOG.md](<CHANGELOG.md>)）
 - **npm 包名**：`dsh-vertex-argon`（保留既有包名、官方通道路由与本地存储域 ID，官方通道用户可直接原地升级；`2.0.0` 已移除 `1.6.x` 非官方反代通道）
 - **运行要求**：DSH `>=0.2.0-rc.2`，Node.js `^22.19.0 || >=24.0.0`（见 [package.json](<package.json>)）
 
@@ -93,8 +93,8 @@ dsh plugin --profile desktop add dsh-vertex-argon
 | 分组 | 配置项 | 默认值 | 取值范围与说明 |
 |---|---|---|---|
 | 基础与生成 | `showInModelPicker` | `true` | 是否在会话模型选择器中显示 **Gemini 4 Adapter** 分组 |
-| 基础与生成 | `reasoning` | `medium` | 默认思考档位：`low` / `medium` / `high`（Hydrogen 与 Neon 会话内额外支持 `xhigh`） |
-| 基础与生成 | `maxTokens` | `65536` | `1`–`1048576`；超过 `65,536` 需启用长解码（窗口 > 131K 时自动预留 131,072 历史空间） |
+| 基础与生成 | `reasoning` | `medium`（UI 设置页）/ 未配置时 Hydrogen 与 Neon 模型默认 `high` | 默认思考档位：`low` / `medium` / `high`（Hydrogen 与 Neon 会话内额外支持 `xhigh`） |
+| 基础与生成 | `maxTokens` | `65536` | `1`–`1048576`；超过 `65,536` 需启用长解码；协议请求上限支持至 `1,048,576`（`configuredMaxTokens` 仍为宿主压缩预留 `131,072` 空间） |
 | 基础与生成 | `contextWindow` | `1048576` | `1`–`1048576`；供 DSH 本地预算与上下文压缩计算使用 |
 | 基础与生成 | `longDecode` | `true` | 控制 > 65,536 输出上限、GenerateContent 检查点续传与仅思考自愈 |
 | 协议与服务层级 | `googleProtocol` | `generate-content` | `generate-content` / `interactions`（仅作用于 Gemini API） |

@@ -16,8 +16,13 @@ export function resolveOfficialGemini4Model(modelId) {
     supportsXhigh: family === 'hydrogen' || family === 'neon',
   }
 }
+export function defaultReasoningForModel(modelId) {
+  const official = resolveOfficialGemini4Model(modelId)
+  if (official) return official.supportsXhigh ? 'high' : 'medium'
+  return /cyber-permissive/i.test(String(modelId ?? '')) ? 'high' : 'medium'
+}
 /** 统一校验 thinking/reasoning 双字段，显式非法或双字段互相冲突时当场失败，避免静默回退默认值。 */
-export function resolveGemini4ReasoningLevel(options, modelId, fallback = 'medium') {
+export function resolveGemini4ReasoningLevel(options, modelId, fallback = defaultReasoningForModel(modelId)) {
   const supportsXhigh = Boolean(resolveOfficialGemini4Model(modelId)?.supportsXhigh)
   const allowed = supportsXhigh ? ['low', 'medium', 'high', 'xhigh'] : ['low', 'medium', 'high']
   const validInputs = new Set([...allowed, 'max'])
@@ -138,7 +143,7 @@ export async function buildInteractionRequest(options, settings = {}) {
     throw new Error('Conflicting Gemini 4 models in Interactions request.')
   }
   const upstreamModel = resolvedUpstream?.upstreamModel ?? resolvedOption?.upstreamModel ?? 'gemini-4-argon'
-  const resolvedReasoning = resolveGemini4ReasoningLevel(options, upstreamModel, settings.reasoning ?? 'medium')
+  const resolvedReasoning = resolveGemini4ReasoningLevel(options, upstreamModel, settings.reasoning ?? defaultReasoningForModel(upstreamModel))
   for (const flag of [settings.background, settings.store]) if (flag !== undefined && typeof flag !== 'boolean') throw new Error('Interactions background and storage consent must be booleans.')
   if (!Number.isSafeInteger(max) || max<1 || max>1048576) throw new Error('Invalid Interactions output token budget.')
   if (!resolvedReasoning.ok) {
