@@ -119,11 +119,17 @@ export function apply(ctx, config) {
   const recordDiagnostic = record => hub.record(record)
   const adapter = createArgonAdapter(ctx, () => config, undefined, undefined, recordDiagnostic, taskHub, responseHub)
   const unpatchPiAi = installGemini4PiAiPatch(recordDiagnostic, () => config, responseHub)
-  const registration = ctx.llm.registerAdapter([PROVIDER], adapter)
-  ctx.effect(() => () => {
+  let registration
+  try {
+    registration = ctx.llm.registerAdapter([PROVIDER], adapter)
+    ctx.effect(() => () => {
+      unpatchPiAi()
+      registration?.()
+    })
+  } catch (error) {
     unpatchPiAi()
-    registration?.()
-  })
+    throw error
+  }
   if (typeof ctx.on === 'function') {
     ctx.on('llm/stream', (options, next) => associations.stream(options, next))
     ctx.on('agent/assistant-stream', payload => associations.frame(payload))

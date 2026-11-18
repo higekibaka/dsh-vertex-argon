@@ -412,6 +412,59 @@ function routeCeilingFor(requestModel, longDecode = true) {
       : (longDecode === false ? MAX_SINGLE_CALL_TOKENS : MAX_LONG_DECODE_TOKENS))
 }
 
+function isPlainObjectRecord(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const proto = Object.getPrototypeOf(value)
+  return proto === null || proto === Object.prototype
+}
+
+const EXTRA_BODY_STRIPPED_KEYS = [
+  'thinkingConfig',
+  'thinking_config',
+  'thinkingBudget',
+  'thinking_budget',
+  'includeThoughts',
+  'include_thoughts',
+  'temperature',
+  'topP',
+  'top_p',
+  'topK',
+  'top_k',
+  'candidateCount',
+  'candidate_count',
+  'frequencyPenalty',
+  'frequency_penalty',
+  'presencePenalty',
+  'presence_penalty',
+]
+
+function sanitizeGemini4ExtraBody(extraBody, stripExplicitCache) {
+  if (extraBody === undefined || extraBody === null) return extraBody
+  if (!isPlainObjectRecord(extraBody)) {
+    throw new LlmError('Gemini 4 httpOptions.extraBody must be a plain object.', 'INVALID_REQUEST')
+  }
+  const cleanExtraBody = { ...extraBody }
+  for (const key of EXTRA_BODY_STRIPPED_KEYS) delete cleanExtraBody[key]
+  if (stripExplicitCache) {
+    delete cleanExtraBody.cachedContent
+    delete cleanExtraBody.cached_content
+  }
+  for (const cfgKey of ['generationConfig', 'generation_config']) {
+    if (cleanExtraBody[cfgKey] === undefined || cleanExtraBody[cfgKey] === null) continue
+    if (!isPlainObjectRecord(cleanExtraBody[cfgKey])) {
+      throw new LlmError(`Gemini 4 httpOptions.extraBody.${cfgKey} must be a plain object.`, 'INVALID_REQUEST')
+    }
+    const sub = { ...cleanExtraBody[cfgKey] }
+    for (const key of EXTRA_BODY_STRIPPED_KEYS) delete sub[key]
+    if (stripExplicitCache) {
+      delete sub.cachedContent
+      delete sub.cached_content
+    }
+    cleanExtraBody[cfgKey] = sub
+  }
+  return cleanExtraBody
+}
+
 function assertOutboundMaxOutputTokens(body, cleanConfig, extraBody, ceiling) {
   const locations = [
     cleanConfig?.maxOutputTokens,
@@ -482,7 +535,7 @@ export function gemini4StreamSimple(
   assertGemini4MaxTokens(options, requestModel, longDecode)
   const routeCeiling = routeCeilingFor(requestModel, longDecode)
   const outboundCeiling = longDecode === false ? Math.min(routeCeiling, MAX_SINGLE_CALL_TOKENS) : routeCeiling
-  const requestedMaxTokens = options.maxTokens ?? requestModel.maxTokens
+  const requestedMaxTokens = options.maxTokens === undefined ? requestModel.maxTokens : options.maxTokens
   if (requestedMaxTokens !== undefined && (!Number.isSafeInteger(requestedMaxTokens) || requestedMaxTokens < 1 || requestedMaxTokens > MAX_LONG_DECODE_TOKENS)) {
     throw new LlmError('Invalid Gemini 4 maxTokens budget.', 'INVALID_REQUEST')
   }
@@ -537,32 +590,21 @@ export function gemini4StreamSimple(
             ? cleanConfig.httpOptions
             : {}
         const sanitizedHttpOptions = { ...prevHttpOptions }
-        if (
-          supportsXhigh &&
-          prevHttpOptions.extraBody &&
-          typeof prevHttpOptions.extraBody === 'object' &&
-          !Array.isArray(prevHttpOptions.extraBody)
-        ) {
-          const cleanExtraBody = { ...prevHttpOptions.extraBody }
-          delete cleanExtraBody.cachedContent
-          delete cleanExtraBody.cached_content
-          for (const cfgKey of ['generationConfig', 'generation_config']) {
-            if (cleanExtraBody[cfgKey] && typeof cleanExtraBody[cfgKey] === 'object' && !Array.isArray(cleanExtraBody[cfgKey])) {
-              const sub = { ...cleanExtraBody[cfgKey] }
-              delete sub.cachedContent
-              delete sub.cached_content
-              cleanExtraBody[cfgKey] = sub
-            }
-          }
-          sanitizedHttpOptions.extraBody = cleanExtraBody
+        if (Object.hasOwn(prevHttpOptions, 'extraBody') && prevHttpOptions.extraBody !== undefined) {
+          sanitizedHttpOptions.extraBody = sanitizeGemini4ExtraBody(prevHttpOptions.extraBody, supportsXhigh)
         }
         assertOutboundMaxOutputTokens(body, cleanConfig, sanitizedHttpOptions.extraBody, outboundCeiling)
+        const resolvedPayloadMax = cleanConfig.maxOutputTokens !== undefined
+          ? cleanConfig.maxOutputTokens
+          : (cleanConfig.max_output_tokens !== undefined ? cleanConfig.max_output_tokens : (effectiveMaxTokens ?? outboundCeiling))
+        delete cleanConfig.max_output_tokens
         const toolMode = shouldFallbackToAutoToolMode(retryKey) ? 'AUTO' : 'VALIDATED'
         return {
           ...body,
           model: upstreamModelId,
           config: {
             ...cleanConfig,
+            maxOutputTokens: resolvedPayloadMax,
             ...(cleanConfig.tools?.some(tool => tool.functionDeclarations?.length) ? {
               toolConfig: {
                 ...cleanConfig.toolConfig,
@@ -814,9 +856,23 @@ export function argonProvider(nativeVertex, models, defaultLevel = undefined, na
     getModels: () => [...modelMap.values()],
     streamSimple(requestModel, context, options = {}) {
       const configured = modelMap.get(requestModel?.id)
-      if (!configured || requestModel.provider !== PROVIDER) {
+      if (!configured || requestModel?.provider !== PROVIDER) {
         throw new LlmError('Gemini 4 Adapter only serves configured Gemini 4 routes.', 'UNSUPPORTED_OPTION')
       }
+      if (requestModel.api !== undefined && requestModel.api !== configured.api) {
+        throw new LlmError('Gemini 4 Adapter only serves google-vertex or google-generative-ai.', 'UNSUPPORTED_OPTION')
+      }
+      const effectiveModel = {
+        ...configured,
+        ...requestModel,
+        id: configured.id,
+        provider: PROVIDER,
+        api: configured.api,
+        maxTokens: configured.maxTokens,
+        thinkingLevelMap: configured.thinkingLevelMap,
+        [MAX_TOKENS_CEILING]: configured[MAX_TOKENS_CEILING] ?? (Number.isSafeInteger(configured.maxTokens) ? configured.maxTokens : undefined),
+      }
+      const requestedMaxTokens = options.maxTokens === undefined ? configured.maxTokens : options.maxTokens
       const { env: rawEnv, apiKey: vertexApiKey, ...restOptions } = options
       const cleanEnv = rawEnv ? { ...rawEnv } : undefined
       if (cleanEnv) {
@@ -828,9 +884,9 @@ export function argonProvider(nativeVertex, models, defaultLevel = undefined, na
         const policy = resolveServicePolicy(serviceConfig, 'google-generative-ai', 'generate-content')
         return gemini4StreamSimple(
           (m, c, o) => nativeGoogle.stream(m, c, o),
-          requestModel,
+          effectiveModel,
           context,
-          { ...restOptions, ...(cleanEnv ? { env: cleanEnv } : {}), ...(apiKey ? { apiKey } : {}), maxTokens: options.maxTokens ?? configured.maxTokens },
+          { ...restOptions, ...(cleanEnv ? { env: cleanEnv } : {}), ...(apiKey ? { apiKey } : {}), maxTokens: requestedMaxTokens },
           defaultLevel,
           officialUpstreamModel(configured.id),
           longDecode,
@@ -839,14 +895,14 @@ export function argonProvider(nativeVertex, models, defaultLevel = undefined, na
           { responseHub, retainRawResponses: serviceConfig.retainRawResponses }, structuredOutput,
         )
       }
-      if (requestModel.api !== 'google-vertex') {
+      if (effectiveModel.api !== 'google-vertex') {
         throw new LlmError('Gemini 4 Adapter only serves google-vertex or google-generative-ai.', 'UNSUPPORTED_OPTION')
       }
       return gemini4StreamSimple(
         (m, c, o) => nativeVertex.stream(m, c, o),
-        requestModel,
+        effectiveModel,
         context,
-        { ...restOptions, ...(cleanEnv ? { env: cleanEnv } : {}), ...(vertexApiKey ? { apiKey: vertexApiKey } : {}), maxTokens: options.maxTokens ?? configured.maxTokens },
+        { ...restOptions, ...(cleanEnv ? { env: cleanEnv } : {}), ...(vertexApiKey ? { apiKey: vertexApiKey } : {}), maxTokens: requestedMaxTokens },
         defaultLevel,
         officialUpstreamModel(configured.id),
         longDecode,

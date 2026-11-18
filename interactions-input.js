@@ -128,7 +128,9 @@ function findUnclaimedToolResultIndex(messages, startIndex, toolCallId, claimedT
 // Completed foreign-protocol tool rounds become a textual transcript, never
 // forged function calls or fake thought signatures.
 export async function buildInteractionRequest(options, settings = {}) {
-  const max = options.maxTokens ?? settings.maxTokens ?? 65536
+  const rawMax = options.maxTokens !== undefined
+    ? options.maxTokens
+    : (settings.maxTokens !== undefined ? settings.maxTokens : 65536)
   const hasExplicitUpstream = !isOmittedModel(settings.upstreamModel)
   const hasExplicitOption = !isOmittedModel(options.model)
   const resolvedUpstream = hasExplicitUpstream ? resolveOfficialGemini4Model(settings.upstreamModel) : null
@@ -145,7 +147,8 @@ export async function buildInteractionRequest(options, settings = {}) {
   const upstreamModel = resolvedUpstream?.upstreamModel ?? resolvedOption?.upstreamModel ?? 'gemini-4-argon'
   const resolvedReasoning = resolveGemini4ReasoningLevel(options, upstreamModel, settings.reasoning ?? defaultReasoningForModel(upstreamModel))
   for (const flag of [settings.background, settings.store]) if (flag !== undefined && typeof flag !== 'boolean') throw new Error('Interactions background and storage consent must be booleans.')
-  if (!Number.isSafeInteger(max) || max<1 || max>1048576) throw new Error('Invalid Interactions output token budget.')
+  if (!Number.isSafeInteger(rawMax) || rawMax<1 || rawMax>1048576) throw new Error('Invalid Interactions output token budget.')
+  const max = settings.longDecode === false ? Math.min(rawMax, 65536) : rawMax
   if (!resolvedReasoning.ok) {
     if (resolvedReasoning.errorType === 'conflict') {
       throw new Error('Conflicting reasoning and reasoningEffort options in Interactions request.')

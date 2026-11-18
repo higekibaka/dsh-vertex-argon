@@ -1739,3 +1739,88 @@ test('third review fixes: onPayload maxOutputTokens cap, 1M long-decode ceiling,
     mode = 'tool'
   }
 })
+
+test('fourth review fixes: extraBody thinking sanitization, omitted onPayload maxOutputTokens restoration, cloned provider ceiling, maxTokens:null, and apply rollback', async () => {
+  mode = 'text'
+  try {
+    const extraAdapter = createArgonAdapter(ctx, { longDecode: true, maxTokens: 32768, routes: { hasVertexNeon: true } })
+    const extraSnap = extraAdapter.inner.current()
+    const extraProvider = extraSnap.profiles.get(PROVIDER).piProvider
+    const neonModel = extraSnap.models.getModel(PROVIDER, NEON_MODEL)
+
+    // 1. extraBody.generationConfig.thinkingConfig / thinkingBudget 等不得覆盖已选思考档，同时保留 customFlag。
+    const extraEvents = []
+    for await (const ev of extraProvider.streamSimple(neonModel, { messages: [{ role: 'user', content: 'hi', timestamp: 0 }] }, {
+      apiKey: 'fixture-key',
+      reasoning: 'xhigh',
+      maxTokens: 1024,
+      onPayload: p => ({
+        ...p,
+        config: {
+          ...p.config,
+          httpOptions: {
+            extraBody: {
+              thinkingConfig: { thinkingLevel: 'LOW' },
+              generationConfig: { thinkingConfig: { thinkingLevel: 'LOW', thinkingBudget: 99 }, temperature: 0.9, customFlag: 'keep', cachedContent: 'cachedContents/drop' },
+            },
+          },
+        },
+      }),
+    })) extraEvents.push(ev)
+    assert.equal(extraEvents.at(-1).type, 'done')
+    assert.deepEqual(wire.at(-1).body.generationConfig.thinkingConfig, { thinkingLevel: 'XHIGH', includeThoughts: true })
+    assert.equal(wire.at(-1).body.generationConfig.customFlag, 'keep')
+    assert.equal(wire.at(-1).body.generationConfig.thinkingBudget, undefined)
+    assert.equal(wire.at(-1).body.generationConfig.temperature, undefined)
+    assert.ok(!JSON.stringify(wire.at(-1).body).includes('cachedContent'))
+
+    // 2. 前置 onPayload 省略 config.maxOutputTokens 时，必须回填有效预算而不是发送无上限载荷。
+    const omitEvents = []
+    for await (const ev of extraProvider.streamSimple(neonModel, { messages: [{ role: 'user', content: 'hi', timestamp: 0 }] }, {
+      apiKey: 'fixture-key',
+      reasoning: 'high',
+      maxTokens: 512,
+      onPayload: p => ({ model: p.model, contents: p.contents, config: { systemInstruction: p.config.systemInstruction } }),
+    })) omitEvents.push(ev)
+    assert.equal(omitEvents.at(-1).type, 'done')
+    assert.equal(wire.at(-1).body.generationConfig.maxOutputTokens, 512)
+
+    // 3. argonProvider.streamSimple 对 JSON 克隆描述符保持配置硬上限与 Symbol，并拒收 maxTokens: null。
+    const clonedNeon = JSON.parse(JSON.stringify(neonModel))
+    assert.throws(() => extraProvider.streamSimple(clonedNeon, { messages: [{ role: 'user', content: 'hi', timestamp: 0 }] }, { apiKey: 'fixture-key', maxTokens: 32769 }), { code: 'INVALID_REQUEST' })
+    assert.throws(() => extraProvider.streamSimple(clonedNeon, { messages: [{ role: 'user', content: 'hi', timestamp: 0 }] }, { apiKey: 'fixture-key', maxTokens: null }), { code: 'INVALID_REQUEST' })
+
+    // 4. apply() 在 ctx.llm.registerAdapter 失败时必须立即回滚全局 PiAi/ApiClient 补丁租约。
+    ensureGemini4ApiClientPatch()()
+    const apiProto = Object.getPrototypeOf(new GoogleGenAI({ apiKey: 'probe' }).apiClient)
+    const origRequestStream = apiProto.requestStream
+    const baseGoogle = googleProvider()
+    const rawNeon = {
+      id: NEON_MODEL, name: 'Gemini 4 Neon', provider: 'google', api: 'google-generative-ai',
+      baseUrl: 'https://generativelanguage.googleapis.com/v1beta', reasoning: false, input: ['text'], contextWindow: 1048576, maxTokens: 131072,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    }
+    const piProvider = { ...baseGoogle, id: 'google', name: 'Google', getModels: () => [rawNeon] }
+    const profiles = new Map([['google', {
+      provider: 'google', displayName: 'Google', piProvider, reasoning: undefined, streamIdleTimeoutMs: 300000,
+      maxRequestImageBytes: 20971520, requestImagePixelBudget: 4194304, requestImageMaxBytes: 1048576,
+      retryPolicy: resolveRetryPolicy(undefined, 'test'), modelErrors: new Map(), configuredMaxTokens: new Map([[NEON_MODEL, 131072]]),
+    }]])
+    const piAdapter = new PiAiAdapter({
+      profiles: () => profiles,
+      resolveApiKey: async () => 'fixture-google-api-key',
+      auth: { authContext: { env: async () => undefined, fileExists: async () => false } },
+    })
+    assert.throws(() => apply({
+      llm: { registerAdapter: () => { throw new Error('register boom') } },
+      effect: () => {},
+      get: () => undefined,
+    }, {}), /register boom/)
+    piAdapter.current()
+    assert.equal(rawNeon.reasoning, false)
+    assert.equal('thinkingLevelMap' in rawNeon, false)
+    assert.equal(apiProto.requestStream, origRequestStream)
+  } finally {
+    mode = 'tool'
+  }
+})

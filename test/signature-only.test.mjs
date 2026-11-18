@@ -16,6 +16,8 @@ const cases = [
  ['after signed text', [{text:'A',thoughtSignature:A},{thoughtSignature:S1},{text:'B'}]],
  ['after function call', [{functionCall:{id:'call',name:'echo',args:{value:'x'}},thoughtSignature:T},{thoughtSignature:S1},{text:'tail'}]],
  ['after thinking', [{text:'plan',thought:true},{thoughtSignature:S1},{text:'answer'}]],
+ ['signed empty thinking followed by unsigned thinking', [{text:'',thought:true,thoughtSignature:S1},{text:'B',thought:true},{text:'answer'}]],
+ ['adjacent signed thinking parts', [{text:'A',thought:true,thoughtSignature:S1},{text:'B',thought:true,thoughtSignature:S2},{text:'answer'}]],
 ]
 const ctx={get:key=>key==='launchEnvironment'?{get:name=>['GOOGLE_API_KEY','GOOGLE_CLOUD_API_KEY'].includes(name)?{value:'offline-fixture'}:undefined}:undefined}
 const sse=parts=>new Response('data: '+JSON.stringify({candidates:[{content:{role:'model',parts},finishReason:'STOP'}]})+'\n\n',{headers:{'Content-Type':'text/event-stream'}})

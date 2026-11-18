@@ -10,9 +10,10 @@ import { isGoogleApiModel, officialUpstreamModel } from './adapter.js'
 
 const terminalStates = new Set(['completed', 'requires_action', 'incomplete', 'failed', 'cancelled', 'budget_exceeded'])
 export function assertInteractionOptions(options, cfg, route) {
-  const max = options.maxTokens === undefined ? cfg.maxTokens : options.maxTokens
+  const requestedMax = options.maxTokens === undefined ? cfg.maxTokens : options.maxTokens
   const maxCeiling = cfg.explicitMaxTokensCap ?? cfg.maxTokens
-  if (!Number.isSafeInteger(max) || max <= 0 || max > maxCeiling) throw new Error('Interactions output budget must be a positive integer within the configured effective cap.')
+  if (!Number.isSafeInteger(requestedMax) || requestedMax <= 0 || requestedMax > maxCeiling) throw new Error('Interactions output budget must be a positive integer within the configured effective cap.')
+  const max = cfg.longDecode === false ? Math.min(requestedMax, 65536) : requestedMax
   const defaultReasoning = cfg?.hasExplicitReasoning === false ? defaultReasoningForModel(options.model) : cfg.reasoning
   const resolvedReasoning = resolveGemini4ReasoningLevel(options, options.model, defaultReasoning)
   if (!resolvedReasoning.ok) {
@@ -164,7 +165,7 @@ export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, get
         return block
       }) }))
       const { streamInteractions } = await import('./interactions.js')
-      for await (const chunk of streamInteractions({ ...options, messages, signal }, { route, upstreamModel, ...controls, serviceTier: route === 'google-generative-ai' ? servicePolicy.tier : undefined, background: cfg.interactionsBackground, store: cfg.allowInteractionStorage, transport, resolveImage, structuredOutput, onEvent: observed, onReconnectDelay: ms => { pendingBackoffMs = ms }, onTerminal: () => { complete = true }, onExit: reason => { exitReason = reason } })) {
+      for await (const chunk of streamInteractions({ ...options, maxTokens: controls.maxTokens, messages, signal }, { route, upstreamModel, ...controls, longDecode: cfg.longDecode, serviceTier: route === 'google-generative-ai' ? servicePolicy.tier : undefined, background: cfg.interactionsBackground, store: cfg.allowInteractionStorage, transport, resolveImage, structuredOutput, onEvent: observed, onReconnectDelay: ms => { pendingBackoffMs = ms }, onTerminal: () => { complete = true }, onExit: reason => { exitReason = reason } })) {
         if (chunk.type === 'usage') {
           recordUsage()
           // Only an observed first-hop input watermark can be normalized for the

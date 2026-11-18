@@ -554,4 +554,33 @@ test('Interactions prepared.stream rejects out-of-cap or null maxTokens eagerly 
   assert.equal(neonBuilt.generation_config.thinking_level, 'high')
   const argonBuilt = await buildInteractionRequest(req(MODEL), { route: 'google-vertex', upstreamModel: 'gemini-4-argon' })
   assert.equal(argonBuilt.generation_config.thinking_level, 'medium')
+
+  // 第 4 轮回归：关闭 longDecode 时，即使配置设 maxTokens: 131072 且开启后台存储授权，Google 后台 Interactions 出站仍钳位到 65536；且 buildInteractionRequest 拒收 maxTokens: null。
+  let clampedDiag
+  const noLongCfg = {
+    maxTokens: 131072,
+    longDecode: false,
+    googleProtocol: 'interactions',
+    vertexProtocol: 'generate-content',
+    interactionsBackground: true,
+    allowInteractionStorage: true,
+    routes: { hasVertexNeon: true, hasGoogleNeon: true },
+  }
+  const rows = new Map(), stateHub = createInteractionStateHub()
+  stateHub.attach({ table: () => ({ get: k => rows.get(k), get size() { return rows.size }, entries: () => rows.entries(), put: async (k, v) => rows.set(k, v), delete: async k => rows.delete(k) }), close: async () => {} })
+  try {
+    const noLongAdapter = createArgonAdapter(ctx, noLongCfg, undefined, undefined, d => clampedDiag = d, stateHub)
+    const out = await collect(noLongAdapter.stream({ ...req(GOOGLE_API_NEON_MODEL), maxTokens: 131072 }))
+    assert.equal(out.at(-1).reason.kind, 'stop')
+    const createCall = wire.findLast(entry => entry.method === 'POST' && entry.url.endsWith('/v1beta/interactions'))
+    assert.equal(createCall.body.generation_config.max_output_tokens, 65536)
+    assert.equal(clampedDiag.configuredMaxTokens, 65536)
+    assert.equal(clampedDiag.longDecodeEnabled, false)
+  } finally {
+    await stateHub.close()
+  }
+  await assert.rejects(
+    buildInteractionRequest({ ...req(GOOGLE_API_NEON_MODEL), maxTokens: null }, { route: 'google-generative-ai', upstreamModel: 'gemini-4-neon', background: true, store: true }),
+    /Invalid Interactions output token budget/,
+  )
 })

@@ -2,6 +2,18 @@
 
 All notable changes to **Gemini 4 Adapter** (`dsh-vertex-argon`) are documented in this file.
 
+## [2.2.4] - 2026-11-19
+
+### Fixed
+- **Google Background Interactions `longDecode: false` Clamp & `maxTokens: null` Guard (`interaction-adapter.js`, `interactions-input.js`)**:
+  - Clamped outbound `maxTokens` / `generation_config.max_output_tokens` to `65,536` when `longDecode === false` (including Google background Interactions where `explicitMaxTokensCap > 65536`), and rejected explicit `maxTokens: null` in both `buildInteractionRequest` and `argonProvider.streamSimple`.
+- **GenerateContent `onPayload` `extraBody` Thinking Sanitization, Mandatory Output Cap & Cloned Model Ceiling Retention (`adapter.js`)**:
+  - Sanitized `httpOptions.extraBody` and `extraBody.generationConfig` / `generation_config` (`thinkingConfig`, `thinkingBudget`, `includeThoughts`, sampling keys) for all Gemini 4 models (plus explicit cache fields on Hydrogen/Neon), and ensured omitted `config.maxOutputTokens` after upstream `onPayload` hooks is restored to the resolved output budget.
+  - Preserved trusted `configured` model properties and `MAX_TOKENS_CEILING` symbols in `argonProvider.streamSimple` so JSON-cloned model descriptors cannot bypass configured caps.
+- **Signed Thinking Part Boundaries & Startup Registration Rollback (`google-signatures.js`, `index.js`)**:
+  - Split subsequent unsigned thinking parts away from preceding signed thinking parts in `observe()` so empty signed thinking parts preserve 1:1 boundaries.
+  - Registered `installGemini4PiAiPatch()` disposal immediately and rolled back the lease if `ctx.llm.registerAdapter()` throws.
+
 ## [2.2.3] - 2026-11-19
 
 ### Fixed

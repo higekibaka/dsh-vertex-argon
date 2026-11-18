@@ -1,9 +1,9 @@
-# Gemini 4 Adapter（dsh-vertex-argon）发版状态与验证账本（v2.2.3）
+# Gemini 4 Adapter（dsh-vertex-argon）发版状态与验证账本（v2.2.4）
 
-- **用户工程版本**：`2.2.3`（展示品牌名 **Gemini 4 Adapter**，底层包名保持 `dsh-vertex-argon`），以 [package.json](<../../package.json>) 为准。
+- **用户工程版本**：`2.2.4`（展示品牌名 **Gemini 4 Adapter**，底层包名保持 `dsh-vertex-argon`），以 [package.json](<../../package.json>) 为准。
 - **声明兼容**：DSH `>=0.2.0-rc.2`；Node.js `^22.19.0 || >=24.0.0`。以 [package.json](<../../package.json>) 为准。
-- **本轮范围**：`v2.2.3` 进一步加固独立/普通签名 Part 边界切分、`onPayload` 改写后含 `extraBody` 的出站 `maxOutputTokens` 路由上限校验、`1,048,576` 协议请求上限与宿主压缩预留分离、Interactions `stream(options)` 入口同步预算/冲突校验、未配置时 Hydrogen/Neon 模型级 `high` 缺省思考档位，以及多实例重叠安装/逆序卸载 `installGemini4PiAiPatch` 与 `ensureGemini4ApiClientPatch` 的引用计数保护。
-- **验证状态**：2026-11-19 完成 `v2.2.3` 离线全量回归（详见 [CHANGELOG.md](<../../CHANGELOG.md>)）：挂载本机既有 React `19.2.0` 路径作为 `NODE_PATH` 时，36 个测试文件全量通过；`git diff --check` 退出码 `0`。
+- **本轮范围**：`v2.2.4` 修复关闭 `longDecode` 时 Google 后台 Interactions 出站上限钳位到 `65,536`、`onPayload` 对 `extraBody.generationConfig.thinkingConfig` 等字段净化与省略 `maxOutputTokens` 回填、`argonProvider.streamSimple` 对克隆模型描述符保留硬上限符号与拒收 `maxTokens: null`、`google-signatures.js` 已签名思考块分边界，以及 `apply()` 注册失败时的全局补丁租约回滚。
+- **验证状态**：2026-11-19 完成 `v2.2.4` 离线全量回归（详见 [CHANGELOG.md](<../../CHANGELOG.md>)）：挂载本机既有 React `19.2.0` 路径作为 `NODE_PATH` 时，36 个测试文件全量通过；`git diff --check` 退出码 `0`。
 
 ## 1. 生产文件边界
 
