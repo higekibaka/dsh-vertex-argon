@@ -2,6 +2,16 @@
 
 All notable changes to **Gemini 4 Adapter** (`dsh-vertex-argon`) are documented in this file.
 
+## [2.2.6] - 2026-11-19
+
+### Fixed
+- **Fail-Closed Unsupported Part Validation (`google-signatures.js`)**:
+  - Validated every candidate Part inside `observe(chunk)` against the supported `pi-ai` replay contract (`text`, `thought`, `thoughtSignature` / `thought_signature`, `functionCall` / `function_call`); unrepresentable parts (`executableCode`, `codeExecutionResult`, `functionResponse`, `inlineData`, `fileData`, mixed `text + functionCall`, `functionCall` with `thought: true`, or bare `{ thought: true }`) now fail closed with `ARGON_SIGNATURE_REPLAY` instead of being silently dropped.
+- **Symmetric Cross-Chunk & Same-Chunk Text/Thinking Merge (`google-signatures.js`)**:
+  - Made `splitSigned` symmetric between `text` and `thinking`: cross-chunk continuations from a non-empty signed block to an unsigned block merge while preserving the signature, whereas same-chunk signature boundaries, conflicting signatures (`S1` → `S2`), and explicit empty signed carriers split 1:1.
+- **Immutable Deep-Frozen Model Descriptors (`adapter.js`)**:
+  - Added `freezeDescriptor` deep-freezing returned/registered model descriptors (`input`, `thinkingLevelMap`, `cost`, and the descriptor object itself while preserving `MAX_TOKENS_CEILING`) in both `getProfiles()` and `argonProvider()`, preventing callers from mutating cached descriptor state via `getModels()`.
+
 ## [2.2.5] - 2026-11-19
 
 ### Fixed

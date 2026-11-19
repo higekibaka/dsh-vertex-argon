@@ -852,14 +852,33 @@ export function resolveConfigValues(raw = {}) {
   }
 }
 
+function freezeDescriptor(descriptor) {
+  if (!descriptor || typeof descriptor !== 'object') return descriptor
+  const copy = {
+    ...descriptor,
+    ...(Array.isArray(descriptor.input) ? { input: Object.freeze([...descriptor.input]) } : {}),
+    ...(descriptor.thinkingLevelMap && typeof descriptor.thinkingLevelMap === 'object'
+      ? { thinkingLevelMap: Object.freeze({ ...descriptor.thinkingLevelMap }) }
+      : {}),
+    ...(descriptor.cost && typeof descriptor.cost === 'object'
+      ? { cost: Object.freeze({ ...descriptor.cost }) }
+      : {}),
+  }
+  for (const sym of Object.getOwnPropertySymbols(descriptor)) {
+    copy[sym] = descriptor[sym]
+  }
+  return Object.freeze(copy)
+}
+
 /** Serve the official Vertex AI and Gemini API models in one plugin group. */
 export function argonProvider(nativeVertex, models, defaultLevel = undefined, nativeGoogle = googleProvider(), longDecode = true, recordDiagnostic, serviceConfig = {}, responseHub, structuredOutput) {
-  const modelMap = new Map((Array.isArray(models) ? models : [models]).map(m => [m.id, m]))
+  const frozenModels = (Array.isArray(models) ? models : [models]).map(freezeDescriptor)
+  const modelMap = new Map(frozenModels.map(m => [m.id, m]))
   return {
     id: PROVIDER,
     name: 'Gemini 4 Adapter',
     auth: nativeVertex.auth,
-    getModels: () => [...modelMap.values()],
+    getModels: () => [...frozenModels],
     streamSimple(requestModel, context, options = {}) {
       const configured = modelMap.get(requestModel?.id)
       if (!configured || requestModel?.provider !== PROVIDER) {
@@ -1195,8 +1214,9 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       })
     }
-    for (const modelDescriptor of models) {
-      modelDescriptor[MAX_TOKENS_CEILING] = cfg.explicitMaxTokensCap
+    for (let i = 0; i < models.length; i++) {
+      models[i][MAX_TOKENS_CEILING] = cfg.explicitMaxTokensCap
+      models[i] = freezeDescriptor(models[i])
     }
     const configuredMaxTokens = new Map(models.map(m => [m.id, cfg.maxTokens]))
     const configuredReasoning = cfg.hasExplicitReasoning ? cfg.reasoning : undefined

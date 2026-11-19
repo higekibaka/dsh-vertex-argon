@@ -1,9 +1,9 @@
-# Gemini 4 Adapter（dsh-vertex-argon）发版状态与验证账本（v2.2.5）
+# Gemini 4 Adapter（dsh-vertex-argon）发版状态与验证账本（v2.2.6）
 
-- **用户工程版本**：`2.2.5`（展示品牌名 **Gemini 4 Adapter**，底层包名保持 `dsh-vertex-argon`），以 [package.json](<../../package.json>) 为准。
+- **用户工程版本**：`2.2.6`（展示品牌名 **Gemini 4 Adapter**，底层包名保持 `dsh-vertex-argon`），以 [package.json](<../../package.json>) 为准。
 - **声明兼容**：DSH `>=0.2.0-rc.2`；Node.js `^22.19.0 || >=24.0.0`。以 [package.json](<../../package.json>) 为准。
-- **本轮范围**：`v2.2.5` 修复同 chunk 内无签名→有签名 `text`/`thinking` Part 边界切分、`httpOptions.extraBody` 对 `reasoningEffort`/`reasoning_effort`/`thinkingLevel` 剥离与显式 `null` 拒收、`argonProvider.streamSimple` 钉死 `baseUrl` 与 `contextWindow`，以及 `apply()` 在 `ctx.effect` 抛错时同时撤销已取得的 `registration` 与全局补丁租约。
-- **验证状态**：2026-11-19 完成 `v2.2.5` 离线全量回归（详见 [CHANGELOG.md](<../../CHANGELOG.md>)）：挂载本机既有 React `19.2.0` 路径作为 `NODE_PATH` 时，36 个测试文件全量通过；`git diff --check` 退出码 `0`。
+- **本轮范围**：`v2.2.6` 加固 `google-signatures.js::observe()` 对不受 `pi-ai` 支持的 Part 的 fail-closed 拒收（`ARGON_SIGNATURE_REPLAY`）、对齐 `text`/`thinking` 跨 chunk 续写对称合并规则，并在 `adapter.js` 对 `getModels()` / 注册目录描述符做深冻结防护（`freezeDescriptor`）。
+- **验证状态**：2026-11-19 完成 `v2.2.6` 离线全量回归（详见 [CHANGELOG.md](<../../CHANGELOG.md>)）：挂载本机既有 React `19.2.0` 路径作为 `NODE_PATH` 时，36 个测试文件全量通过；`git diff --check` 退出码 `0`。
 
 ## 1. 生产文件边界
 

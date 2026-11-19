@@ -1938,3 +1938,52 @@ test('fifth review fixes: extraBody reasoningEffort/null validation, pinned base
     mode = 'tool'
   }
 })
+
+test('seventh review fixes: returned and caller-supplied model descriptors are deep-frozen and tamper-proof', async () => {
+  mode = 'text'
+  try {
+    const adapter7 = createArgonAdapter(ctx, { longDecode: true, maxTokens: 32768, routes: { hasVertexNeon: true } })
+    const provider7 = adapter7.inner.current().profiles.get(PROVIDER).piProvider
+    for (const desc of provider7.getModels()) {
+      assert.equal(Object.isFrozen(desc), true)
+      assert.equal(Object.isFrozen(desc.thinkingLevelMap), true)
+      assert.equal(Object.isFrozen(desc.input), true)
+      assert.equal(Object.isFrozen(desc.cost), true)
+      assert.throws(() => { desc.baseUrl = 'https://evil.example/v1' }, TypeError)
+    }
+
+    const mutableModel = {
+      id: NEON_MODEL,
+      name: 'Gemini 4 Neon',
+      provider: PROVIDER,
+      api: 'google-vertex',
+      baseUrl: 'https://us-central1-aiplatform.googleapis.com',
+      reasoning: true,
+      input: ['text'],
+      contextWindow: 1048576,
+      maxTokens: 32768,
+      thinkingLevelMap: { off: null, minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: null },
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    }
+    const directProvider = argonProvider(googleVertexProvider(), [mutableModel], 'medium', googleProvider(), true, undefined, {}, undefined)
+    // Caller mutates original array & object AFTER registering with argonProvider: must not affect snapshots.
+    mutableModel.baseUrl = 'https://mutated-after-register.example/v1'
+    mutableModel.maxTokens = 65536
+    mutableModel.thinkingLevelMap.xhigh = 'off'
+    const [frozen] = directProvider.getModels()
+    assert.equal(Object.isFrozen(frozen), true)
+    assert.equal(frozen.baseUrl, 'https://us-central1-aiplatform.googleapis.com')
+    assert.equal(frozen.maxTokens, 32768)
+    assert.equal(frozen.thinkingLevelMap.xhigh, 'xhigh')
+    assert.throws(() => { frozen.maxTokens = 65536 }, TypeError)
+
+    const evs = []
+    for await (const ev of directProvider.streamSimple(frozen, { messages: [{ role: 'user', content: 'hi', timestamp: 0 }] }, { apiKey: 'fixture-key', reasoning: 'xhigh' })) {
+      evs.push(ev)
+    }
+    assert.equal(evs.at(-1).type, 'done')
+    assert.ok(wire.at(-1).url.startsWith('https://us-central1-aiplatform.googleapis.com'))
+  } finally {
+    mode = 'tool'
+  }
+})

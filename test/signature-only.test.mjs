@@ -223,3 +223,56 @@ for (const [label, wireParts] of [
     assert.deepEqual(sent[1].contents.find(c => c.role === 'model').parts, wireParts)
   } finally { globalThis.fetch = originalFetch }
 })
+
+test('round7 signature hardening: unsupported parts fail closed & symmetric cross-chunk merge for text/thinking', async () => {
+  const model = { api: 'google-vertex', provider: PROVIDER, id: MODEL }
+  for (const badPart of [
+    { executableCode: { language: 'PYTHON', code: 'print(1)' } },
+    { codeExecutionResult: { outcome: 'OUTCOME_OK', output: '1\n' } },
+    { functionResponse: { name: 'fn', response: { ok: true } } },
+    { inlineData: { mimeType: 'image/png', data: 'AQID' } },
+    { fileData: { mimeType: 'application/pdf', fileUri: 'gs://bucket/a.pdf' } },
+    { text: 'hi', functionCall: { name: 'fn', args: {} } },
+    { functionCall: { name: 'fn', args: {} }, thought: true },
+    { thought: true },
+  ]) {
+    const b = createGoogleSignatureBridge({ messages: [{ role: 'user', content: 'turn' }] }, model)
+    assert.throws(
+      () => b.observe({ candidates: [{ content: { parts: [badPart] } }] }),
+      e => e?.code === 'ARGON_SIGNATURE_REPLAY',
+    )
+  }
+
+  for (const makePart of [
+    (text, thoughtSignature) => ({ text, ...(thoughtSignature ? { thoughtSignature } : {}) }),
+    (text, thoughtSignature) => ({ thought: true, text, ...(thoughtSignature ? { thoughtSignature } : {}) }),
+  ]) {
+    const bMerge = createGoogleSignatureBridge({ messages: [{ role: 'user', content: 'u' }] }, model)
+    bMerge.observe({ candidates: [{ content: { parts: [makePart('A', S1)] } }] })
+    bMerge.observe({ candidates: [{ content: { parts: [makePart('B')] } }] })
+    const evsM = []
+    for await (const ev of bMerge.stream((async function* () {
+      yield { type: 'start' }
+      yield { type: 'done', message: { role: 'assistant', api: model.api, provider: model.provider, model: model.id, content: [] } }
+    })())) evsM.push(ev)
+    const msgM = evsM.at(-1).message
+    assert.equal(msgM.content.length, 1)
+    assert.equal(msgM.content[0].text ?? msgM.content[0].thinking, 'AB')
+
+    for (const [p1, p2] of [
+      [makePart('A', S1), makePart('B', S2)],
+      [makePart('', S1), makePart('B')],
+      [makePart('A'), makePart('', S2)],
+    ]) {
+      const bSplit = createGoogleSignatureBridge({ messages: [{ role: 'user', content: 'u' }] }, model)
+      bSplit.observe({ candidates: [{ content: { parts: [p1] } }] })
+      bSplit.observe({ candidates: [{ content: { parts: [p2] } }] })
+      const evsS = []
+      for await (const ev of bSplit.stream((async function* () {
+        yield { type: 'start' }
+        yield { type: 'done', message: { role: 'assistant', api: model.api, provider: model.provider, model: model.id, content: [] } }
+      })())) evsS.push(ev)
+      assert.equal(evsS.at(-1).message.content.length, 2)
+    }
+  }
+})

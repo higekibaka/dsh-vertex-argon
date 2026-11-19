@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 
+const ALLOWED_PART_KEYS = new Set(['text', 'thought', 'thoughtSignature', 'thought_signature', 'functionCall', 'function_call'])
+
 const PREFIX = '{"dshGoogleSignatureOnly":'
 const base64 = value => typeof value === 'string' && value.length > 0 && value.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(value)
 const digest = content => createHash('sha256').update(JSON.stringify(content.map(block => block.type === 'text' ? ['text', block.text] : block.type === 'thinking' ? ['thinking', block.thinking] : ['toolCall', block.id, block.name, block.arguments]))).digest('hex')
@@ -162,13 +164,54 @@ export function createGoogleSignatureBridge(context, model) {
       seen = true
       currentFromThisChunk = false
       for (const part of chunk.candidates?.[0]?.content?.parts ?? []) {
+        if (!part || typeof part !== 'object' || Array.isArray(part)) {
+          close()
+          throw failure('Google returned a malformed candidate part.')
+        }
+        const definedKeys = Object.keys(part).filter(key => part[key] !== undefined)
+        if (definedKeys.length === 0) continue
+        const unsupportedKeys = definedKeys.filter(key => !ALLOWED_PART_KEYS.has(key))
+        if (unsupportedKeys.length > 0) {
+          close()
+          throw failure('Google returned an unsupported candidate part (' + unsupportedKeys.join(', ') + ') that cannot be replayed.')
+        }
+        const call = part.functionCall ?? part.function_call
+        const hasText = part.text !== undefined
+        const hasCall = call !== undefined
+        if (part.thought !== undefined && typeof part.thought !== 'boolean') {
+          close()
+          throw failure('Google returned a candidate part with an invalid thought flag.')
+        }
+        if (hasText && typeof part.text !== 'string') {
+          close()
+          throw failure('Google returned a candidate part with an invalid text field.')
+        }
+        if (hasCall && (!call || typeof call !== 'object' || Array.isArray(call))) {
+          close()
+          throw failure('Google returned a candidate part with an invalid functionCall payload.')
+        }
+        if (hasText && hasCall) {
+          close()
+          throw failure('Google returned a mixed text/functionCall part that cannot be represented losslessly.')
+        }
+        if (hasCall && part.thought === true) {
+          close()
+          throw failure('Google returned a thought-flagged functionCall part that cannot be represented in replay history.')
+        }
         bytes += Buffer.byteLength(JSON.stringify(part))
         if (bytes > 64 * 1024 * 1024) throw failure('Google response exceeded the bounded signature replay buffer.')
         // A Part may serialize the signature in either wire spelling.
         const sig = part.thoughtSignature ?? part.thought_signature
-        const onlySignature = typeof sig === 'string' && Object.keys(part).filter(key => part[key] !== undefined).every(key => key === 'thoughtSignature' || key === 'thought_signature' || key === 'thought')
+        if (sig !== undefined && typeof sig !== 'string') {
+          close()
+          throw failure('Google returned a candidate part with an invalid thoughtSignature.')
+        }
+        const onlySignature = typeof sig === 'string' && !hasText && !hasCall
         if (onlySignature) {
-          if (!sig || (part.thought !== undefined && typeof part.thought !== 'boolean')) throw failure('Google returned an invalid standalone signature.')
+          if (!sig) {
+            close()
+            throw failure('Google returned an invalid standalone signature.')
+          }
           bytes += 320 // Include the local versioned codec and content binding in the retention bound.
           if (bytes > 64 * 1024 * 1024) throw failure('Google signature replay metadata exceeded the bounded response buffer.')
           close()
@@ -177,15 +220,17 @@ export function createGoogleSignatureBridge(context, model) {
           emit({ type: 'text_start', contentIndex: index }); emit({ type: 'text_end', contentIndex: index, content: '' })
           continue
         }
-        if (part.text !== undefined) {
+        if (hasText) {
           const type = part.thought === true ? 'thinking' : 'text'
           const sigKey = type === 'text' ? 'textSignature' : 'thinkingSignature'
-          const sameChunkSigBoundary = currentFromThisChunk && (Boolean(current?.[sigKey]) || Boolean(sig))
-          const splitSigned = type === 'text'
-            ? (Boolean(current?.textSignature) || sameChunkSigBoundary || (Boolean(sig) && part.text === ''))
-            : (sameChunkSigBoundary ||
-               (Boolean(sig) && (Boolean(current?.thinkingSignature) || part.text === '')) ||
-               (Boolean(current?.thinkingSignature) && current.thinking === ''))
+          const curText = type === 'text' ? current?.text : current?.thinking
+          const curSig = current?.[sigKey]
+          const sameChunkSigBoundary = currentFromThisChunk && (Boolean(curSig) || Boolean(sig))
+          const crossChunkSigConflict =
+            (Boolean(curSig) && Boolean(sig)) ||
+            (Boolean(curSig) && curText === '') ||
+            (Boolean(sig) && part.text === '')
+          const splitSigned = sameChunkSigBoundary || crossChunkSigConflict
           if (!current || current.type !== type || splitSigned) {
             close(); current = type === 'text' ? { type, text: '' } : { type, thinking: '' }
             const index = start(current)
@@ -196,18 +241,22 @@ export function createGoogleSignatureBridge(context, model) {
           currentFromThisChunk = true
           if (sig) current[sigKey] = sig
           emit({ type: type === 'text' ? 'text_delta' : 'thinking_delta', contentIndex: content.length - 1, delta: part.text })
+          continue
         }
-        if (part.functionCall) {
+        if (hasCall) {
           close()
-          const call = part.functionCall
-          const id = call.id && !usedToolIds.has(call.id) ? call.id : 'argon_' + randomUUID().replaceAll('-', '')
+          const rawId = call.id ?? call.call_id
+          const id = rawId && !usedToolIds.has(rawId) ? rawId : 'argon_' + randomUUID().replaceAll('-', '')
           usedToolIds.add(id)
           const block = { type: 'toolCall', id, name: call.name || '', arguments: call.args ?? {}, ...(sig ? { thoughtSignature: sig } : {}) }
           const index = start(block)
           emit({ type: 'toolcall_start', contentIndex: index })
           emit({ type: 'toolcall_delta', contentIndex: index, delta: JSON.stringify(block.arguments) })
           emit({ type: 'toolcall_end', contentIndex: index, toolCall: block })
+          continue
         }
+        close()
+        throw failure('Google returned an unrepresentable candidate part.')
       }
     },
     stream(source) {
