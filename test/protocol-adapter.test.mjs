@@ -584,3 +584,26 @@ test('Interactions prepared.stream rejects out-of-cap or null maxTokens eagerly 
     /Invalid Interactions output token budget/,
   )
 })
+
+test('R11-P2-3: Interactions preserves unattributed non-input difference in totalTokens across stream and diagnostics', async () => {
+  const prevResponder = responder
+  responder = () => sse([
+    { event_type: 'interaction.created', event_id: 'r12-e1', interaction: { id: 'remote-r12', status: 'in_progress' } },
+    { event_type: 'step.start', event_id: 'r12-e2', index: 0, step: { type: 'model_output' } },
+    { event_type: 'step.delta', event_id: 'r12-e3', index: 0, delta: { type: 'text', text: 'ok' } },
+    { event_type: 'step.stop', event_id: 'r12-e4', index: 0 },
+    { event_type: 'interaction.completed', event_id: 'r12-e5', interaction: { id: 'remote-r12', status: 'completed', usage: { total_input_tokens: 20, total_tokens: 30 } } },
+  ])
+  try {
+    let diagnostic
+    const config = { ...cfg(), googleProtocol: 'interactions', vertexProtocol: 'interactions' }
+    const adapter = createArgonAdapter(ctx, config, undefined, undefined, d => diagnostic = d)
+    const out = await collect(adapter.stream(req(NEON_MODEL)))
+    const usageChunk = out.find(c => c.type === 'usage')
+    assert.equal(usageChunk.usage.totalTokens, 30)
+    assert.equal(diagnostic.tokenUsage.totalTokens, 30)
+    assert.equal(diagnostic.tokenUsage.billedTotalTokens, 30)
+  } finally {
+    responder = prevResponder
+  }
+})

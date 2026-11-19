@@ -236,6 +236,8 @@ export async function buildInteractionRequest(options, settings = {}) {
 //
 // 降级后的工具头绝不写回 assistant 正文：那会让模型在 role:"model" 历史里看到
 // 自己连续手写该标签，形成 few-shot 模仿。头部改存起来，拼到后续 tool 回执里。
+const isStandaloneSignatureCodec = value => typeof value === 'string' && value.startsWith('{')
+
 export function generateContentHistory(options, defaultModel = options?.model) {
   const targetProvider = options.provider ?? 'google-vertex-argon'
   const targetModel = options.model ?? defaultModel
@@ -264,6 +266,10 @@ export function generateContentHistory(options, defaultModel = options?.model) {
       (replay!==undefined&&replay!==null&&(replay.provider!==targetProvider||replay.model!==targetModel))
     )&&message.content.some(block=>block?.type==='reasoning'||block?.type==='tool-call')
     const pollutedText=message.content.some(block=>block?.type==='text'&&hasPollutedAssistantText(block.text))
+    const replayBlocks=message.source?.replayState?.blocks
+    const hasStandaloneCodec=(Array.isArray(replayBlocks)&&replayBlocks.some(b=>isStandaloneSignatureCodec(b?.textSignature)))||
+      message.content.some(b=>isStandaloneSignatureCodec(b?.textSignature))
+    const pollutedSignedText=message.content.some((block,idx)=>block?.type==='text'&&hasPollutedAssistantText(block.text)&&Boolean(block.textSignature||replayBlocks?.[idx]?.textSignature))
     if(!interactionsReplay&&!crossModel&&!pollutedText){
       for(const call of message.content.filter(b=>b.type==='tool-call')){
         const matchIndex=findUnclaimedToolResultIndex(options.messages, position+1, call.id, claimedToolIndices)
@@ -277,7 +283,7 @@ export function generateContentHistory(options, defaultModel = options?.model) {
     if(!interactionsReplay&&!crossModel&&pollutedText){
       changed=true
       const hasCalls=message.content.some(block=>block?.type==='tool-call')
-      if(hasCalls){
+      if(hasCalls&&!hasStandaloneCodec&&!pollutedSignedText){
         for(const call of message.content.filter(b=>b.type==='tool-call')){
           const matchIndex=findUnclaimedToolResultIndex(options.messages, position+1, call.id, claimedToolIndices)
           if(matchIndex===-1 && hasFollowingAssistant(options.messages, position)){
@@ -287,9 +293,15 @@ export function generateContentHistory(options, defaultModel = options?.model) {
         }
         return {...message,content:message.content.map(block=>block?.type==='text'&&hasPollutedAssistantText(block.text)?{...block,text:scrubPollutedAssistantText(block.text)||'[Previous model reasoning omitted when switching protocols.]'}:block)}
       }
-      const cleaned=message.content.map(block=>block?.type==='text'?{...block,text:scrubPollutedAssistantText(block.text)}:block).filter(block=>block?.type!=='text'||block.text.length>0)
-      const source=message.source?(({replayState,...rest})=>rest)(message.source):undefined
-      return {...message,...(source===undefined?{}:{source}),content:cleaned.length?cleaned:[{type:'text',text:'[Previous model reasoning omitted when switching protocols.]'}]}
+      if(!hasCalls){
+        const cleaned=message.content.map(block=>{
+          if(block?.type!=='text')return block
+          const {textSignature:_ts,...rest}=block
+          return {...rest,text:scrubPollutedAssistantText(block.text)}
+        }).filter(block=>block?.type!=='text'||block.text.length>0)
+        const source=message.source?(({replayState,...rest})=>rest)(message.source):undefined
+        return {...message,...(source===undefined?{}:{source}),content:cleaned.length?cleaned:[{type:'text',text:'[Previous model reasoning omitted when switching protocols.]'}]}
+      }
     }
     changed=true
     const content=[]
@@ -297,7 +309,8 @@ export function generateContentHistory(options, defaultModel = options?.model) {
       if(block.type==='reasoning'||block.type==='tool-call')continue
       if(block.type==='text'){
         const text=scrubPollutedAssistantText(block.text)
-        if(text.length>0)content.push({...block,text})
+        const {textSignature:_ts,...rest}=block
+        if(text.length>0)content.push({...rest,text})
         continue
       }
       content.push(block)

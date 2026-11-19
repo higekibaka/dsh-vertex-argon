@@ -2141,3 +2141,66 @@ test('round11 fix (R10-P2-3): deepFreezeClone preserves custom Array subclass pr
   assert.equal(Object.isFrozen(cloned.hidden), true)
   assert.equal(Object.prototype.propertyIsEnumerable.call(cloned, 'hidden'), false)
 })
+
+nodeTest('P1-丙: generateContentHistory demotes same-route signed polluted text + tool-call turns without keeping old signatures on rewritten text', async () => {
+  const { generateContentHistory } = await import('../interactions-input.js')
+  const blockSig = Buffer.from('signed-vertex-block').toString('base64')
+  const toolSig = Buffer.from('signed-vertex-tool').toString('base64')
+  const history = [
+    { role: 'user', content: [{ type: 'text', text: 'run tool' }] },
+    {
+      role: 'assistant',
+      content: [
+        { type: 'text', text: '[thinking]X', textSignature: blockSig },
+        { type: 'tool-call', id: 'call-v-p1c', name: 'echo', arguments: '{"q":"ok"}' },
+      ],
+      source: {
+        provider: PROVIDER,
+        model: NEON_MODEL,
+        replayState: {
+          response: { api: 'google-generative-ai', provider: PROVIDER, model: NEON_MODEL },
+          blocks: [
+            { type: 'text', textSignature: blockSig },
+            { type: 'tool-call', thoughtSignature: toolSig },
+          ],
+        },
+      },
+    },
+    { role: 'tool', toolCallId: 'call-v-p1c', content: [{ type: 'text', text: 'done' }] },
+    { role: 'user', content: [{ type: 'text', text: 'next' }] },
+  ]
+  const out = generateContentHistory({ provider: PROVIDER, model: NEON_MODEL, messages: history }, NEON_MODEL)
+  assert.equal(out.messages[1].source.replayState, undefined)
+  assert.deepEqual(out.messages[1].content, [{ type: 'text', text: 'X' }])
+  assert.equal(out.messages[1].content[0].textSignature, undefined)
+  assert.equal(out.messages[2].role, 'user')
+  assert.ok(out.messages[2].content[0].text.includes('[Previously executed tool echo; call call-v-p1c]'))
+
+  const standaloneCodec = JSON.stringify({ dshGoogleSignatureOnly: 1, signature: blockSig, contentDigest: 'a', historyDigest: 'b' })
+  const historyCodec = [
+    history[0],
+    {
+      role: 'assistant',
+      content: [
+        { type: 'text', text: '[thinking]Y' },
+        { type: 'tool-call', id: 'call-v-codec', name: 'echo', arguments: '{"q":"ok"}' },
+      ],
+      source: {
+        provider: PROVIDER,
+        model: NEON_MODEL,
+        replayState: {
+          response: { api: 'google-generative-ai', provider: PROVIDER, model: NEON_MODEL },
+          blocks: [
+            { type: 'text', textSignature: standaloneCodec },
+            { type: 'tool-call', thoughtSignature: toolSig },
+          ],
+        },
+      },
+    },
+    { role: 'tool', toolCallId: 'call-v-codec', content: [{ type: 'text', text: 'done' }] },
+  ]
+  const outCodec = generateContentHistory({ provider: PROVIDER, model: NEON_MODEL, messages: historyCodec }, NEON_MODEL)
+  assert.equal(outCodec.messages[1].source.replayState, undefined)
+  assert.deepEqual(outCodec.messages[1].content, [{ type: 'text', text: 'Y' }])
+  assert.equal(outCodec.messages[2].role, 'user')
+})

@@ -2,6 +2,15 @@
 
 All notable changes to **Gemini 4 Adapter** (`dsh-vertex-argon`) are documented in this file.
 
+## [2.2.11] - 2026-11-19
+
+### Fixed
+- **P1-乙 (`interactions.js`)**: 将已索引事件末尾的 `captureSnapshot()` 纳入与 `gen.next()` 同级的不可重试本地异常边界，失败时若本事件已向宿主产出可见块则同步置位 `unindexedVisibleOutput = true` 并抛出 `ARGON_INTERACTIONS_PROTOCOL`，彻底阻断基于旧游标 `last_event_id` 的重复回放。
+- **P1-丙 (`interactions-input.js`)**: 同模型/同通道含工具调用的污染正文消息若绑定独立签名信封或块自身 `textSignature`，禁止原地仅改写文本，统一走整轮工具往返降级并剥离被清洗文本块的旧签名，消除“新正文＋旧签名”。
+- **R10-P1-3 (`interactions.js`)**: `step.start` 预检将 `thought.summary[]` 非 `text` 模态直接拒收，并将 `step.id` / `step.name` 计入 `stepBytes` 与累计响应字节上限；同步净化 `observeUsage()` 与 `step.delta` 工具参数。
+- **R10-P2-2 (`generate-content.js`)**: 在 `accountableHopOutputSpent()` 中拒绝 `explicitOutputSum > derivedFromTotal`（及 `cachedContentTokenCount > promptTokenCount`）的矛盾用量，阻止仅思考 `STOP` 时的无上限无令牌自愈。
+- **R11-P2-3 (`interaction-adapter.js`)**: 在上下文归一与诊断 `totalTokens` 中保留单跳上游报告中尚未归类到输出/思考/工具的差额 `unattributedNonInputTokens()`，避免 `{ total_input_tokens: 20, total_tokens: 30 }` 被缩小为 `20`。
+
 ## [2.2.10] - 2026-11-19
 
 ### Fixed

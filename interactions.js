@@ -33,7 +33,7 @@ export async function* streamInteractions(options, settings) {
   const cloneStepState=state=>({...state,...(state.argsValue!==undefined?{argsValue:structuredClone(state.argsValue)}:{}),...(state.args!==undefined?{args:structuredClone(state.args)}:{})})
   const captureSnapshot=()=>({steps:new Map([...steps.entries()].map(([k,v])=>[k,cloneStepState(v)])),blocks:new Map([...blocks.entries()].map(([k,v])=>[k,structuredClone(v)])),blockIndex,bytes,status,usage:usage?structuredClone(usage):undefined,completedEvent})
   const restoreSnapshot=snap=>{steps.clear();for(const[k,v]of snap.steps.entries())steps.set(k,cloneStepState(v));blocks.clear();for(const[k,v]of snap.blocks.entries())blocks.set(k,structuredClone(v));blockIndex=snap.blockIndex;bytes=snap.bytes;status=snap.status;usage=snap.usage?structuredClone(snap.usage):undefined;completedEvent=snap.completedEvent}
-  const observeUsage=event=>{const u=event.interaction?.usage??event.usage??event.metadata?.total_usage;if(validObject(u)){const before=(usage?.total_output_tokens??0)+(usage?.total_thought_tokens??0);usage={...usage,...u};if((usage.total_output_tokens??0)+(usage.total_thought_tokens??0)>before)progressVersion++}}
+  const observeUsage=event=>{const raw=event.interaction?.usage??event.usage??event.metadata?.total_usage;if(validObject(raw)){let u;try{u=JSON.parse(JSON.stringify(raw))}catch{throw protocolError('Malformed Interactions usage payload.')}if(!validObject(u))return;const before=(usage?.total_output_tokens??0)+(usage?.total_thought_tokens??0);usage={...usage,...u};if((usage.total_output_tokens??0)+(usage.total_thought_tokens??0)>before)progressVersion++}}
   const checkBytes=text=>{bytes+=Buffer.byteLength(text??'');if(bytes>MAX_BYTES)throw protocolError('Interactions output exceeded the bounded response buffer.')}
   function* appendText(state, text, reasoning=false, indexed=false) {
     if(typeof text!=='string')throw protocolError('Interactions text delta is not a string.')
@@ -109,8 +109,14 @@ export async function* streamInteractions(options, settings) {
         if(typeof step.signature!=='string')throw protocolError('Invalid thought signature.')
         stepBytes+=Buffer.byteLength(step.signature)
       }
-      if(step.id!==undefined&&typeof step.id!=='string')throw protocolError('Invalid function call ID.')
-      if(step.name!==undefined&&typeof step.name!=='string')throw protocolError('Invalid function call name.')
+      if(step.id!==undefined){
+        if(typeof step.id!=='string')throw protocolError('Invalid function call ID.')
+        stepBytes+=Buffer.byteLength(step.id)
+      }
+      if(step.name!==undefined){
+        if(typeof step.name!=='string')throw protocolError('Invalid function call name.')
+        stepBytes+=Buffer.byteLength(step.name)
+      }
       if(step.type==='model_output'){
         if(step.content!==undefined&&!Array.isArray(step.content))throw protocolError('Invalid model_output content.')
         for(const content of step.content??[]){
@@ -122,27 +128,29 @@ export async function* streamInteractions(options, settings) {
       if(step.type==='thought'){
         if(step.summary!==undefined&&!Array.isArray(step.summary))throw protocolError('Invalid thought summary.')
         for(const content of step.summary??[]){
-          if(!validObject(content)||typeof content.type!=='string')throw protocolError('Unsupported thought summary modality.')
-          if(content.type==='text'){
-            if(typeof content.text!=='string')throw protocolError('Interactions text delta is not a string.')
-            stepBytes+=Buffer.byteLength(content.text)
-          }
+          if(!validObject(content)||content.type!=='text')throw protocolError('Unsupported thought summary modality.')
+          if(typeof content.text!=='string')throw protocolError('Interactions text delta is not a string.')
+          stepBytes+=Buffer.byteLength(content.text)
         }
       }
-      let initialArgsText='', initialArgsValue=step.arguments
+      let initialArgsText='', initialArgsValue=step.arguments, initialArgsEncoded=''
       if(step.type==='function_call'&&step.arguments!=null){
         if(typeof step.arguments==='string'){
           stepBytes+=Buffer.byteLength(step.arguments)
           initialArgsText=step.arguments
           initialArgsValue=undefined
         }else if(validObject(step.arguments)){
-          stepBytes+=Buffer.byteLength(JSON.stringify(step.arguments))
+          initialArgsEncoded=JSON.stringify(step.arguments)
+          stepBytes+=Buffer.byteLength(initialArgsEncoded)
+          initialArgsValue=JSON.parse(initialArgsEncoded)
         }else throw protocolError('Invalid function argument delta.')
       }
       if(bytes+stepBytes>MAX_BYTES)throw protocolError('Interactions output exceeded the bounded response buffer.')
       if(step.signature)checkBytes(step.signature)
+      if(step.id)checkBytes(step.id)
+      if(step.name)checkBytes(step.name)
       if(initialArgsText)checkBytes(initialArgsText)
-      else if(step.type==='function_call'&&validObject(initialArgsValue))checkBytes(JSON.stringify(initialArgsValue))
+      else if(initialArgsEncoded)checkBytes(initialArgsEncoded)
       const state={kind:step.type,text:'',signature:step.signature,callId:step.id,name:step.name,argsValue:initialArgsValue,argsText:initialArgsText,closed:false}
       steps.set(event.index,state);progressVersion++
       if(step.type==='model_output')for(const content of step.content??[])yield*appendText(state,content.text,false,indexed)
@@ -168,10 +176,17 @@ export async function* streamInteractions(options, settings) {
         checkBytes(delta.signature);if(state.signature!==delta.signature)progressVersion++;state.signature=delta.signature
       }else if(state.kind==='function_call'&&['arguments_delta','arguments','function_call'].includes(delta.type)){
         if(state.closed)throw protocolError('Function arguments arrived after step.stop.')
-        if(delta.id)state.callId=delta.id;if(delta.name)state.name=delta.name
+        if(delta.id!==undefined){
+          if(typeof delta.id!=='string')throw protocolError('Invalid function call ID.')
+          if(delta.id){if(delta.id!==state.callId){checkBytes(delta.id);progressVersion++};state.callId=delta.id}
+        }
+        if(delta.name!==undefined){
+          if(typeof delta.name!=='string')throw protocolError('Invalid function call name.')
+          if(delta.name){if(delta.name!==state.name){checkBytes(delta.name);progressVersion++};state.name=delta.name}
+        }
         const args=delta.partial_arguments??delta.arguments
         if(typeof args==='string'){checkBytes(args);state.argsText+=args;if(args)progressVersion++}
-        else if(validObject(args)){const encoded=JSON.stringify(args);checkBytes(encoded);if(encoded!==JSON.stringify(state.argsValue))progressVersion++;state.argsValue=args}
+        else if(validObject(args)){const encoded=JSON.stringify(args),parsedArgs=JSON.parse(encoded);checkBytes(encoded);if(encoded!==JSON.stringify(state.argsValue))progressVersion++;state.argsValue=parsedArgs}
         else throw protocolError('Invalid function argument delta.')
       }else throw protocolError('Unexpected Interactions delta for this step.')
       return
@@ -219,7 +234,12 @@ export async function* streamInteractions(options, settings) {
       yield next.value
     }
     if(indexed){
-      const snap=captureSnapshot()
+      let snap
+      try{snap=captureSnapshot()}catch(err){
+        if(yieldedAny)unindexedVisibleOutput=true
+        if(String(err?.code??'').startsWith('ARGON_'))throw err
+        throw protocolError(err?.message||'Failed to snapshot Interactions stream state.')
+      }
       seenEvents.add(event.event_id)
       lastEventId=event.event_id
       unindexedVisibleOutput=false

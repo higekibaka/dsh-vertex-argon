@@ -438,3 +438,66 @@ test('round11 interactions fix (R10-P1-3): partial step.start validation error n
  assert.deepEqual(badThought.chunks.filter(e => e.type === 'reasoning-delta'), [])
 })
 
+test('P1-乙 & R10-P1-3: captureSnapshot failure prevents replay after delivered text; thought.summary non-text and step id/name bytes are enforced', async () => {
+  const origStructuredClone = globalThis.structuredClone
+  globalThis.structuredClone = value => {
+    if (value && typeof value === 'object' && value.total_output_tokens === 999) {
+      throw Object.assign(new Error('Simulated DataCloneError during snapshot'), { name: 'DataCloneError' })
+    }
+    return origStructuredClone(value)
+  }
+  let snapFailOut
+  try {
+    snapFailOut = await run([
+      { ...created, event_id: 'e1' },
+      { ...start(0, 'model_output'), event_id: 'e2' },
+      { ...delta(0, 'text', { text: 'ONCE' }), event_id: 'e3', usage: { total_output_tokens: 999 } },
+    ], {
+      settings: { store: true },
+      reconnect: [
+        { ...delta(0, 'text', { text: 'ONCE' }), event_id: 'e3' },
+        { ...stop(0), event_id: 'e4' },
+        { ...done(), event_id: 'e5' },
+      ],
+    })
+  } finally {
+    globalThis.structuredClone = origStructuredClone
+  }
+  assert.equal(snapFailOut.finish.reason.kind, 'error')
+  assert.equal(snapFailOut.finish.reason.failure.code, 'ARGON_INTERACTIONS_PROTOCOL')
+  assert.equal(snapFailOut.calls.filter(c => c.method === 'get').length, 0)
+  assert.equal(snapFailOut.text, 'ONCE')
+
+  const badSummary = await run([
+    { ...created, event_id: 'e1' },
+    {
+      index: 0,
+      event_type: 'step.start',
+      event_id: 'e2',
+      step: { type: 'thought', summary: [{ type: 'image', uri: 'https://example.invalid/t.png' }] },
+    },
+  ], {
+    settings: { store: true },
+    reconnect: [{ ...done(), event_id: 'e3' }],
+  })
+  assert.equal(badSummary.finish.reason.kind, 'error')
+  assert.equal(badSummary.finish.reason.failure.code, 'ARGON_INTERACTIONS_PROTOCOL')
+  assert.equal(badSummary.calls.filter(c => c.method === 'get').length, 0)
+
+  const hugeMeta = await run([
+    { ...created, event_id: 'e1' },
+    {
+      index: 0,
+      event_type: 'step.start',
+      event_id: 'e2',
+      step: { type: 'function_call', id: 'a'.repeat(40 * 1024 * 1024), name: 'b'.repeat(25 * 1024 * 1024) },
+    },
+  ], {
+    settings: { store: true },
+    reconnect: [{ ...done(), event_id: 'e3' }],
+  })
+  assert.equal(hugeMeta.finish.reason.kind, 'error')
+  assert.equal(hugeMeta.finish.reason.failure.code, 'ARGON_INTERACTIONS_PROTOCOL')
+  assert.equal(hugeMeta.calls.filter(c => c.method === 'get').length, 0)
+})
+

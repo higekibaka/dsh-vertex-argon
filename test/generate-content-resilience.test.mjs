@@ -594,5 +594,21 @@ test('round11 fixes (R10-P2-2 & R10-P2-7): unbudgeted contradictory usage refuse
   assert.equal(out.chunks.at(-1).usageMetadata.billedTotalTokenCount, 30)
   assert.equal(out.usage.at(-1).totalTokens, 30)
   assert.equal(out.usage.at(-1).billedTotalTokens, 30)
+
+  // R10-P2-2: { promptTokenCount: 20, totalTokenCount: 30, candidatesTokenCount: 0, thoughtsTokenCount: 15 }
+  // exceeds derivedFromTotal (10), so accountableHopOutputSpent() returns null and blocks no-token heal even without maxOutputTokens.
+  const contradictory = await run([
+    [row(thought, 'STOP', undefined, {
+      promptTokenCount: 20,
+      cachedContentTokenCount: 0,
+      candidatesTokenCount: 0,
+      thoughtsTokenCount: 15,
+      toolUsePromptTokenCount: 0,
+      totalTokenCount: 30,
+    })],
+    [row(text('should-not-heal'), 'STOP')],
+  ])
+  assert.equal(contradictory.requests.length, 1)
+  assert.equal(contradictory.parts.some(p => p.text === 'should-not-heal'), false)
 })
 

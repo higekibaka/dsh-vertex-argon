@@ -275,7 +275,8 @@ export async function continueArgonRequestStream(apiClient, original, request, m
       let hopChunks = 0, hopSawThought = false, hopSawVisibleOrTool = false
       let thoughtParts = [], thoughtBytes = 0, suppressedStop = false, hopToken
       const accountableHopOutputSpent = () => {
-        if (!latestUsage || latestUsage.promptTokenCount === null || latestUsage.candidatesTokenCount === null || latestUsage.thoughtsTokenCount === null || latestUsage.toolUsePromptTokenCount === null || latestUsage.totalTokenCount === null) return null
+        if (!latestUsage || latestUsage.promptTokenCount === null || latestUsage.candidatesTokenCount === null || latestUsage.thoughtsTokenCount === null || latestUsage.toolUsePromptTokenCount === null || latestUsage.totalTokenCount === null || latestUsage.cachedContentTokenCount === null) return null
+        if (Number.isSafeInteger(latestUsage.cachedContentTokenCount) && Number.isSafeInteger(latestUsage.promptTokenCount) && latestUsage.cachedContentTokenCount > latestUsage.promptTokenCount) return null
         const explicitThoughts = Number.isSafeInteger(latestUsage.thoughtsTokenCount)
         const hasTotalAndPrompt = Number.isSafeInteger(latestUsage.totalTokenCount) && Number.isSafeInteger(latestUsage.promptTokenCount)
         const derivedFromTotal = hasTotalAndPrompt
@@ -283,7 +284,9 @@ export async function continueArgonRequestStream(apiClient, original, request, m
           : null
         if (derivedFromTotal !== null && derivedFromTotal < 0) return null
         if (!explicitThoughts && derivedFromTotal === null) return null
-        return Math.max(value(latestUsage, 'candidatesTokenCount') + value(latestUsage, 'thoughtsTokenCount'), derivedFromTotal ?? 0)
+        const explicitOutputSum = value(latestUsage, 'candidatesTokenCount') + value(latestUsage, 'thoughtsTokenCount')
+        if (derivedFromTotal !== null && explicitOutputSum > derivedFromTotal) return null
+        return Math.max(explicitOutputSum, derivedFromTotal ?? 0)
       }
       const remainingHealBudget = () => {
         const currentHopSpent = usageAccounted ? 0 : accountableHopOutputSpent()

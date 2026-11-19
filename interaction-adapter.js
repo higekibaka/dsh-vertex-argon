@@ -67,6 +67,15 @@ export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, get
       }
       if (type === 'step.stop' && modelOutputs.has(event.index)) firstModelOutputStopped = true
     }
+    const safeCount = v => Number.isSafeInteger(v) && v >= 0 ? v : 0
+    const unattributedNonInputTokens = () => {
+      if (!usage || !Number.isSafeInteger(usage.total_tokens) || usage.total_tokens < 0) return 0
+      const reportedInput = Number.isSafeInteger(usage.total_input_tokens) && usage.total_input_tokens >= 0
+        ? usage.total_input_tokens
+        : (firstInput ?? 0)
+      const attributedNonInput = safeCount(usage.total_output_tokens) + safeCount(usage.total_thought_tokens) + safeCount(usage.total_tool_use_tokens)
+      return Math.max(0, (usage.total_tokens - reportedInput) - attributedNonInput)
+    }
     const recordUsage = () => {
       // Only an observed first-hop input watermark may become a context value.
       // Without one, later hops report cumulative inputs and a single-hop reply
@@ -79,7 +88,7 @@ export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, get
         reportedCacheTokens: knownInitialCache,
         outputTokens: usage?.total_output_tokens,
         thoughtsTokens: usage?.total_thought_tokens,
-        totalTokens: knownInitialInput !== undefined && usage ? knownInitialInput + (usage.total_output_tokens ?? 0) + (usage.total_thought_tokens ?? 0) : undefined,
+        totalTokens: knownInitialInput !== undefined && usage ? knownInitialInput + (usage.total_output_tokens ?? 0) + (usage.total_thought_tokens ?? 0) + unattributedNonInputTokens() : undefined,
         billedOutputTokens: usage?.total_output_tokens,
         billedThoughtsTokens: usage?.total_thought_tokens,
         billedToolTokens: usage?.total_tool_use_tokens ?? 0,
@@ -174,7 +183,7 @@ export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, get
           // understate the context. The observed values survive in billed fields.
           if (firstInput !== undefined) {
             const output = (usage?.total_output_tokens ?? 0) + (usage?.total_thought_tokens ?? 0)
-            yield { ...chunk, usage: { ...chunk.usage, inputTokens: Math.max(0, firstInput - (firstCached ?? 0)) + (usage?.total_tool_use_tokens ?? 0), cacheReadTokens: firstCached ?? 0, outputTokens: output, reasoningTokens: usage?.total_thought_tokens ?? 0, totalTokens: firstInput + output + (usage?.total_tool_use_tokens ?? 0) } }
+            yield { ...chunk, usage: { ...chunk.usage, inputTokens: Math.max(0, firstInput - (firstCached ?? 0)) + (usage?.total_tool_use_tokens ?? 0), cacheReadTokens: firstCached ?? 0, outputTokens: output, reasoningTokens: usage?.total_thought_tokens ?? 0, totalTokens: firstInput + output + (usage?.total_tool_use_tokens ?? 0) + unattributedNonInputTokens() } }
           }
           continue
         }
