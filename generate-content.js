@@ -269,11 +269,13 @@ export async function continueArgonRequestStream(apiClient, original, request, m
       let hopChunks = 0, hopSawThought = false, hopSawVisibleOrTool = false
       let thoughtParts = [], thoughtBytes = 0, suppressedStop = false, hopToken
       const accountableHopOutputSpent = () => {
-        if (!latestUsage || latestUsage.candidatesTokenCount === null || latestUsage.thoughtsTokenCount === null || latestUsage.totalTokenCount === null) return null
+        if (!latestUsage || latestUsage.promptTokenCount === null || latestUsage.candidatesTokenCount === null || latestUsage.thoughtsTokenCount === null || latestUsage.toolUsePromptTokenCount === null || latestUsage.totalTokenCount === null) return null
         const explicitThoughts = Number.isSafeInteger(latestUsage.thoughtsTokenCount)
-        const derivedFromTotal = Number.isSafeInteger(latestUsage.totalTokenCount) && Number.isSafeInteger(latestUsage.promptTokenCount)
-          ? Math.max(0, latestUsage.totalTokenCount - latestUsage.promptTokenCount - value(latestUsage, 'toolUsePromptTokenCount'))
+        const hasTotalAndPrompt = Number.isSafeInteger(latestUsage.totalTokenCount) && Number.isSafeInteger(latestUsage.promptTokenCount)
+        const derivedFromTotal = hasTotalAndPrompt
+          ? latestUsage.totalTokenCount - latestUsage.promptTokenCount - value(latestUsage, 'toolUsePromptTokenCount')
           : null
+        if (derivedFromTotal !== null && derivedFromTotal < 0) return null
         if (!explicitThoughts && derivedFromTotal === null) return null
         return Math.max(value(latestUsage, 'candidatesTokenCount') + value(latestUsage, 'thoughtsTokenCount'), derivedFromTotal ?? 0)
       }
@@ -396,8 +398,9 @@ export async function continueArgonRequestStream(apiClient, original, request, m
           if (raw.usageMetadata && typeof raw.usageMetadata === 'object') latestUsage = readUsage(raw.usageMetadata, latestUsage)
           if (candidate?.finishReason !== undefined) finishReason = candidate.finishReason
           blocked ||= Boolean(raw.promptFeedback?.blockReason)
+          const priorTerminalDelivered = terminal && !suppressedStop
           terminal ||= blocked || (finishReason !== undefined && finishReason !== 'CONTINUATION')
-          const hideStop = candidate?.finishReason === 'STOP' && canHeal()
+          const hideStop = !priorTerminalDelivered && candidate?.finishReason === 'STOP' && canHeal()
           if (candidate?.finishReason !== undefined && candidate.finishReason !== 'CONTINUATION') suppressedStop = hideStop
           hopTracker?.onChunk({ status: 200, hasCheckpoint: hasToken, finishReason: candidate?.finishReason })
           if (!enabled || (!token && !newCheckpoint && !terminal && candidate?.finishReason !== 'CONTINUATION')) {
@@ -453,7 +456,7 @@ export async function continueArgonRequestStream(apiClient, original, request, m
         throwIfAborted(request.abortSignal)
       }
       if (terminal) {
-        if (!failure && canHeal()) {
+        if (!failure && suppressedStop && canHeal()) {
           const priorBilledOutput = billed.candidatesTokenCount + billed.thoughtsTokenCount
           const hopOutputSpent = accountableHopOutputSpent() ?? 0
           accountUsage()

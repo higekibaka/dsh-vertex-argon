@@ -2087,3 +2087,32 @@ test('round9 fixes (R8-P2-3 & R8-P2-6): sparse/Symbol array deepFreezeClone and 
     mode = prevMode
   }
 })
+
+test('round10 fix (R9-P2-3): deepFreezeClone preserves non-enumerable descriptors and own __proto__ data properties', () => {
+  const arr = [, 'v']
+  Object.defineProperty(arr, 'hiddenTag', { value: { flag: true }, enumerable: false, configurable: true, writable: true })
+  Object.defineProperty(arr, '__proto__', { value: { arrProtoVal: 1 }, enumerable: true, configurable: true, writable: true })
+  const clonedArr = deepFreezeClone(arr)
+  assert.equal(Array.isArray(clonedArr), true)
+  assert.equal(0 in clonedArr, false)
+  assert.equal(Object.prototype.propertyIsEnumerable.call(clonedArr, 'hiddenTag'), false)
+  assert.equal(clonedArr.hiddenTag.flag, true)
+  assert.equal(Object.isFrozen(clonedArr.hiddenTag), true)
+  assert.equal(Object.prototype.hasOwnProperty.call(clonedArr, '__proto__'), true)
+  assert.equal(Object.getOwnPropertyDescriptor(clonedArr, '__proto__').value.arrProtoVal, 1)
+
+  const obj = { visible: 1 }
+  Object.defineProperty(obj, 'hidden', { value: { nested: 2 }, enumerable: false, configurable: true, writable: true })
+  Object.defineProperty(obj, '__proto__', { value: { ownProto: true }, enumerable: true, configurable: true, writable: true })
+  obj.self = obj
+  const clonedObj = deepFreezeClone(obj)
+  assert.equal(clonedObj.visible, 1)
+  assert.equal(clonedObj.self, clonedObj)
+  assert.equal(Object.prototype.propertyIsEnumerable.call(clonedObj, 'hidden'), false)
+  assert.equal(clonedObj.hidden.nested, 2)
+  assert.equal(Object.isFrozen(clonedObj.hidden), true)
+  assert.equal(Object.prototype.hasOwnProperty.call(clonedObj, '__proto__'), true)
+  assert.equal(Object.getOwnPropertyDescriptor(clonedObj, '__proto__').value.ownProto, true)
+  assert.equal(Object.getPrototypeOf(clonedObj), Object.prototype)
+  assert.equal(clonedObj.ownProto, undefined)
+})

@@ -1,9 +1,9 @@
-# Gemini 4 Adapter（dsh-vertex-argon）发版状态与验证账本（v2.2.8）
+# Gemini 4 Adapter（dsh-vertex-argon）发版状态与验证账本（v2.2.9）
 
-- **用户工程版本**：`2.2.8`（展示品牌名 **Gemini 4 Adapter**，底层包名保持 `dsh-vertex-argon`），以 [package.json](<../../package.json>) 为准。
+- **用户工程版本**：`2.2.9`（展示品牌名 **Gemini 4 Adapter**，底层包名保持 `dsh-vertex-argon`），以 [package.json](<../../package.json>) 为准。
 - **声明兼容**：DSH `>=0.2.0-rc.2`；Node.js `^22.19.0 || >=24.0.0`。以 [package.json](<../../package.json>) 为准。
-- **本轮范围**：`v2.2.8` 加固 `google-signatures.js`（双拼写同现、空键名与 plain-object 严格校验）、为 `interactions.js` 补充已索引状态快照回滚以防无 `event_id` 工具参数增量重放重复拼接、在 `generate-content.js` 增加跨 hop 已提交前缀锁及未知用量拒绝合成续答护栏、并修复 `adapter.js` 数组稀疏槽/Symbol 深冻结与保留显式 `functionCallingConfig.mode`。
-- **验证状态**：2026-11-19 完成 `v2.2.8` 离线全量回归（详见 [CHANGELOG.md](<../../CHANGELOG.md>)）：挂载本机既有 React `19.2.0` 路径作为 `NODE_PATH` 时，36 个测试文件全量通过；`git diff --check` 退出码 `0`。
+- **本轮范围**：`v2.2.9` 将 `interactions.js` 的 `seenEvents` / `lastEventId` / `unindexedVisibleOutput` 与 `indexedSnapshot` 改为 `handleBody()` 成功后的原子提交（修复带 `event_id` 的可恢复错误游标快照错位）、在 `generate-content.js` 修复负差值 `usageMetadata` 被吞零并锁定「已交付 `STOP` 绝不触发二次自愈」、并升级 `adapter.js` `deepFreezeClone` 保留原型、不可枚举描述符及自有 `__proto__` 数据属性。
+- **验证状态**：2026-11-19 完成 `v2.2.9` 离线全量回归（详见 [CHANGELOG.md](<../../CHANGELOG.md>)）：挂载本机既有 React `19.2.0` 路径作为 `NODE_PATH` 时，36 个测试文件全量通过；`git diff --check` 退出码 `0`。
 
 ## 1. 生产文件边界
 

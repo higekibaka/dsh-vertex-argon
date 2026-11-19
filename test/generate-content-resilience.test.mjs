@@ -527,3 +527,43 @@ test('round9 healing guards (R8-P1-5 & R8-P2-2): forbids synthetic replay after 
   }
 })
 
+test('round10 healing fixes (R9-P2-2 & R9-P2-6): rejects contradictory negative usage diff and never heals after STOP was delivered', async () => {
+  // R9-P2-2: promptTokenCount=20, totalTokenCount=19 gives raw diff -1 (< 0) without explicit thoughtsTokenCount -> unaccountable, must refuse !hopToken heal.
+  const contradictoryUsage = { promptTokenCount: 20, candidatesTokenCount: 0, totalTokenCount: 19 }
+  const negDiff = await run([
+    [row(thought, 'STOP', undefined, contradictoryUsage)],
+    [row(text('never-called'), 'STOP')],
+  ], {
+    body: { contents: [{ role: 'user', parts: text('question') }], generationConfig: { maxOutputTokens: 100 } },
+  })
+  assert.equal(negDiff.error, undefined)
+  assert.equal(negDiff.requests.length, 1)
+  assert.equal(negDiff.chunks.at(-1).candidates[0].finishReason, 'STOP')
+
+  // Even when candidatesTokenCount & thoughtsTokenCount exist, total < prompt + toolUse is inconsistent -> unaccountable.
+  const contradictoryWithExplicit = { promptTokenCount: 20, candidatesTokenCount: 0, thoughtsTokenCount: 5, totalTokenCount: 19 }
+  const negExplicit = await run([
+    [row(thought, 'STOP', undefined, contradictoryWithExplicit)],
+    [row(text('never-called'), 'STOP')],
+  ], {
+    body: { contents: [{ role: 'user', parts: text('question') }], generationConfig: { maxOutputTokens: 100 } },
+  })
+  assert.equal(negExplicit.error, undefined)
+  assert.equal(negExplicit.requests.length, 1)
+
+  // R9-P2-6: thought-only STOP arrives before valid usageMetadata -> STOP is delivered once, and EOF must NOT trigger hop 2.
+  const delayedUsage = await run([
+    [
+      row(thought, 'STOP'),
+      { usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 0, thoughtsTokenCount: 5, totalTokenCount: 15 } },
+    ],
+    [row(text('must-not-heal-after-stop'), 'STOP')],
+  ], {
+    body: { contents: [{ role: 'user', parts: text('question') }], generationConfig: { maxOutputTokens: 100 } },
+  })
+  assert.equal(delayedUsage.error, undefined)
+  assert.equal(delayedUsage.requests.length, 1)
+  const stopFrames = delayedUsage.chunks.filter(c => c.candidates?.[0]?.finishReason === 'STOP')
+  assert.equal(stopFrames.length, 1)
+})
+

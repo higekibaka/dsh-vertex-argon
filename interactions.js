@@ -163,10 +163,14 @@ export async function* streamInteractions(options, settings) {
       if(typeof event.event_id!=='string')throw protocolError('Invalid event ID.')
       if(seenEvents.has(event.event_id))return
       if(seenEvents.size>=MAX_EVENTS)throw protocolError('Interactions event retention limit reached.')
-      seenEvents.add(event.event_id);lastEventId=event.event_id;unindexedVisibleOutput=false
     }
     yield*handleBody(event, indexed)
-    if(indexed)indexedSnapshot=captureSnapshot()
+    if(indexed){
+      seenEvents.add(event.event_id)
+      lastEventId=event.event_id
+      unindexedVisibleOutput=false
+      indexedSnapshot=captureSnapshot()
+    }
   }
   const cancel=async()=>{
     if(settings.background&&interactionId&&!terminal.has(status)&&!cancelled){

@@ -2,6 +2,17 @@
 
 All notable changes to **Gemini 4 Adapter** (`dsh-vertex-argon`) are documented in this file.
 
+## [2.2.9] - 2026-11-19
+
+### Fixed
+- **Atomic Interactions Cursor & Snapshot Commit (`interactions.js`)**:
+  - Deferred `seenEvents`, `lastEventId`, and `unindexedVisibleOutput` mutation until `handleBody(event, indexed)` completes without throwing, keeping `lastEventId` and `indexedSnapshot` atomically aligned when a recoverable `error` event carries an `event_id` so reconnecting replays from the prior indexed cursor instead of skipping preceding un-indexed argument deltas.
+- **GenerateContent Delivered-`STOP` Heal Lock & Negative Usage Guard (`generate-content.js`)**:
+  - Returned `null` from `accountableHopOutputSpent()` whenever `totalTokenCount - promptTokenCount - toolUsePromptTokenCount < 0` or any required usage counter is invalid, preventing inconsistent usage metadata from masquerading as zero spent tokens.
+  - Required `suppressedStop === true` to enter `thinking-dropout-heal` at EOF (and prevented hiding `STOP` after terminal output was already delivered), guaranteeing a request either holds `STOP` to heal or delivers `STOP` and terminates, never both.
+- **Full Property-Descriptor & Own `__proto__` Preservation in `deepFreezeClone` (`adapter.js`)**:
+  - Upgraded `deepFreezeClone` to preserve prototypes (`Object.create(Object.getPrototypeOf(value))`), non-enumerable property descriptors (`Object.getOwnPropertyDescriptor`), and own `'__proto__'` data properties (`Object.defineProperty`) across objects and arrays.
+
 ## [2.2.8] - 2026-11-19
 
 ### Fixed

@@ -365,3 +365,39 @@ test('round9 interactions fix (R8-P1-4): unindexed function_call argument deltas
  assert.equal(loopedGets, 3)
 })
 
+test('round10 interactions fix (R9-P1-3): indexed recoverable error commits neither cursor nor snapshot before reconnect', async () => {
+ const out = await run([
+  { ...created, event_id: 'e1' },
+  { ...start(0, 'function_call', { id: 'c1', name: 'write' }), event_id: 'e1b' },
+  { ...delta(0, 'arguments_delta', { partial_arguments: '{"n":1' }), event_id: 'e2' },
+  delta(0, 'arguments_delta', { partial_arguments: '0' }),
+  event('error', { event_id: 'e3', error: { code: 'authentication' } }),
+ ], {
+  settings: { store: true },
+  reconnect: [
+   { ...delta(0, 'arguments_delta', { partial_arguments: '0' }), event_id: 'e3b' },
+   { ...delta(0, 'arguments_delta', { partial_arguments: '}' }), event_id: 'e4' },
+   { ...stop(0), event_id: 'e5' },
+   { ...done('requires_action'), event_id: 'e6' },
+  ],
+ })
+ assert.equal(out.finish.reason.kind, 'tool-calls')
+ assert.equal(out.calls.filter(c => c.method === 'get').length, 1)
+ assert.equal(out.calls[1].request.last_event_id, 'e2')
+ assert.equal(out.blocks[0].arguments, '{"n":10}')
+
+ // Unindexed visible text followed by an indexed recoverable error still fails closed (unindexedVisibleOutput stays true).
+ const blocked = await run([
+  { ...created, event_id: 'e1' },
+  { ...start(0, 'model_output'), event_id: 'e2' },
+  delta(0, 'text', { text: 'unindexed-visible' }),
+  event('error', { event_id: 'e3', error: { code: 'authentication' } }),
+ ], {
+  settings: { store: true },
+  reconnect: [{ ...done(), event_id: 'e4' }],
+ })
+ assert.equal(blocked.finish.reason.kind, 'error')
+ assert.match(blocked.finish.reason.failure.message, /omitted event_id on a visible output frame/)
+ assert.equal(blocked.calls.filter(c => c.method === 'get').length, 0)
+})
+
