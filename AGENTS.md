@@ -1,6 +1,6 @@
 # Gemini 4 Adapter（dsh-vertex-argon）维护与发版说明
 
-维护前先读现有文档，再核对当前源码；不得仅据历史说明改实现。插件展示品牌名为 **Gemini 4 Adapter**，底层包名保持 `dsh-vertex-argon`，工程版本为 `2.2.2`，宿主兼容 `>=0.2.0-rc.2`，以 [package.json](<package.json>) 为准。依次查阅：
+维护前先读现有文档，再核对当前源码；不得仅据历史说明改实现。插件展示品牌名为 **Gemini 4 Adapter**，底层包名保持 `dsh-vertex-argon`，工程版本与宿主兼容（`>=0.2.0-rc.2`）均以 [package.json](<package.json>) 为准。依次查阅：
 
 1. [实现架构](<docs/implementation/README.md>)：双官方通道八模型、模块边界、13 项配置与存储域。
 2. [协议合同](<docs/implementation/DECISIONS.md>)：双通道凭据隔离、GenerateContent 四项韧性机制、基本诊断与读取兼容。
@@ -12,6 +12,7 @@
 - **本地开发不等于安装**：保留本地工程，仅复用已有依赖；没有明确授权不安装插件、不下载依赖、不发真实上游请求。
 - **离线零外网**：所有单元测试必须先加载 [offline-guard.mjs](<test/offline-guard.mjs>)，再加载 [host-loader.mjs](<test/host-loader.mjs>)。测试数与结论来自最终实际日志，不能预填。
 - **并行写入有界**：按任务认领范围修改，先读取再编辑；他人正在实现的后端/UI 可读不可越界写。最终差异和测试由负责人统一核验。
+- **严禁在审查循环中打 Tag 发包**：多轮代码审查与问题收敛一律针对本地工作区源码与离线单测进行，经总工 Triage 拍板定稿后，收尾只打一次 `v*` 标签触发一次正式 npm 发版，再升级桌面 Profile 做实机验收。
 
 ## 不得破坏的合同
 
