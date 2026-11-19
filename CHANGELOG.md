@@ -2,6 +2,20 @@
 
 All notable changes to **Gemini 4 Adapter** (`dsh-vertex-argon`) are documented in this file.
 
+## [2.2.7] - 2026-11-19
+
+### Fixed
+- **Same-Chunk Part Splitting & Dual-Key Field Validation (`google-signatures.js`)**:
+  - Split subsequent `text` / `thinking` parts within the same candidate `parts` array even when neither carries a `thoughtSignature`, aligning streaming and non-streaming block counts 1:1.
+  - Enforced strict individual validation on `thoughtSignature` / `thought_signature` and `functionCall` / `function_call` (rejecting empty/`null`/conflicting dual spellings, missing or empty `functionCall.name`, unsupported keys outside `name`/`args`/`id`/`call_id`, non-plain-object `args`, and conflicting `id`/`call_id`).
+- **Unindexed Visible Interactions Frame Guard (`interactions.js`)**:
+  - Tracked un-indexed visible output (`unindexedVisibleOutput`) even after an earlier `event_id`, failing closed instead of replaying from an older cursor unless a subsequent `event_id` advances `lastEventId`.
+- **Pre-Handler Interactions Reasoning Validation & Recursive Descriptor Freeze (`adapter.js`)**:
+  - Validated `resolveGemini4ReasoningLevel` inside `ArgonAdapter.prepareCall` before invoking custom `interactionHandler` instances, returning an in-band `{ type: 'finish', reason: { kind: 'error' } }` frame on invalid or conflicting options.
+  - Upgraded `freezeDescriptor` to recursive `deepFreezeClone` across nested objects, arrays, and symbol properties.
+- **Thinking-Dropout Heal Token Budget Deduction (`generate-content.js`)**:
+  - Evaluated Hop 1 usage before deciding `hideStop` / `canHeal()` and deducted Hop 1 spent candidate + thought tokens from `maxOutputTokens` / `max_output_tokens` across both `request.body` and cloned `httpOptions.extraBody` on synthetic (`!hopToken`) replay hops (refusing synthetic healing when no budget remains), while leaving checkpointed `hopToken` requests untouched.
+
 ## [2.2.6] - 2026-11-19
 
 ### Fixed

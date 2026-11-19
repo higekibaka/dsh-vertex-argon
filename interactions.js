@@ -29,16 +29,16 @@ export async function* streamInteractions(options, settings) {
   const signal=options.signal, transport=settings.transport
   const steps=new Map(), blocks=new Map(), seenEvents=new Set(), emittedToolIds=new Set()
   let exitReason='consumer-abandoned'
-  let blockIndex=0, bytes=0, interactionId, lastEventId, status, usage, cancelled=false, finishedNormally=false, emitted=false, completedEvent=false, progressVersion=0
+  let blockIndex=0, bytes=0, interactionId, lastEventId, status, usage, cancelled=false, finishedNormally=false, emitted=false, unindexedVisibleOutput=false, completedEvent=false, progressVersion=0
   const observeUsage=event=>{const u=event.interaction?.usage??event.usage??event.metadata?.total_usage;if(validObject(u)){const before=(usage?.total_output_tokens??0)+(usage?.total_thought_tokens??0);usage={...usage,...u};if((usage.total_output_tokens??0)+(usage.total_thought_tokens??0)>before)progressVersion++}}
   const checkBytes=text=>{bytes+=Buffer.byteLength(text??'');if(bytes>MAX_BYTES)throw protocolError('Interactions output exceeded the bounded response buffer.')}
-  function* appendText(state, text, reasoning=false) {
+  function* appendText(state, text, reasoning=false, indexed=false) {
     if(typeof text!=='string')throw protocolError('Interactions text delta is not a string.')
     if(!text)return
     if(state.closed)throw protocolError('Received a delta for an already closed step.')
     checkBytes(text)
     if(state.blockIndex===undefined){state.blockIndex=blockIndex++;yield{type:'block-start',index:state.blockIndex,blockType:reasoning?'reasoning':'text'}}
-    state.text+=text;emitted=true;progressVersion++
+    state.text+=text;emitted=true;if(!indexed)unindexedVisibleOutput=true;progressVersion++
     yield{type:reasoning?'reasoning-delta':'text-delta',index:state.blockIndex,text}
   }
   function* closeText(state) {
@@ -60,7 +60,7 @@ export async function* streamInteractions(options, settings) {
       if(typeof event.event_id!=='string')throw protocolError('Invalid event ID.')
       if(seenEvents.has(event.event_id))return
       if(seenEvents.size>=MAX_EVENTS)throw protocolError('Interactions event retention limit reached.')
-      seenEvents.add(event.event_id);lastEventId=event.event_id
+      seenEvents.add(event.event_id);lastEventId=event.event_id;unindexedVisibleOutput=false
     }
     settings.onEvent?.(event)
     const type=event.event_type??event.type
@@ -109,21 +109,22 @@ export async function* streamInteractions(options, settings) {
       if(!validObject(step)||!['thought','model_output','function_call'].includes(step.type))throw protocolError('Unsupported Interactions step type; this adapter executes only DSH-declared local tools.')
       const state={kind:step.type,text:'',signature:step.signature,callId:step.id,name:step.name,argsValue:step.arguments,argsText:'',closed:false}
       steps.set(event.index,state);progressVersion++
-      if(step.type==='model_output')for(const content of step.content??[]){if(content.type!=='text')throw protocolError('Unsupported output modality.');yield*appendText(state,content.text)}
-      if(step.type==='thought')for(const content of step.summary??[]){if(content.type==='text')yield*appendText(state,content.text,true)}
+      const indexed=Boolean(event.event_id)
+      if(step.type==='model_output')for(const content of step.content??[]){if(content.type!=='text')throw protocolError('Unsupported output modality.');yield*appendText(state,content.text,false,indexed)}
+      if(step.type==='thought')for(const content of step.summary??[]){if(content.type==='text')yield*appendText(state,content.text,true,indexed)}
       return
     }
     if(type==='step.delta'){
-      const state=stateFor(event.index),delta=event.delta
+      const state=stateFor(event.index),delta=event.delta,indexed=Boolean(event.event_id)
       if(!validObject(delta))throw protocolError('Invalid step delta.')
       if(state.kind==='user_input'){
         if(state.closed)throw protocolError('Received a delta for an already closed step.')
         return
       }
       if(delta.type==='text_annotation_delta'&&state.kind==='model_output')return // additive citations; no DSH annotation block type
-      if(delta.type==='text'&&state.kind==='model_output')yield*appendText(state,delta.text)
+      if(delta.type==='text'&&state.kind==='model_output')yield*appendText(state,delta.text,false,indexed)
       else if(delta.type==='thought_summary'&&state.kind==='thought'){
-        if(delta.content?.type==='text')yield*appendText(state,delta.content.text,true)
+        if(delta.content?.type==='text')yield*appendText(state,delta.content.text,true,indexed)
         else if(delta.content!==undefined)throw protocolError('Unsupported thought summary modality.')
       }else if(delta.type==='thought_signature'&&state.kind==='thought'){
         if(typeof delta.signature!=='string')throw protocolError('Invalid thought signature.')
@@ -187,6 +188,7 @@ export async function* streamInteractions(options, settings) {
       if((!replayingWithoutCursor||lastEventId)&&progressVersion>beforeProgress)reconnects=0
       if(connections>=64||Date.now()>=deadline)throw Object.assign(new Error('Interactions recovery reached its connection or runtime bound.'),{code:'ARGON_INTERACTIONS_INTERRUPTED'})
       if(!settings.store||!interactionId||reconnects>=3)throw failure??Object.assign(new Error('Interactions stream ended without a terminal status or safe recovery cursor.'),{code:'ARGON_INTERACTIONS_INTERRUPTED'})
+      if(unindexedVisibleOutput)throw protocolError('The stored Interactions read stream omitted event_id on a visible output frame; refusing unsafe replay. The remote task will be explicitly terminated, not resubmitted.')
       if(!lastEventId){
         if(emitted)throw protocolError('The stored Interactions read stream omitted event_id after visible output; refusing unsafe replay. The remote task will be explicitly terminated, not resubmitted.')
         // No visible blocks or tool calls have escaped: discard cursor-free

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 
 const ALLOWED_PART_KEYS = new Set(['text', 'thought', 'thoughtSignature', 'thought_signature', 'functionCall', 'function_call'])
+const ALLOWED_CALL_KEYS = new Set(['name', 'args', 'id', 'call_id'])
 
 const PREFIX = '{"dshGoogleSignatureOnly":'
 const base64 = value => typeof value === 'string' && value.length > 0 && value.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(value)
@@ -175,6 +176,18 @@ export function createGoogleSignatureBridge(context, model) {
           close()
           throw failure('Google returned an unsupported candidate part (' + unsupportedKeys.join(', ') + ') that cannot be replayed.')
         }
+        if (part.functionCall !== undefined && (!part.functionCall || typeof part.functionCall !== 'object' || Array.isArray(part.functionCall))) {
+          close()
+          throw failure('Google returned a candidate part with an invalid functionCall payload.')
+        }
+        if (part.function_call !== undefined && (!part.function_call || typeof part.function_call !== 'object' || Array.isArray(part.function_call))) {
+          close()
+          throw failure('Google returned a candidate part with an invalid functionCall payload.')
+        }
+        if (part.functionCall !== undefined && part.function_call !== undefined) {
+          close()
+          throw failure('Google returned a candidate part with both functionCall and function_call fields.')
+        }
         const call = part.functionCall ?? part.function_call
         const hasText = part.text !== undefined
         const hasCall = call !== undefined
@@ -186,9 +199,32 @@ export function createGoogleSignatureBridge(context, model) {
           close()
           throw failure('Google returned a candidate part with an invalid text field.')
         }
-        if (hasCall && (!call || typeof call !== 'object' || Array.isArray(call))) {
-          close()
-          throw failure('Google returned a candidate part with an invalid functionCall payload.')
+        if (hasCall) {
+          const invalidCallKey = Object.keys(call).filter(key => call[key] !== undefined).find(key => !ALLOWED_CALL_KEYS.has(key))
+          if (invalidCallKey) {
+            close()
+            throw failure('Google returned a candidate part with an unsupported functionCall field (' + invalidCallKey + ').')
+          }
+          if (typeof call.name !== 'string' || !call.name) {
+            close()
+            throw failure('Google returned a candidate part with an invalid functionCall name.')
+          }
+          if (call.args !== undefined && (!call.args || typeof call.args !== 'object' || Array.isArray(call.args))) {
+            close()
+            throw failure('Google returned a candidate part with an invalid functionCall args payload.')
+          }
+          if (call.id !== undefined && (typeof call.id !== 'string' || !call.id)) {
+            close()
+            throw failure('Google returned a candidate part with an invalid functionCall id.')
+          }
+          if (call.call_id !== undefined && (typeof call.call_id !== 'string' || !call.call_id)) {
+            close()
+            throw failure('Google returned a candidate part with an invalid functionCall call_id.')
+          }
+          if (call.id !== undefined && call.call_id !== undefined && call.id !== call.call_id) {
+            close()
+            throw failure('Google returned a candidate part with conflicting functionCall id and call_id.')
+          }
         }
         if (hasText && hasCall) {
           close()
@@ -201,11 +237,19 @@ export function createGoogleSignatureBridge(context, model) {
         bytes += Buffer.byteLength(JSON.stringify(part))
         if (bytes > 64 * 1024 * 1024) throw failure('Google response exceeded the bounded signature replay buffer.')
         // A Part may serialize the signature in either wire spelling.
-        const sig = part.thoughtSignature ?? part.thought_signature
-        if (sig !== undefined && typeof sig !== 'string') {
+        if (part.thoughtSignature !== undefined && (typeof part.thoughtSignature !== 'string' || !part.thoughtSignature)) {
           close()
           throw failure('Google returned a candidate part with an invalid thoughtSignature.')
         }
+        if (part.thought_signature !== undefined && (typeof part.thought_signature !== 'string' || !part.thought_signature)) {
+          close()
+          throw failure('Google returned a candidate part with an invalid thoughtSignature.')
+        }
+        if (part.thoughtSignature !== undefined && part.thought_signature !== undefined && part.thoughtSignature !== part.thought_signature) {
+          close()
+          throw failure('Google returned a candidate part with conflicting thoughtSignature spellings.')
+        }
+        const sig = part.thoughtSignature ?? part.thought_signature
         const onlySignature = typeof sig === 'string' && !hasText && !hasCall
         if (onlySignature) {
           if (!sig) {
@@ -225,13 +269,12 @@ export function createGoogleSignatureBridge(context, model) {
           const sigKey = type === 'text' ? 'textSignature' : 'thinkingSignature'
           const curText = type === 'text' ? current?.text : current?.thinking
           const curSig = current?.[sigKey]
-          const sameChunkSigBoundary = currentFromThisChunk && (Boolean(curSig) || Boolean(sig))
           const crossChunkSigConflict =
             (Boolean(curSig) && Boolean(sig)) ||
             (Boolean(curSig) && curText === '') ||
             (Boolean(sig) && part.text === '')
-          const splitSigned = sameChunkSigBoundary || crossChunkSigConflict
-          if (!current || current.type !== type || splitSigned) {
+          const splitPart = currentFromThisChunk || crossChunkSigConflict
+          if (!current || current.type !== type || splitPart) {
             close(); current = type === 'text' ? { type, text: '' } : { type, thinking: '' }
             const index = start(current)
             emit({ type: type === 'text' ? 'text_start' : 'thinking_start', contentIndex: index })

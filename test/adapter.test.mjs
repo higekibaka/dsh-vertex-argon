@@ -1987,3 +1987,52 @@ test('seventh review fixes: returned and caller-supplied model descriptors are d
     mode = 'tool'
   }
 })
+
+nodeTest('round8 fixes (R7-P2-4 & R7-P2-6): pre-handler Interactions reasoning validation & recursive deepFreezeClone', async () => {
+  let handlerCalls = 0
+  const interAdapter = createArgonAdapter(ctx, { ...config, vertexProtocol: 'interactions', routes: { hasVertexNeon: true } })
+  interAdapter.interactionHandler = async function* () {
+    handlerCalls++
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+  const prepared = await interAdapter.prepareCall(PROVIDER, NEON_MODEL)
+  const invalidChunks = await collect(prepared.stream(req('minimal', NEON_MODEL)))
+  assert.equal(handlerCalls, 0)
+  assert.equal(invalidChunks.at(-1).reason.kind, 'error')
+  assert.equal(invalidChunks.at(-1).reason.failure.code, 'UNSUPPORTED_REASONING_EFFORT')
+
+  const conflictChunks = await collect(prepared.stream({ ...req('low', NEON_MODEL), reasoning: 'high' }))
+  assert.equal(handlerCalls, 0)
+  assert.equal(conflictChunks.at(-1).reason.kind, 'error')
+  assert.equal(conflictChunks.at(-1).reason.failure.code, 'INVALID_REQUEST')
+
+  const validChunks = await collect(prepared.stream(req('xhigh', NEON_MODEL)))
+  assert.equal(handlerCalls, 1)
+  assert.equal(validChunks.at(-1).reason.kind, 'stop')
+
+  const nestedMutable = {
+    id: NEON_MODEL,
+    name: 'Gemini 4 Neon',
+    provider: PROVIDER,
+    api: 'google-vertex',
+    baseUrl: 'https://us-central1-aiplatform.googleapis.com',
+    reasoning: true,
+    input: ['text'],
+    contextWindow: 1048576,
+    maxTokens: 32768,
+    thinkingLevelMap: { off: null, minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: null },
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    nestedMeta: { nested: { token: 'keep', arr: [{ inner: 1 }] } },
+  }
+  const dp = argonProvider(googleVertexProvider(), [nestedMutable], 'medium', googleProvider(), true, undefined, {}, undefined)
+  nestedMutable.nestedMeta.nested.token = 'mutated-by-caller'
+  nestedMutable.nestedMeta.nested.arr[0].inner = 99
+  const [frozenNested] = dp.getModels()
+  assert.equal(Object.isFrozen(frozenNested.nestedMeta), true)
+  assert.equal(Object.isFrozen(frozenNested.nestedMeta.nested), true)
+  assert.equal(Object.isFrozen(frozenNested.nestedMeta.nested.arr), true)
+  assert.equal(Object.isFrozen(frozenNested.nestedMeta.nested.arr[0]), true)
+  assert.equal(frozenNested.nestedMeta.nested.token, 'keep')
+  assert.equal(frozenNested.nestedMeta.nested.arr[0].inner, 1)
+  assert.throws(() => { frozenNested.nestedMeta.nested.token = 'tamper' }, TypeError)
+})

@@ -278,3 +278,32 @@ test('a delta after a closed user_input step is a protocol error', async () => {
  assert.equal(out.calls.filter(c => c.method === 'cancel').length, 0)
 })
 
+test('round8 interactions fix (R7-P1-6): unindexed visible frame after an earlier event_id refuses replay until a newer cursor advances', async () => {
+ const blocked = await run([
+  { ...created, event_id: 'e1' },
+  { ...start(0, 'model_output'), event_id: 'e2' },
+  delta(0, 'text', { text: 'unindexed-visible' }),
+  new Error('drop'),
+ ], {
+  settings: { store: true },
+  reconnect: [{ ...delta(0, 'text', { text: 'should-not-replay' }), event_id: 'e3' }, { ...stop(0), event_id: 'e4' }, { ...done(), event_id: 'e5' }],
+ })
+ assert.equal(blocked.finish.reason.kind, 'error')
+ assert.match(blocked.finish.reason.failure.message, /omitted event_id on a visible output frame/)
+ assert.equal(blocked.calls.filter(c => c.method === 'get').length, 0)
+
+ const recovered = await run([
+  { ...created, event_id: 'e1' },
+  { ...start(0, 'model_output'), event_id: 'e2' },
+  delta(0, 'text', { text: 'Part1' }),
+  { ...delta(0, 'text', { text: 'Part2' }), event_id: 'e3' },
+  new Error('drop'),
+ ], {
+  settings: { store: true },
+  reconnect: [{ ...delta(0, 'text', { text: 'Part3' }), event_id: 'e4' }, { ...stop(0), event_id: 'e5' }, { ...done(), event_id: 'e6' }],
+ })
+ assert.equal(recovered.finish.reason.kind, 'stop')
+ assert.equal(recovered.text, 'Part1Part2Part3')
+ assert.equal(recovered.calls.filter(c => c.method === 'get').length, 1)
+})
+

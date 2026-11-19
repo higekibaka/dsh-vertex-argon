@@ -222,6 +222,14 @@ export async function continueArgonRequestStream(apiClient, original, request, m
   return (async function* () {
     const baseBody = JSON.parse(request.body)
     let initialBody = request.body
+    const readMaxBudget = obj => {
+      for (const cfgObj of [obj?.generationConfig, obj?.generation_config]) {
+        const val = cfgObj?.maxOutputTokens ?? cfgObj?.max_output_tokens
+        if (Number.isSafeInteger(val) && val > 0) return val
+      }
+      return undefined
+    }
+    const initialMaxOutputTokens = readMaxBudget(httpOptions.extraBody) ?? readMaxBudget(baseBody)
     // Google documents a top-level service_tier. Apply after SDK conversion so
     // older converters cannot silently discard it; every hop uses this snapshot.
     if (!apiClient.isVertexAI?.() && meta.serviceTier !== undefined) {
@@ -259,7 +267,10 @@ export async function continueArgonRequestStream(apiClient, original, request, m
       let blocked = false, terminal = false, streamSettled = false, usageAccounted = false
       let hopChunks = 0, hopSawThought = false, hopSawVisibleOrTool = false
       let thoughtParts = [], thoughtBytes = 0, suppressedStop = false, hopToken
-      const canHeal = () => enabled && thinkingDropoutHeals < MAX_THINKING_DROPOUT_HEALS && hopSawThought && !hopSawVisibleOrTool && !blocked && finishReason === 'STOP'
+      const remainingHealBudget = () => initialMaxOutputTokens === undefined
+        ? Infinity
+        : initialMaxOutputTokens - (billed.candidatesTokenCount + billed.thoughtsTokenCount + (usageAccounted ? 0 : value(latestUsage, 'candidatesTokenCount') + value(latestUsage, 'thoughtsTokenCount')))
+      const canHeal = () => enabled && thinkingDropoutHeals < MAX_THINKING_DROPOUT_HEALS && hopSawThought && !hopSawVisibleOrTool && !blocked && finishReason === 'STOP' && (Boolean(hopToken) || remainingHealBudget() > 0)
 
       const wrap = (raw, headers, usageSnapshot, hideStop = false) => {
         let out = raw
@@ -368,13 +379,13 @@ export async function continueArgonRequestStream(apiClient, original, request, m
           // continuation token, a repeated finishReason or an empty thought frame
           // must never extend a stalled hop.
           watchdog.update(parts, Boolean(newCheckpoint || (candidate?.finishReason !== undefined && candidate.finishReason !== finishReason) || (!blocked && raw.promptFeedback?.blockReason)))
+          if (raw.usageMetadata && typeof raw.usageMetadata === 'object') latestUsage = readUsage(raw.usageMetadata, latestUsage)
           if (candidate?.finishReason !== undefined) finishReason = candidate.finishReason
           blocked ||= Boolean(raw.promptFeedback?.blockReason)
           terminal ||= blocked || (finishReason !== undefined && finishReason !== 'CONTINUATION')
           const hideStop = candidate?.finishReason === 'STOP' && canHeal()
           if (candidate?.finishReason !== undefined && candidate.finishReason !== 'CONTINUATION') suppressedStop = hideStop
           hopTracker?.onChunk({ status: 200, hasCheckpoint: hasToken, finishReason: candidate?.finishReason })
-          if (raw.usageMetadata && typeof raw.usageMetadata === 'object') latestUsage = readUsage(raw.usageMetadata, latestUsage)
           if (!enabled || (!token && !newCheckpoint && !terminal && candidate?.finishReason !== 'CONTINUATION')) {
             refreshOriginalUsage()
             const outgoing = wrap(raw, chunk.headers, latestUsage, hideStop)
@@ -431,11 +442,31 @@ export async function continueArgonRequestStream(apiClient, original, request, m
           hopTracker?.finish({ finishReason, continued: true })
           if (hop === MAX_CONTINUATION_HOPS) throw streamError('Argon continuation hop limit reached without a terminal response.', 'ARGON_HOP_LIMIT')
           thinkingDropoutHeals++
-          if (hopToken) token = hopToken
-          else {
+          if (hopToken) {
+            token = hopToken
+          } else {
             token = undefined
+            const remainingBudget = initialMaxOutputTokens === undefined ? undefined : initialMaxOutputTokens - (billed.candidatesTokenCount + billed.thoughtsTokenCount)
+            const withRemainingBudget = bodyObj => {
+              if (remainingBudget === undefined) return bodyObj
+              const updateCfg = cfgObj => {
+                if (!cfgObj || typeof cfgObj !== 'object' || Array.isArray(cfgObj)) return cfgObj
+                const nextCfg = { ...cfgObj }
+                if ('maxOutputTokens' in nextCfg) nextCfg.maxOutputTokens = remainingBudget
+                if ('max_output_tokens' in nextCfg) nextCfg.max_output_tokens = remainingBudget
+                return nextCfg
+              }
+              return {
+                ...bodyObj,
+                ...(bodyObj.generationConfig !== undefined ? { generationConfig: updateCfg(bodyObj.generationConfig) } : {}),
+                ...(bodyObj.generation_config !== undefined ? { generation_config: updateCfg(bodyObj.generation_config) } : {}),
+              }
+            }
+            if (httpOptions.extraBody && typeof httpOptions.extraBody === 'object' && !Array.isArray(httpOptions.extraBody)) {
+              httpOptions.extraBody = withRemainingBudget(httpOptions.extraBody)
+            }
             const { continuationToken: ignored, ...rest } = continuationBody
-            continuationBody = { ...rest, contents: [...(rest.contents ?? []), { role: 'model', parts: thoughtParts }, { role: 'user', parts: [{ text: 'Continue and provide the final response or tool call.' }] }] }
+            continuationBody = withRemainingBudget({ ...rest, contents: [...(rest.contents ?? []), { role: 'model', parts: thoughtParts }, { role: 'user', parts: [{ text: 'Continue and provide the final response or tool call.' }] }] })
           }
           retriesWithoutProgress = 0; retryAttempt = 0; delayMs = 0
           trigger = 'thinking-dropout-heal'

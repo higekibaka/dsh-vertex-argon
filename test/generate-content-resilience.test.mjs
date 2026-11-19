@@ -452,3 +452,46 @@ test('a newly signed thought frame renews the watchdog', async () => {
  assert.ok(out.parts.length >= 30, 'every signed frame is delivered')
 })
 
+test('round8 healing budget deduction (R7-P2-5): deducts Hop 1 spent tokens and refuses heal when exhausted', async () => {
+  const u30 = { promptTokenCount: 10, candidatesTokenCount: 0, thoughtsTokenCount: 30, totalTokenCount: 40 }
+  const uDone = { promptTokenCount: 50, candidatesTokenCount: 12, thoughtsTokenCount: 5, totalTokenCount: 67 }
+  const partial = await run([[row(thought, 'STOP', undefined, u30)], [row(text('healed'), 'STOP', undefined, uDone)]], {
+    body: { contents: [{ role: 'user', parts: text('question') }], generationConfig: { maxOutputTokens: 100 } },
+  })
+  assert.equal(partial.error, undefined)
+  assert.equal(partial.requests.length, 2)
+  assert.equal(JSON.parse(partial.requests[1].body).generationConfig.maxOutputTokens, 70)
+
+  const uExhausted = { promptTokenCount: 10, candidatesTokenCount: 0, thoughtsTokenCount: 100, totalTokenCount: 110 }
+  const exhausted = await run([[row(thought, 'STOP', undefined, uExhausted)], [row(text('never-called'), 'STOP')]], {
+    body: { contents: [{ role: 'user', parts: text('question') }], generationConfig: { maxOutputTokens: 100 } },
+  })
+  assert.equal(exhausted.error, undefined)
+  assert.equal(exhausted.requests.length, 1)
+  assert.equal(exhausted.chunks.at(-1).candidates[0].finishReason, 'STOP')
+
+  // ExtraBody precedence on synthetic heal and byte preservation on checkpointed hopToken heal.
+  const extraCaller = { generationConfig: { maxOutputTokens: 100 } }
+  const extraRequests = [], extraStream = await continueArgonRequestStream(
+    { isVertexAI: () => false },
+    async req => {
+      extraRequests.push(req)
+      const list = extraRequests.length === 1 ? [row(thought, 'STOP', undefined, u30)] : [row(text('ok'), 'STOP', undefined, uDone)]
+      return (async function* () { for (const f of list) yield wire(f) })()
+    },
+    { body: JSON.stringify({ contents: [{ role: 'user', parts: text('q') }], generationConfig: { maxOutputTokens: 200 } }), httpOptions: { extraBody: extraCaller } },
+    { enabled: true, reconnectBackoff: { initialDelayMs: 0 } },
+  )
+  for await (const _ of extraStream) {}
+  assert.equal(extraRequests.length, 2)
+  assert.equal(extraRequests[1].httpOptions.extraBody.generationConfig.maxOutputTokens, 70)
+  assert.equal(extraCaller.generationConfig.maxOutputTokens, 100)
+
+  const cpHeal = await run([[row(thought, 'STOP', 'cp-keep', u30)], [row(text('cp-ok'), 'STOP', undefined, uDone)]], {
+    body: { contents: [{ role: 'user', parts: text('question') }], generationConfig: { maxOutputTokens: 100 } },
+  })
+  assert.equal(cpHeal.requests.length, 2)
+  assert.equal(JSON.parse(cpHeal.requests[1].body).generationConfig.maxOutputTokens, 100)
+  assert.equal(JSON.parse(cpHeal.requests[1].body).continuationToken, 'cp-keep')
+})
+

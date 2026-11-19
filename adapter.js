@@ -852,22 +852,28 @@ export function resolveConfigValues(raw = {}) {
   }
 }
 
-function freezeDescriptor(descriptor) {
-  if (!descriptor || typeof descriptor !== 'object') return descriptor
-  const copy = {
-    ...descriptor,
-    ...(Array.isArray(descriptor.input) ? { input: Object.freeze([...descriptor.input]) } : {}),
-    ...(descriptor.thinkingLevelMap && typeof descriptor.thinkingLevelMap === 'object'
-      ? { thinkingLevelMap: Object.freeze({ ...descriptor.thinkingLevelMap }) }
-      : {}),
-    ...(descriptor.cost && typeof descriptor.cost === 'object'
-      ? { cost: Object.freeze({ ...descriptor.cost }) }
-      : {}),
+function deepFreezeClone(value, seen = new WeakMap()) {
+  if (!value || typeof value !== 'object') return value
+  if (seen.has(value)) return seen.get(value)
+  if (Array.isArray(value)) {
+    const arr = []
+    seen.set(value, arr)
+    for (const item of value) arr.push(deepFreezeClone(item, seen))
+    return Object.freeze(arr)
   }
-  for (const sym of Object.getOwnPropertySymbols(descriptor)) {
-    copy[sym] = descriptor[sym]
+  const copy = {}
+  seen.set(value, copy)
+  for (const key of Object.keys(value)) {
+    copy[key] = deepFreezeClone(value[key], seen)
+  }
+  for (const sym of Object.getOwnPropertySymbols(value)) {
+    copy[sym] = deepFreezeClone(value[sym], seen)
   }
   return Object.freeze(copy)
+}
+
+function freezeDescriptor(descriptor) {
+  return deepFreezeClone(descriptor)
 }
 
 /** Serve the official Vertex AI and Gemini API models in one plugin group. */
@@ -978,6 +984,17 @@ export class ArgonAdapter extends LlmAdapter {
         stream: options => {
           const pinned = pinPreparedOptions(options, provider, model)
           assertGemini4MaxTokens(pinned, resolvedModel, cfg?.longDecode)
+          const defaultReasoning = cfg?.hasExplicitReasoning === false ? defaultReasoningForModel(model) : (cfg?.reasoning ?? defaultReasoningForModel(model))
+          const check = resolveGemini4ReasoningLevel(pinned, model, defaultReasoning)
+          if (!check.ok) {
+            const message = check.errorType === 'conflict'
+              ? 'Conflicting reasoning and reasoningEffort options in Interactions request.'
+              : (check.supportsXhigh ? 'Gemini 4 (Hydrogen / Neon) requires low, medium, high, or xhigh thinking.' : 'Argon requires low, medium, or high thinking.')
+            const code = check.errorType === 'conflict' ? 'INVALID_REQUEST' : 'UNSUPPORTED_REASONING_EFFORT'
+            return (async function* () {
+              yield { type: 'finish', reason: { kind: 'error', failure: { code, message } } }
+            })()
+          }
           return this.interactionHandler(syncGemini4ReasoningOptions(pinned, model), cfg)
         },
       }

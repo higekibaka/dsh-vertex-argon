@@ -276,3 +276,41 @@ test('round7 signature hardening: unsupported parts fail closed & symmetric cros
     }
   }
 })
+
+test('round8 signature fixes (R7-P1-1, R7-P1-4): same-chunk unsigned parts split and invalid dual keys/call fields fail closed', async () => {
+  const model = { api: 'google-vertex', provider: PROVIDER, id: MODEL }
+  for (const parts of [
+    [{ text: 'A' }, { text: 'B' }],
+    [{ thought: true, text: 'T1' }, { thought: true, text: 'T2' }],
+  ]) {
+    const b = createGoogleSignatureBridge({ messages: [{ role: 'user', content: 'u' }] }, model)
+    b.observe({ candidates: [{ content: { parts } }] })
+    const evs = []
+    for await (const ev of b.stream((async function* () {
+      yield { type: 'start' }
+      yield { type: 'done', message: { role: 'assistant', api: model.api, provider: model.provider, model: model.id, content: [] } }
+    })())) evs.push(ev)
+    assert.equal(evs.at(-1).message.content.length, 2)
+  }
+
+  for (const badPart of [
+    { text: 'hi', thoughtSignature: '', thought_signature: S1 },
+    { text: 'hi', thoughtSignature: null, thought_signature: S1 },
+    { text: 'hi', thoughtSignature: S1, thought_signature: S2 },
+    { functionCall: null, function_call: { name: 'fn', args: {} } },
+    { functionCall: { name: 'fn', args: {} }, function_call: { name: 'fn', args: {} } },
+    { functionCall: { name: '', args: {} } },
+    { functionCall: { args: {} } },
+    { functionCall: { name: 'fn', args: [] } },
+    { functionCall: { name: 'fn', args: null } },
+    { functionCall: { name: 'fn', args: {}, extra: 1 } },
+    { functionCall: { name: 'fn', args: {}, id: '' } },
+    { functionCall: { name: 'fn', args: {}, id: 'a', call_id: 'b' } },
+  ]) {
+    const b = createGoogleSignatureBridge({ messages: [{ role: 'user', content: 'u' }] }, model)
+    assert.throws(
+      () => b.observe({ candidates: [{ content: { parts: [badPart] } }] }),
+      e => e?.code === 'ARGON_SIGNATURE_REPLAY',
+    )
+  }
+})
