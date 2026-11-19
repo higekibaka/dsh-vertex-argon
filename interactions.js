@@ -29,7 +29,10 @@ export async function* streamInteractions(options, settings) {
   const signal=options.signal, transport=settings.transport
   const steps=new Map(), blocks=new Map(), seenEvents=new Set(), emittedToolIds=new Set()
   let exitReason='consumer-abandoned'
-  let blockIndex=0, bytes=0, interactionId, lastEventId, status, usage, cancelled=false, finishedNormally=false, emitted=false, unindexedVisibleOutput=false, completedEvent=false, progressVersion=0
+  let blockIndex=0, bytes=0, interactionId, lastEventId, status, usage, cancelled=false, finishedNormally=false, emitted=false, unindexedVisibleOutput=false, completedEvent=false, progressVersion=0, indexedSnapshot
+  const cloneStepState=state=>({...state,...(state.argsValue!==undefined?{argsValue:structuredClone(state.argsValue)}:{}),...(state.args!==undefined?{args:structuredClone(state.args)}:{})})
+  const captureSnapshot=()=>({steps:new Map([...steps.entries()].map(([k,v])=>[k,cloneStepState(v)])),blocks:new Map([...blocks.entries()].map(([k,v])=>[k,structuredClone(v)])),blockIndex,bytes,status,usage:usage?structuredClone(usage):undefined,completedEvent})
+  const restoreSnapshot=snap=>{steps.clear();for(const[k,v]of snap.steps.entries())steps.set(k,cloneStepState(v));blocks.clear();for(const[k,v]of snap.blocks.entries())blocks.set(k,structuredClone(v));blockIndex=snap.blockIndex;bytes=snap.bytes;status=snap.status;usage=snap.usage?structuredClone(snap.usage):undefined;completedEvent=snap.completedEvent}
   const observeUsage=event=>{const u=event.interaction?.usage??event.usage??event.metadata?.total_usage;if(validObject(u)){const before=(usage?.total_output_tokens??0)+(usage?.total_thought_tokens??0);usage={...usage,...u};if((usage.total_output_tokens??0)+(usage.total_thought_tokens??0)>before)progressVersion++}}
   const checkBytes=text=>{bytes+=Buffer.byteLength(text??'');if(bytes>MAX_BYTES)throw protocolError('Interactions output exceeded the bounded response buffer.')}
   function* appendText(state, text, reasoning=false, indexed=false) {
@@ -41,8 +44,9 @@ export async function* streamInteractions(options, settings) {
     state.text+=text;emitted=true;if(!indexed)unindexedVisibleOutput=true;progressVersion++
     yield{type:reasoning?'reasoning-delta':'text-delta',index:state.blockIndex,text}
   }
-  function* closeText(state) {
+  function* closeText(state, indexed=true) {
     if(state.blockIndex!==undefined&&!state.blockClosed){
+      if(!indexed)unindexedVisibleOutput=true
       const block={type:state.kind==='thought'?'reasoning':'text',text:state.text}
       state.blockClosed=true;blocks.set(state.blockIndex,block)
       yield{type:'block-end',index:state.blockIndex,block}
@@ -54,14 +58,7 @@ export async function* streamInteractions(options, settings) {
     if(!state)throw protocolError('Interactions delta arrived before its step.start.')
     return state
   }
-  function* handle(event) {
-    if(!validObject(event))throw protocolError('Invalid Interactions event.')
-    if(event.event_id){
-      if(typeof event.event_id!=='string')throw protocolError('Invalid event ID.')
-      if(seenEvents.has(event.event_id))return
-      if(seenEvents.size>=MAX_EVENTS)throw protocolError('Interactions event retention limit reached.')
-      seenEvents.add(event.event_id);lastEventId=event.event_id;unindexedVisibleOutput=false
-    }
+  function* handleBody(event, indexed) {
     settings.onEvent?.(event)
     const type=event.event_type??event.type
     const id=event.interaction?.id??event.interaction_id
@@ -109,13 +106,12 @@ export async function* streamInteractions(options, settings) {
       if(!validObject(step)||!['thought','model_output','function_call'].includes(step.type))throw protocolError('Unsupported Interactions step type; this adapter executes only DSH-declared local tools.')
       const state={kind:step.type,text:'',signature:step.signature,callId:step.id,name:step.name,argsValue:step.arguments,argsText:'',closed:false}
       steps.set(event.index,state);progressVersion++
-      const indexed=Boolean(event.event_id)
       if(step.type==='model_output')for(const content of step.content??[]){if(content.type!=='text')throw protocolError('Unsupported output modality.');yield*appendText(state,content.text,false,indexed)}
       if(step.type==='thought')for(const content of step.summary??[]){if(content.type==='text')yield*appendText(state,content.text,true,indexed)}
       return
     }
     if(type==='step.delta'){
-      const state=stateFor(event.index),delta=event.delta,indexed=Boolean(event.event_id)
+      const state=stateFor(event.index),delta=event.delta
       if(!validObject(delta))throw protocolError('Invalid step delta.')
       if(state.kind==='user_input'){
         if(state.closed)throw protocolError('Received a delta for an already closed step.')
@@ -147,7 +143,7 @@ export async function* streamInteractions(options, settings) {
       if(state.kind==='function_call'){
         try{state.args=state.argsText?JSON.parse(state.argsText):(state.argsValue??{})}catch{state.invalidArguments=true}
         if(!validObject(state.args))state.invalidArguments=true
-      }else yield*closeText(state)
+      }else yield*closeText(state, indexed)
       return
     }
     // Usage/status extensions may be added without rendering; unknown semantic
@@ -160,6 +156,18 @@ export async function* streamInteractions(options, settings) {
     }
     throw protocolError('Unknown Interactions stream event.')
   }
+  function* handle(event) {
+    if(!validObject(event))throw protocolError('Invalid Interactions event.')
+    const indexed=Boolean(event.event_id)
+    if(indexed){
+      if(typeof event.event_id!=='string')throw protocolError('Invalid event ID.')
+      if(seenEvents.has(event.event_id))return
+      if(seenEvents.size>=MAX_EVENTS)throw protocolError('Interactions event retention limit reached.')
+      seenEvents.add(event.event_id);lastEventId=event.event_id;unindexedVisibleOutput=false
+    }
+    yield*handleBody(event, indexed)
+    if(indexed)indexedSnapshot=captureSnapshot()
+  }
   const cancel=async()=>{
     if(settings.background&&interactionId&&!terminal.has(status)&&!cancelled){
       cancelled=true // one attempt per unwind, even if confirmation fails
@@ -170,10 +178,10 @@ export async function* streamInteractions(options, settings) {
     signal?.throwIfAborted()
     const body=await buildInteractionRequest(options,settings)
     let stream=await transport.create(body,{signal})
-    let reconnects=0,connections=1,replayingWithoutCursor=false
+    let reconnects=0,connections=1,replayingWithoutCursor=false,lastDropFingerprint
     const deadline=Date.now()+24*60*60*1000
     for(;;){
-      const beforeProgress=progressVersion
+      const beforeProgress=progressVersion,beforeLastEventId=lastEventId
       let failure
       try{
         if(!stream?.[Symbol.asyncIterator])throw protocolError('Interactions create/get returned no event stream.')
@@ -185,7 +193,10 @@ export async function* streamInteractions(options, settings) {
       if(!failure&&completedEvent&&terminal.has(status))break
       if(failure&&!retryable(failure))throw failure
       signal?.throwIfAborted()
-      if((!replayingWithoutCursor||lastEventId)&&progressVersion>beforeProgress)reconnects=0
+      const attemptFingerprint=JSON.stringify({lastEventId,status,usage,steps:[...steps.entries()].sort((a,b)=>a[0]-b[0])})
+      const madeProgress=lastEventId!==beforeLastEventId||((!replayingWithoutCursor||Boolean(lastEventId))&&progressVersion>beforeProgress&&attemptFingerprint!==lastDropFingerprint)
+      if(madeProgress)reconnects=0
+      lastDropFingerprint=attemptFingerprint
       if(connections>=64||Date.now()>=deadline)throw Object.assign(new Error('Interactions recovery reached its connection or runtime bound.'),{code:'ARGON_INTERACTIONS_INTERRUPTED'})
       if(!settings.store||!interactionId||reconnects>=3)throw failure??Object.assign(new Error('Interactions stream ended without a terminal status or safe recovery cursor.'),{code:'ARGON_INTERACTIONS_INTERRUPTED'})
       if(unindexedVisibleOutput)throw protocolError('The stored Interactions read stream omitted event_id on a visible output frame; refusing unsafe replay. The remote task will be explicitly terminated, not resubmitted.')
@@ -196,7 +207,10 @@ export async function* streamInteractions(options, settings) {
         replayingWithoutCursor=true
         steps.clear();blocks.clear();seenEvents.clear();emittedToolIds.clear()
         blockIndex=0;bytes=0;status=undefined;usage=undefined;completedEvent=false
-      }else replayingWithoutCursor=false
+      }else{
+        replayingWithoutCursor=false
+        if(indexedSnapshot)restoreSnapshot(indexedSnapshot)
+      }
       const delayMs=computeReconnectDelayMs(++reconnects,settings.reconnectBackoff,parseUpstreamRetryDelayMs(failure))
       await waitWithAbort(delayMs,signal)
       // The transport options of get() stay byte-for-byte unchanged; hops only

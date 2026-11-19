@@ -297,15 +297,20 @@ test('round8 signature fixes (R7-P1-1, R7-P1-4): same-chunk unsigned parts split
     { text: 'hi', thoughtSignature: '', thought_signature: S1 },
     { text: 'hi', thoughtSignature: null, thought_signature: S1 },
     { text: 'hi', thoughtSignature: S1, thought_signature: S2 },
+    { text: 'hi', thoughtSignature: S1, thought_signature: S1 },
     { functionCall: null, function_call: { name: 'fn', args: {} } },
     { functionCall: { name: 'fn', args: {} }, function_call: { name: 'fn', args: {} } },
     { functionCall: { name: '', args: {} } },
     { functionCall: { args: {} } },
     { functionCall: { name: 'fn', args: [] } },
     { functionCall: { name: 'fn', args: null } },
+    { functionCall: { name: 'fn', args: new Map() } },
     { functionCall: { name: 'fn', args: {}, extra: 1 } },
+    { functionCall: { name: 'fn', args: {}, '': 'empty-key' } },
     { functionCall: { name: 'fn', args: {}, id: '' } },
     { functionCall: { name: 'fn', args: {}, id: 'a', call_id: 'b' } },
+    { functionCall: { name: 'fn', args: {}, id: 'same', call_id: 'same' } },
+    new Date(),
   ]) {
     const b = createGoogleSignatureBridge({ messages: [{ role: 'user', content: 'u' }] }, model)
     assert.throws(

@@ -3,6 +3,12 @@ import { createHash, randomUUID } from 'node:crypto'
 const ALLOWED_PART_KEYS = new Set(['text', 'thought', 'thoughtSignature', 'thought_signature', 'functionCall', 'function_call'])
 const ALLOWED_CALL_KEYS = new Set(['name', 'args', 'id', 'call_id'])
 
+function isPlainRecord(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const proto = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
+}
+
 const PREFIX = '{"dshGoogleSignatureOnly":'
 const base64 = value => typeof value === 'string' && value.length > 0 && value.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(value)
 const digest = content => createHash('sha256').update(JSON.stringify(content.map(block => block.type === 'text' ? ['text', block.text] : block.type === 'thinking' ? ['thinking', block.thinking] : ['toolCall', block.id, block.name, block.arguments]))).digest('hex')
@@ -165,7 +171,7 @@ export function createGoogleSignatureBridge(context, model) {
       seen = true
       currentFromThisChunk = false
       for (const part of chunk.candidates?.[0]?.content?.parts ?? []) {
-        if (!part || typeof part !== 'object' || Array.isArray(part)) {
+        if (!isPlainRecord(part)) {
           close()
           throw failure('Google returned a malformed candidate part.')
         }
@@ -176,11 +182,11 @@ export function createGoogleSignatureBridge(context, model) {
           close()
           throw failure('Google returned an unsupported candidate part (' + unsupportedKeys.join(', ') + ') that cannot be replayed.')
         }
-        if (part.functionCall !== undefined && (!part.functionCall || typeof part.functionCall !== 'object' || Array.isArray(part.functionCall))) {
+        if (part.functionCall !== undefined && !isPlainRecord(part.functionCall)) {
           close()
           throw failure('Google returned a candidate part with an invalid functionCall payload.')
         }
-        if (part.function_call !== undefined && (!part.function_call || typeof part.function_call !== 'object' || Array.isArray(part.function_call))) {
+        if (part.function_call !== undefined && !isPlainRecord(part.function_call)) {
           close()
           throw failure('Google returned a candidate part with an invalid functionCall payload.')
         }
@@ -200,16 +206,16 @@ export function createGoogleSignatureBridge(context, model) {
           throw failure('Google returned a candidate part with an invalid text field.')
         }
         if (hasCall) {
-          const invalidCallKey = Object.keys(call).filter(key => call[key] !== undefined).find(key => !ALLOWED_CALL_KEYS.has(key))
-          if (invalidCallKey) {
+          const invalidCallKeys = Object.keys(call).filter(key => call[key] !== undefined && !ALLOWED_CALL_KEYS.has(key))
+          if (invalidCallKeys.length > 0) {
             close()
-            throw failure('Google returned a candidate part with an unsupported functionCall field (' + invalidCallKey + ').')
+            throw failure('Google returned a candidate part with an unsupported functionCall field (' + JSON.stringify(invalidCallKeys[0]) + ').')
           }
           if (typeof call.name !== 'string' || !call.name) {
             close()
             throw failure('Google returned a candidate part with an invalid functionCall name.')
           }
-          if (call.args !== undefined && (!call.args || typeof call.args !== 'object' || Array.isArray(call.args))) {
+          if (call.args !== undefined && !isPlainRecord(call.args)) {
             close()
             throw failure('Google returned a candidate part with an invalid functionCall args payload.')
           }
@@ -221,9 +227,9 @@ export function createGoogleSignatureBridge(context, model) {
             close()
             throw failure('Google returned a candidate part with an invalid functionCall call_id.')
           }
-          if (call.id !== undefined && call.call_id !== undefined && call.id !== call.call_id) {
+          if (call.id !== undefined && call.call_id !== undefined) {
             close()
-            throw failure('Google returned a candidate part with conflicting functionCall id and call_id.')
+            throw failure('Google returned a candidate part with both functionCall id and call_id fields.')
           }
         }
         if (hasText && hasCall) {
@@ -236,7 +242,7 @@ export function createGoogleSignatureBridge(context, model) {
         }
         bytes += Buffer.byteLength(JSON.stringify(part))
         if (bytes > 64 * 1024 * 1024) throw failure('Google response exceeded the bounded signature replay buffer.')
-        // A Part may serialize the signature in either wire spelling.
+        // A Part may serialize the signature in either wire spelling, but never both on one Part.
         if (part.thoughtSignature !== undefined && (typeof part.thoughtSignature !== 'string' || !part.thoughtSignature)) {
           close()
           throw failure('Google returned a candidate part with an invalid thoughtSignature.')
@@ -245,9 +251,9 @@ export function createGoogleSignatureBridge(context, model) {
           close()
           throw failure('Google returned a candidate part with an invalid thoughtSignature.')
         }
-        if (part.thoughtSignature !== undefined && part.thought_signature !== undefined && part.thoughtSignature !== part.thought_signature) {
+        if (part.thoughtSignature !== undefined && part.thought_signature !== undefined) {
           close()
-          throw failure('Google returned a candidate part with conflicting thoughtSignature spellings.')
+          throw failure('Google returned a candidate part with both thoughtSignature and thought_signature fields.')
         }
         const sig = part.thoughtSignature ?? part.thought_signature
         const onlySignature = typeof sig === 'string' && !hasText && !hasCall

@@ -2,6 +2,18 @@
 
 All notable changes to **Gemini 4 Adapter** (`dsh-vertex-argon`) are documented in this file.
 
+## [2.2.8] - 2026-11-19
+
+### Fixed
+- **Strict Candidate Part Prototype, Empty-Key & Same-Part Dual Signature Rejection (`google-signatures.js`)**:
+  - Rejected dual `thoughtSignature` + `thought_signature` and dual `id` + `call_id` unconditionally even when values match, checked invalid call keys by array length (catching `""` keys), and enforced plain-object (`Object.prototype` / `null`) checks on parts, `functionCall` payloads, and `call.args`.
+- **Indexed Snapshot Rollback for Unindexed Interactions Deltas (`interactions.js`)**:
+  - Captured an indexed state snapshot after each event carrying a valid `event_id` and restored it before reconnecting with `last_event_id`, preventing un-indexed `function_call` argument deltas prior to a stream drop from duplicating on replay while preserving cursorless retry bounds.
+- **Request-Wide Committed Prefix & Accountable Budget Guards on Thinking-Dropout Heal (`generate-content.js`)**:
+  - Tracked request-wide `anyCommittedVisibleOrTool` across hops so synthetic (`!hopToken`) `thinking-dropout-heal` never replays without prior committed text/tool calls, and required accountable non-null output token usage before consuming remaining `maxOutputTokens` on synthetic heal.
+- **Array Sparse-Hole / Symbol Deep-Freeze & Explicit `functionCallingConfig.mode` Preservation (`adapter.js`)**:
+  - Updated `deepFreezeClone` to preserve sparse array holes, custom array properties, and array Symbol keys via `new Array(length)` + `Reflect.ownKeys`, and preserved caller-specified `functionCallingConfig.mode` (such as `'NONE'` and `'ANY'`) instead of overwriting with `'VALIDATED'`.
+
 ## [2.2.7] - 2026-11-19
 
 ### Fixed

@@ -29,6 +29,7 @@ import {
   ensureGemini4ApiClientPatch,
   narrowMaxReasoning,
   syncGemini4ReasoningOptions,
+  deepFreezeClone,
 } from '../adapter.js'
 import { Config, apply } from '../index.js'
 import { bodyBytes, fetchErrorCodes } from '../diagnostics.js'
@@ -2035,4 +2036,54 @@ nodeTest('round8 fixes (R7-P2-4 & R7-P2-6): pre-handler Interactions reasoning v
   assert.equal(frozenNested.nestedMeta.nested.token, 'keep')
   assert.equal(frozenNested.nestedMeta.nested.arr[0].inner, 1)
   assert.throws(() => { frozenNested.nestedMeta.nested.token = 'tamper' }, TypeError)
+})
+
+test('round9 fixes (R8-P2-3 & R8-P2-6): sparse/Symbol array deepFreezeClone and explicit caller NONE/ANY tool modes', async () => {
+  const arrSym = Symbol('arrMeta')
+  // eslint-disable-next-line no-sparse-arrays
+  const sparse = [, 'x']
+  sparse.customTag = { k: 'v' }
+  sparse[arrSym] = { s: 1 }
+  sparse[2] = sparse
+  const cloned = deepFreezeClone(sparse)
+  assert.equal(Array.isArray(cloned), true)
+  assert.equal(cloned.length, 3)
+  assert.equal(0 in cloned, false)
+  assert.equal(cloned[1], 'x')
+  assert.equal(cloned[2], cloned)
+  assert.equal(Object.isFrozen(cloned), true)
+  assert.equal(Object.isFrozen(cloned.customTag), true)
+  assert.equal(cloned.customTag.k, 'v')
+  assert.equal(Object.isFrozen(cloned[arrSym]), true)
+  assert.equal(cloned[arrSym].s, 1)
+
+  const prevMode = mode
+  mode = 'answer'
+  try {
+    const a = createArgonAdapter(ctx, officialConfig)
+    const piProv = a.inner.current().profiles.get(PROVIDER).piProvider
+    const neonGoogleModel = piProv.getModels().find(m => m.id === GOOGLE_API_NEON_MODEL)
+    const piCtx = {
+      messages: [{ role: 'user', content: 'hi', timestamp: 0 }],
+      tools: [{ name: 'add', description: 'Add two ints', parameters: { type: 'object', properties: { a: { type: 'integer' } } } }],
+    }
+    for (const modeName of ['NONE', 'ANY']) {
+      const evs = []
+      for await (const ev of piProv.streamSimple(neonGoogleModel, piCtx, {
+        env: { __GOOGLE_API_KEY__: 'fixture-key' },
+        reasoning: 'xhigh',
+        onPayload: payload => ({
+          ...payload,
+          config: {
+            ...payload.config,
+            toolConfig: { ...payload.config.toolConfig, functionCallingConfig: { mode: modeName } },
+          },
+        }),
+      })) evs.push(ev)
+      assert.equal(evs.at(-1).type, 'done')
+      assert.equal(wire.at(-1).body.toolConfig?.functionCallingConfig?.mode, modeName)
+    }
+  } finally {
+    mode = prevMode
+  }
 })

@@ -495,3 +495,35 @@ test('round8 healing budget deduction (R7-P2-5): deducts Hop 1 spent tokens and 
   assert.equal(JSON.parse(cpHeal.requests[1].body).continuationToken, 'cp-keep')
 })
 
+test('round9 healing guards (R8-P1-5 & R8-P2-2): forbids synthetic replay after prior committed output and refuses !hopToken heal without accountable usage', async () => {
+  // R8-P1-5: Hop 1 commits visible prefix 'A' with checkpoint 'cp-1'; Hop 2 returns thought-only STOP without hopToken.
+  const u1 = { promptTokenCount: 10, candidatesTokenCount: 1, thoughtsTokenCount: 2, totalTokenCount: 13 }
+  const u2 = { promptTokenCount: 13, candidatesTokenCount: 0, thoughtsTokenCount: 4, totalTokenCount: 17 }
+  const priorCommitted = await run([
+    [row(text('A'), 'CONTINUATION', 'cp-1', u1)],
+    [row(thought, 'STOP', undefined, u2)],
+    [row(text('should-not-run'), 'STOP')],
+  ])
+  assert.equal(priorCommitted.error, undefined)
+  assert.equal(priorCommitted.requests.length, 2)
+  assert.equal(priorCommitted.parts.map(p => p.text).join(''), 'Aprivate thought')
+  assert.equal(priorCommitted.chunks.at(-1).candidates[0].finishReason, 'STOP')
+
+  // R8-P2-2: explicit maxOutputTokens with missing or invalid Hop 1 usage refuses synthetic !hopToken heal.
+  for (const badUsage of [
+    undefined,
+    { promptTokenCount: 10, candidatesTokenCount: 0, thoughtsTokenCount: -1, totalTokenCount: 40 },
+    { promptTokenCount: 10 },
+  ]) {
+    const out = await run([
+      [row(thought, 'STOP', undefined, badUsage)],
+      [row(text('should-not-run'), 'STOP')],
+    ], {
+      body: { contents: [{ role: 'user', parts: text('question') }], generationConfig: { maxOutputTokens: 100 } },
+    })
+    assert.equal(out.error, undefined)
+    assert.equal(out.requests.length, 1)
+    assert.equal(out.chunks.at(-1).candidates[0].finishReason, 'STOP')
+  }
+})
+

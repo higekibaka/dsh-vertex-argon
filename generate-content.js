@@ -251,6 +251,7 @@ export async function continueArgonRequestStream(apiClient, original, request, m
     let initialPrompt, initialCached
     let initialUsageLocked = false
     let thinkingDropoutHeals = 0
+    let anyCommittedVisibleOrTool = false
     const totals = Object.fromEntries(fields.map(key => [key, 0]))
     const billed = Object.fromEntries(fields.map(key => [key, 0]))
 
@@ -267,10 +268,22 @@ export async function continueArgonRequestStream(apiClient, original, request, m
       let blocked = false, terminal = false, streamSettled = false, usageAccounted = false
       let hopChunks = 0, hopSawThought = false, hopSawVisibleOrTool = false
       let thoughtParts = [], thoughtBytes = 0, suppressedStop = false, hopToken
-      const remainingHealBudget = () => initialMaxOutputTokens === undefined
-        ? Infinity
-        : initialMaxOutputTokens - (billed.candidatesTokenCount + billed.thoughtsTokenCount + (usageAccounted ? 0 : value(latestUsage, 'candidatesTokenCount') + value(latestUsage, 'thoughtsTokenCount')))
-      const canHeal = () => enabled && thinkingDropoutHeals < MAX_THINKING_DROPOUT_HEALS && hopSawThought && !hopSawVisibleOrTool && !blocked && finishReason === 'STOP' && (Boolean(hopToken) || remainingHealBudget() > 0)
+      const accountableHopOutputSpent = () => {
+        if (!latestUsage || latestUsage.candidatesTokenCount === null || latestUsage.thoughtsTokenCount === null || latestUsage.totalTokenCount === null) return null
+        const explicitThoughts = Number.isSafeInteger(latestUsage.thoughtsTokenCount)
+        const derivedFromTotal = Number.isSafeInteger(latestUsage.totalTokenCount) && Number.isSafeInteger(latestUsage.promptTokenCount)
+          ? Math.max(0, latestUsage.totalTokenCount - latestUsage.promptTokenCount - value(latestUsage, 'toolUsePromptTokenCount'))
+          : null
+        if (!explicitThoughts && derivedFromTotal === null) return null
+        return Math.max(value(latestUsage, 'candidatesTokenCount') + value(latestUsage, 'thoughtsTokenCount'), derivedFromTotal ?? 0)
+      }
+      const remainingHealBudget = () => {
+        if (initialMaxOutputTokens === undefined) return Infinity
+        const currentHopSpent = usageAccounted ? 0 : accountableHopOutputSpent()
+        if (currentHopSpent === null) return 0
+        return initialMaxOutputTokens - (billed.candidatesTokenCount + billed.thoughtsTokenCount + currentHopSpent)
+      }
+      const canHeal = () => enabled && thinkingDropoutHeals < MAX_THINKING_DROPOUT_HEALS && hopSawThought && !hopSawVisibleOrTool && !blocked && finishReason === 'STOP' && (Boolean(hopToken) || (!anyCommittedVisibleOrTool && !startToken && remainingHealBudget() > 0))
 
       const wrap = (raw, headers, usageSnapshot, hideStop = false) => {
         let out = raw
@@ -360,8 +373,9 @@ export async function continueArgonRequestStream(apiClient, original, request, m
           }
           const candidate = raw.candidates?.[0]
           const parts = candidate?.content?.parts ?? []
+          const chunkHasVisibleOrTool = parts.some(part => Boolean(part.functionCall || part.function_call || (!part.thought && typeof part.text === 'string' && part.text.length > 0)))
           hopSawThought ||= parts.some(part => part.thought === true)
-          hopSawVisibleOrTool ||= parts.some(part => part.functionCall || (!part.thought && typeof part.text === 'string' && part.text.length > 0))
+          hopSawVisibleOrTool ||= chunkHasVisibleOrTool
           if (hopSawVisibleOrTool) { thoughtParts = []; thoughtBytes = 0 }
           else if (enabled && thinkingDropoutHeals < MAX_THINKING_DROPOUT_HEALS) {
             for (const part of parts) if (part.thought === true || part.thoughtSignature || part.thought_signature) {
@@ -390,13 +404,14 @@ export async function continueArgonRequestStream(apiClient, original, request, m
             refreshOriginalUsage()
             const outgoing = wrap(raw, chunk.headers, latestUsage, hideStop)
             committedUsage = latestUsage ? { ...latestUsage } : undefined
+            anyCommittedVisibleOrTool ||= chunkHasVisibleOrTool
             hopChunks++
             yield outgoing
             continue
           }
           pendingBytes += Buffer.byteLength(JSON.stringify(raw))
           if (pendingBytes > MAX_PENDING_BYTES) throw streamError('Argon uncommitted stream exceeded the bounded checkpoint buffer.', 'ARGON_BUFFER_LIMIT')
-          pending.push({ raw, headers: chunk.headers, usage: latestUsage ? { ...latestUsage } : undefined, hideStop })
+          pending.push({ raw, headers: chunk.headers, usage: latestUsage ? { ...latestUsage } : undefined, hideStop, hasVisibleOrTool: chunkHasVisibleOrTool })
           pendingHasContent ||= parts.some(part => typeof part.text === 'string' ? part.text.length > 0 || Boolean(part.thoughtSignature || part.thought_signature) : Object.keys(part).length > 0)
           const finalMetadata = finishReason === 'CONTINUATION' && token && token !== startToken && !pendingHasContent
           if (newCheckpoint || terminal || finalMetadata) {
@@ -408,6 +423,7 @@ export async function continueArgonRequestStream(apiClient, original, request, m
               throwIfAborted(request.abortSignal)
               const outgoing = wrap(saved.raw, saved.headers, saved.usage, saved.hideStop)
               committedUsage = saved.usage
+              anyCommittedVisibleOrTool ||= saved.hasVisibleOrTool
               hopChunks++
               yield outgoing
             }
@@ -438,6 +454,8 @@ export async function continueArgonRequestStream(apiClient, original, request, m
       }
       if (terminal) {
         if (!failure && canHeal()) {
+          const priorBilledOutput = billed.candidatesTokenCount + billed.thoughtsTokenCount
+          const hopOutputSpent = accountableHopOutputSpent() ?? 0
           accountUsage()
           hopTracker?.finish({ finishReason, continued: true })
           if (hop === MAX_CONTINUATION_HOPS) throw streamError('Argon continuation hop limit reached without a terminal response.', 'ARGON_HOP_LIMIT')
@@ -446,7 +464,7 @@ export async function continueArgonRequestStream(apiClient, original, request, m
             token = hopToken
           } else {
             token = undefined
-            const remainingBudget = initialMaxOutputTokens === undefined ? undefined : initialMaxOutputTokens - (billed.candidatesTokenCount + billed.thoughtsTokenCount)
+            const remainingBudget = initialMaxOutputTokens === undefined ? undefined : initialMaxOutputTokens - (priorBilledOutput + hopOutputSpent)
             const withRemainingBudget = bodyObj => {
               if (remainingBudget === undefined) return bodyObj
               const updateCfg = cfgObj => {

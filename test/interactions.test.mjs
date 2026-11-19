@@ -307,3 +307,61 @@ test('round8 interactions fix (R7-P1-6): unindexed visible frame after an earlie
  assert.equal(recovered.calls.filter(c => c.method === 'get').length, 1)
 })
 
+test('round9 interactions fix (R8-P1-4): unindexed function_call argument deltas roll back to last indexed snapshot before cursor replay', async () => {
+ let gets = 0
+ const out = await run([], {
+  settings: {
+   store: true,
+   transport: {
+    create: async () => stream([
+     { ...created, event_id: 'e1' },
+     { ...start(0, 'function_call', { id: 'c1', name: 'write' }), event_id: 'e2' },
+     { ...delta(0, 'arguments_delta', { partial_arguments: '{"n":' }), event_id: 'e3' },
+     delta(0, 'arguments_delta', { partial_arguments: '1' }),
+     new Error('drop'),
+    ]),
+    get: async (_id, req) => {
+     gets++
+     assert.equal(req.last_event_id, 'e3')
+     return stream([
+      { ...delta(0, 'arguments_delta', { partial_arguments: '1' }), event_id: 'e4' },
+      { ...delta(0, 'arguments_delta', { partial_arguments: '}' }), event_id: 'e5' },
+      { ...stop(0), event_id: 'e6' },
+      { ...done('requires_action'), event_id: 'e7' },
+     ])
+    },
+    cancel: async () => ({ status: 'cancelled' }),
+   },
+  },
+ })
+ assert.equal(out.finish.reason.kind, 'tool-calls')
+ assert.equal(gets, 1)
+ assert.equal(out.blocks[0].arguments, '{"n":1}')
+
+ // Identical un-indexed argument delta repeats cannot loop past the retry bound.
+ let loopedGets = 0
+ const looped = await run([], {
+  settings: {
+   store: true,
+   transport: {
+    create: async () => stream([
+     { ...created, event_id: 'e1' },
+     { ...start(0, 'function_call', { id: 'c1', name: 'write' }), event_id: 'e2' },
+     delta(0, 'arguments_delta', { partial_arguments: '{"n":1' }),
+     new Error('drop'),
+    ]),
+    get: async () => {
+     loopedGets++
+     return stream([
+      delta(0, 'arguments_delta', { partial_arguments: '{"n":1' }),
+      new Error('drop'),
+     ])
+    },
+    cancel: async () => ({ status: 'cancelled' }),
+   },
+  },
+ })
+ assert.equal(looped.finish.reason.kind, 'error')
+ assert.equal(loopedGets, 3)
+})
+

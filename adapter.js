@@ -605,6 +605,13 @@ export function gemini4StreamSimple(
           : (cleanConfig.max_output_tokens !== undefined ? cleanConfig.max_output_tokens : (effectiveMaxTokens ?? outboundCeiling))
         delete cleanConfig.max_output_tokens
         const toolMode = shouldFallbackToAutoToolMode(retryKey) ? 'AUTO' : 'VALIDATED'
+        const rawExistingMode = cleanConfig.toolConfig?.functionCallingConfig?.mode
+        const existingModeUpper = typeof rawExistingMode === 'string' ? rawExistingMode.trim().toUpperCase() : ''
+        const preserveCallerMode =
+          existingModeUpper === 'NONE' ||
+          existingModeUpper === 'ANY' ||
+          (existingModeUpper !== '' && existingModeUpper !== 'VALIDATED')
+        const effectiveToolMode = preserveCallerMode ? rawExistingMode : toolMode
         return {
           ...body,
           model: upstreamModelId,
@@ -614,7 +621,7 @@ export function gemini4StreamSimple(
             ...(cleanConfig.tools?.some(tool => tool.functionDeclarations?.length) ? {
               toolConfig: {
                 ...cleanConfig.toolConfig,
-                functionCallingConfig: { ...cleanConfig.toolConfig?.functionCallingConfig, mode: toolMode },
+                functionCallingConfig: { ...cleanConfig.toolConfig?.functionCallingConfig, mode: effectiveToolMode },
               },
             } : {}),
             automaticContinuation: false,
@@ -852,13 +859,16 @@ export function resolveConfigValues(raw = {}) {
   }
 }
 
-function deepFreezeClone(value, seen = new WeakMap()) {
+export function deepFreezeClone(value, seen = new WeakMap()) {
   if (!value || typeof value !== 'object') return value
   if (seen.has(value)) return seen.get(value)
   if (Array.isArray(value)) {
-    const arr = []
+    const arr = new Array(value.length)
     seen.set(value, arr)
-    for (const item of value) arr.push(deepFreezeClone(item, seen))
+    for (const key of Reflect.ownKeys(value)) {
+      if (key === 'length') continue
+      arr[key] = deepFreezeClone(value[key], seen)
+    }
     return Object.freeze(arr)
   }
   const copy = {}
