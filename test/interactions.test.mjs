@@ -401,3 +401,40 @@ test('round10 interactions fix (R9-P1-3): indexed recoverable error commits neit
  assert.equal(blocked.calls.filter(c => c.method === 'get').length, 0)
 })
 
+test('round11 interactions fix (R10-P1-3): partial step.start validation error never emits partial text or retries as transport', async () => {
+ const out = await run([
+  { ...created, event_id: 'e1' },
+  {
+   event_type: 'step.start',
+   event_id: 'e2',
+   index: 0,
+   step: { type: 'model_output', content: [{ type: 'text', text: 'A' }, null] },
+  },
+ ], {
+  settings: { store: true },
+  reconnect: [{ ...done(), event_id: 'e3' }],
+ })
+ assert.equal(out.finish.reason.kind, 'error')
+ assert.equal(out.finish.reason.failure.code, 'ARGON_INTERACTIONS_PROTOCOL')
+ assert.equal(out.calls.filter(c => c.method === 'get').length, 0)
+ assert.deepEqual(out.chunks.filter(e => e.type === 'text-delta'), [])
+
+ // Pre-validated bad thought.summary element before any delta also fails with protocol code without retry.
+ const badThought = await run([
+  { ...created, event_id: 'e1' },
+  {
+   event_type: 'step.start',
+   event_id: 'e2',
+   index: 0,
+   step: { type: 'thought', summary: [{ type: 'text', text: 'T' }, null] },
+  },
+ ], {
+  settings: { store: true },
+  reconnect: [{ ...done(), event_id: 'e3' }],
+ })
+ assert.equal(badThought.finish.reason.kind, 'error')
+ assert.equal(badThought.finish.reason.failure.code, 'ARGON_INTERACTIONS_PROTOCOL')
+ assert.equal(badThought.calls.filter(c => c.method === 'get').length, 0)
+ assert.deepEqual(badThought.chunks.filter(e => e.type === 'reasoning-delta'), [])
+})
+

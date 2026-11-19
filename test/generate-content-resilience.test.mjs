@@ -567,3 +567,32 @@ test('round10 healing fixes (R9-P2-2 & R9-P2-6): rejects contradictory negative 
   assert.equal(stopFrames.length, 1)
 })
 
+test('round11 fixes (R10-P2-2 & R10-P2-7): unbudgeted contradictory usage refuses heal and missing output breakdown never shrinks totalTokenCount', async () => {
+  // R10-P2-2: even when maxOutputTokens is omitted on continueArgonRequestStream, contradictory reported usage must refuse !hopToken heal.
+  const reqs = []
+  const stream = await continueArgonRequestStream(
+    { isVertexAI: () => true },
+    async req => {
+      reqs.push(req)
+      const list = reqs.length === 1
+        ? [row(thought, 'STOP', undefined, { promptTokenCount: 20, candidatesTokenCount: 0, totalTokenCount: 19 })]
+        : [row(text('must-not-run'), 'STOP')]
+      return (async function* () { for (const f of list) yield wire(f) })()
+    },
+    { body: JSON.stringify({ contents: [{ role: 'user', parts: text('q') }] }) },
+    { enabled: true, reconnectBackoff: { initialDelayMs: 0 } },
+  )
+  const chunks = []
+  for await (const c of stream) chunks.push(await c.json())
+  assert.equal(reqs.length, 1)
+  assert.equal(chunks.at(-1).candidates[0].finishReason, 'STOP')
+
+  // R10-P2-7: { promptTokenCount: 20, totalTokenCount: 30 } without output sub-counters keeps totalTokenCount === 30.
+  const out = await run([[row(text('ok'), 'STOP', undefined, { promptTokenCount: 20, totalTokenCount: 30 })]])
+  assert.equal(out.error, undefined)
+  assert.equal(out.chunks.at(-1).usageMetadata.totalTokenCount, 30)
+  assert.equal(out.chunks.at(-1).usageMetadata.billedTotalTokenCount, 30)
+  assert.equal(out.usage.at(-1).totalTokens, 30)
+  assert.equal(out.usage.at(-1).billedTotalTokens, 30)
+})
+

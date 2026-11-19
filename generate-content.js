@@ -254,6 +254,12 @@ export async function continueArgonRequestStream(apiClient, original, request, m
     let anyCommittedVisibleOrTool = false
     const totals = Object.fromEntries(fields.map(key => [key, 0]))
     const billed = Object.fromEntries(fields.map(key => [key, 0]))
+    let committedUnattributed = 0
+    const hopUnattributed = u => {
+      if (!Number.isSafeInteger(u?.totalTokenCount)) return 0
+      const hopPrompt = Number.isSafeInteger(u?.promptTokenCount) ? u.promptTokenCount : 0
+      return Math.max(0, u.totalTokenCount - hopPrompt - (value(u, 'candidatesTokenCount') + value(u, 'thoughtsTokenCount') + value(u, 'toolUsePromptTokenCount')))
+    }
 
     for (let hop = 1; hop <= MAX_CONTINUATION_HOPS; hop++) {
       throwIfAborted(request.abortSignal)
@@ -280,8 +286,8 @@ export async function continueArgonRequestStream(apiClient, original, request, m
         return Math.max(value(latestUsage, 'candidatesTokenCount') + value(latestUsage, 'thoughtsTokenCount'), derivedFromTotal ?? 0)
       }
       const remainingHealBudget = () => {
-        if (initialMaxOutputTokens === undefined) return Infinity
         const currentHopSpent = usageAccounted ? 0 : accountableHopOutputSpent()
+        if (initialMaxOutputTokens === undefined) return latestUsage === undefined || currentHopSpent !== null ? Infinity : 0
         if (currentHopSpent === null) return 0
         return initialMaxOutputTokens - (billed.candidatesTokenCount + billed.thoughtsTokenCount + currentHopSpent)
       }
@@ -302,12 +308,13 @@ export async function continueArgonRequestStream(apiClient, original, request, m
           const candidates = merged('candidatesTokenCount')
           const thoughts = merged('thoughtsTokenCount')
           const tool = merged('toolUsePromptTokenCount')
+          const unattributed = committedUnattributed + hopUnattributed(u)
           out = { ...out, usageMetadata: {
             ...raw.usageMetadata,
             promptTokenCount: prompt,
             cachedContentTokenCount: initialCached ?? value(u, 'cachedContentTokenCount'),
             candidatesTokenCount: candidates, thoughtsTokenCount: thoughts, toolUsePromptTokenCount: tool,
-            totalTokenCount: prompt + candidates + thoughts + tool,
+            totalTokenCount: prompt + candidates + thoughts + tool + unattributed,
             initialPromptTokenCount: prompt,
             billedPromptTokenCount: billed.promptTokenCount + value(u, 'promptTokenCount'),
             billedCachedContentTokenCount: billed.cachedContentTokenCount + value(u, 'cachedContentTokenCount'),
@@ -333,12 +340,13 @@ export async function continueArgonRequestStream(apiClient, original, request, m
         }
         if (committedUsage) {
           for (const key of fields) totals[key] += value(committedUsage, key)
+          committedUnattributed += hopUnattributed(committedUsage)
           initialUsageLocked = true
         }
         if (latestUsage || committedUsage) tracker?.recordTokenUsage?.({
           reportedInputTokens: initialPrompt, reportedCacheTokens: initialCached ?? 0,
           outputTokens: totals.candidatesTokenCount, thoughtsTokens: totals.thoughtsTokenCount,
-          totalTokens: initialPrompt === undefined ? null : initialPrompt + totals.candidatesTokenCount + totals.thoughtsTokenCount + totals.toolUsePromptTokenCount,
+          totalTokens: initialPrompt === undefined && committedUnattributed === 0 ? null : (initialPrompt ?? 0) + totals.candidatesTokenCount + totals.thoughtsTokenCount + totals.toolUsePromptTokenCount + committedUnattributed,
           billedPromptTokens: billed.promptTokenCount, billedCachedTokens: billed.cachedContentTokenCount,
           billedOutputTokens: billed.candidatesTokenCount, billedThoughtsTokens: billed.thoughtsTokenCount,
           billedToolTokens: billed.toolUsePromptTokenCount, billedTotalTokens: billed.totalTokenCount,

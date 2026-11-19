@@ -2116,3 +2116,28 @@ test('round10 fix (R9-P2-3): deepFreezeClone preserves non-enumerable descriptor
   assert.equal(Object.getPrototypeOf(clonedObj), Object.prototype)
   assert.equal(clonedObj.ownProto, undefined)
 })
+
+test('round11 fix (R10-P2-3): deepFreezeClone preserves custom Array subclass prototype and sparse holes', () => {
+  class CustomArray extends Array {
+    customTag() {
+      return 'custom-array'
+    }
+  }
+  const sub = new CustomArray(2)
+  sub[1] = { nested: 'ok' }
+  const arrSym = Symbol('subSym')
+  sub[arrSym] = { symVal: 42 }
+  Object.defineProperty(sub, 'hidden', { value: { k: 'v' }, enumerable: false, configurable: true, writable: true })
+
+  const cloned = deepFreezeClone(sub)
+  assert.equal(Array.isArray(cloned), true)
+  assert.equal(cloned instanceof CustomArray, true)
+  assert.equal(cloned.customTag(), 'custom-array')
+  assert.equal(0 in cloned, false)
+  assert.deepEqual(cloned[1], { nested: 'ok' })
+  assert.equal(Object.isFrozen(cloned), true)
+  assert.equal(Object.isFrozen(cloned[1]), true)
+  assert.equal(Object.isFrozen(cloned[arrSym]), true)
+  assert.equal(Object.isFrozen(cloned.hidden), true)
+  assert.equal(Object.prototype.propertyIsEnumerable.call(cloned, 'hidden'), false)
+})

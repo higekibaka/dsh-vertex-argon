@@ -2,6 +2,17 @@
 
 All notable changes to **Gemini 4 Adapter** (`dsh-vertex-argon`) are documented in this file.
 
+## [2.2.10] - 2026-11-19
+
+### Fixed
+- **Pre-Yield Interactions Event Validation, Producer Error Conversion & Pre-Commit Snapshot (`interactions.js`)**:
+  - Pre-validated `step.start` (`model_output.content`, `thought.signature`/`thought.summary`, `function_call.arguments`) and `step.delta` (`thought_summary.content`) payloads and byte bounds before mutating `steps` or yielding output events, manually stepped `handleBody()` inside `handle()` to quarantine partial emissions (`unindexedVisibleOutput = true`) and convert local producer exceptions to non-retryable `ARGON_INTERACTIONS_PROTOCOL` errors, and captured `indexedSnapshot = captureSnapshot()` before advancing `seenEvents`, `lastEventId`, and `unindexedVisibleOutput`.
+- **Unbudgeted Contradictory-Usage Heal Guard & Unattributed `totalTokenCount` Preservation (`generate-content.js`)**:
+  - Refused synthetic (`!hopToken`) `thinking-dropout-heal` whenever `latestUsage` is present and `accountableHopOutputSpent() === null`, even when `initialMaxOutputTokens` is `undefined`.
+  - Preserved unattributed non-prompt token deltas in `wrap()` and `accountUsage()` so upstream chunks reporting `{ promptTokenCount, totalTokenCount }` without output sub-counters never shrink `usageMetadata.totalTokenCount`.
+- **Array Subclass Prototype Preservation (`adapter.js`)**:
+  - Updated `deepFreezeClone` to preserve custom `Array` subclass prototypes via `Object.setPrototypeOf(new Array(value.length), proto)` alongside sparse holes, symbol keys, non-enumerable descriptors, and own `'__proto__'` properties.
+
 ## [2.2.9] - 2026-11-19
 
 ### Fixed

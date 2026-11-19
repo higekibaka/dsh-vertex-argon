@@ -862,9 +862,10 @@ export function resolveConfigValues(raw = {}) {
 export function deepFreezeClone(value, seen = new WeakMap()) {
   if (!value || typeof value !== 'object') return value
   if (seen.has(value)) return seen.get(value)
+  const proto = Object.getPrototypeOf(value)
   const copy = Array.isArray(value)
-    ? new Array(value.length)
-    : Object.create(Object.getPrototypeOf(value))
+    ? (proto === Array.prototype ? new Array(value.length) : Object.setPrototypeOf(new Array(value.length), proto))
+    : Object.create(proto)
   seen.set(value, copy)
   for (const key of Reflect.ownKeys(value)) {
     if (Array.isArray(value) && key === 'length') continue

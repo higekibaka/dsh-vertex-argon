@@ -104,10 +104,49 @@ export async function* streamInteractions(options, settings) {
       // Replayed user-input steps are structural markers with no model output.
       if(validObject(step)&&step.type==='user_input'){steps.set(event.index,{kind:'user_input',closed:false});progressVersion++;return}
       if(!validObject(step)||!['thought','model_output','function_call'].includes(step.type))throw protocolError('Unsupported Interactions step type; this adapter executes only DSH-declared local tools.')
-      const state={kind:step.type,text:'',signature:step.signature,callId:step.id,name:step.name,argsValue:step.arguments,argsText:'',closed:false}
+      let stepBytes=0
+      if(step.signature!==undefined){
+        if(typeof step.signature!=='string')throw protocolError('Invalid thought signature.')
+        stepBytes+=Buffer.byteLength(step.signature)
+      }
+      if(step.id!==undefined&&typeof step.id!=='string')throw protocolError('Invalid function call ID.')
+      if(step.name!==undefined&&typeof step.name!=='string')throw protocolError('Invalid function call name.')
+      if(step.type==='model_output'){
+        if(step.content!==undefined&&!Array.isArray(step.content))throw protocolError('Invalid model_output content.')
+        for(const content of step.content??[]){
+          if(!validObject(content)||content.type!=='text')throw protocolError('Unsupported output modality.')
+          if(typeof content.text!=='string')throw protocolError('Interactions text delta is not a string.')
+          stepBytes+=Buffer.byteLength(content.text)
+        }
+      }
+      if(step.type==='thought'){
+        if(step.summary!==undefined&&!Array.isArray(step.summary))throw protocolError('Invalid thought summary.')
+        for(const content of step.summary??[]){
+          if(!validObject(content)||typeof content.type!=='string')throw protocolError('Unsupported thought summary modality.')
+          if(content.type==='text'){
+            if(typeof content.text!=='string')throw protocolError('Interactions text delta is not a string.')
+            stepBytes+=Buffer.byteLength(content.text)
+          }
+        }
+      }
+      let initialArgsText='', initialArgsValue=step.arguments
+      if(step.type==='function_call'&&step.arguments!=null){
+        if(typeof step.arguments==='string'){
+          stepBytes+=Buffer.byteLength(step.arguments)
+          initialArgsText=step.arguments
+          initialArgsValue=undefined
+        }else if(validObject(step.arguments)){
+          stepBytes+=Buffer.byteLength(JSON.stringify(step.arguments))
+        }else throw protocolError('Invalid function argument delta.')
+      }
+      if(bytes+stepBytes>MAX_BYTES)throw protocolError('Interactions output exceeded the bounded response buffer.')
+      if(step.signature)checkBytes(step.signature)
+      if(initialArgsText)checkBytes(initialArgsText)
+      else if(step.type==='function_call'&&validObject(initialArgsValue))checkBytes(JSON.stringify(initialArgsValue))
+      const state={kind:step.type,text:'',signature:step.signature,callId:step.id,name:step.name,argsValue:initialArgsValue,argsText:initialArgsText,closed:false}
       steps.set(event.index,state);progressVersion++
-      if(step.type==='model_output')for(const content of step.content??[]){if(content.type!=='text')throw protocolError('Unsupported output modality.');yield*appendText(state,content.text,false,indexed)}
-      if(step.type==='thought')for(const content of step.summary??[]){if(content.type==='text')yield*appendText(state,content.text,true,indexed)}
+      if(step.type==='model_output')for(const content of step.content??[])yield*appendText(state,content.text,false,indexed)
+      if(step.type==='thought')for(const content of step.summary??[])if(content.type==='text')yield*appendText(state,content.text,true,indexed)
       return
     }
     if(type==='step.delta'){
@@ -120,8 +159,10 @@ export async function* streamInteractions(options, settings) {
       if(delta.type==='text_annotation_delta'&&state.kind==='model_output')return // additive citations; no DSH annotation block type
       if(delta.type==='text'&&state.kind==='model_output')yield*appendText(state,delta.text,false,indexed)
       else if(delta.type==='thought_summary'&&state.kind==='thought'){
-        if(delta.content?.type==='text')yield*appendText(state,delta.content.text,true,indexed)
-        else if(delta.content!==undefined)throw protocolError('Unsupported thought summary modality.')
+        if(delta.content!==undefined){
+          if(!validObject(delta.content)||delta.content.type!=='text')throw protocolError('Unsupported thought summary modality.')
+          yield*appendText(state,delta.content.text,true,indexed)
+        }
       }else if(delta.type==='thought_signature'&&state.kind==='thought'){
         if(typeof delta.signature!=='string')throw protocolError('Invalid thought signature.')
         checkBytes(delta.signature);if(state.signature!==delta.signature)progressVersion++;state.signature=delta.signature
@@ -164,12 +205,25 @@ export async function* streamInteractions(options, settings) {
       if(seenEvents.has(event.event_id))return
       if(seenEvents.size>=MAX_EVENTS)throw protocolError('Interactions event retention limit reached.')
     }
-    yield*handleBody(event, indexed)
+    const gen=handleBody(event, indexed)
+    let yieldedAny=false
+    for(;;){
+      let next
+      try{next=gen.next()}catch(err){
+        if(yieldedAny)unindexedVisibleOutput=true
+        if(err?.recoverableStreamError===true||String(err?.code??'').startsWith('ARGON_'))throw err
+        throw protocolError(err?.message||'Malformed Interactions event payload.')
+      }
+      if(next.done)break
+      yieldedAny=true
+      yield next.value
+    }
     if(indexed){
+      const snap=captureSnapshot()
       seenEvents.add(event.event_id)
       lastEventId=event.event_id
       unindexedVisibleOutput=false
-      indexedSnapshot=captureSnapshot()
+      indexedSnapshot=snap
     }
   }
   const cancel=async()=>{
