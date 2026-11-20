@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { inspect } from 'node:util'
-import { interactionsEndpoint, createInteractionsTransport } from '../interaction-transport.js'
+import { interactionsEndpoint, inferInteractionsApiVersion, createInteractionsTransport } from '../interaction-transport.js'
+import { fetchErrorCodes } from '../diagnostics.js'
 const google = 'google-generative-ai', vertex = 'google-vertex'
 test('optional tier observer failure does not replace the real response',async()=>{
  let observations=0
@@ -379,5 +380,151 @@ test('malformed provider JSON and SSE never leak provider text through cause or 
       return safeFailure(error, stream ? 'stream' : 'response-body', 200)
     })
   }
+})
+
+test('non-2xx JSON responses extract allowlisted error codes and RetryInfo without echoing error.message', async () => {
+  const observed = []
+  const t = fixture(async () => new Response(JSON.stringify({
+    error: {
+      code: 400,
+      status: 'INVALID_ARGUMENT',
+      message: 'SECRET_PROMPT SECRET_KEY should never appear in Error.message',
+      details: [{ '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '3s' }],
+    },
+  }), {
+    status: 400,
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+  }), { onErrorBody: (status, body) => observed.push({ status, body }) })
+  await assert.rejects(t.create({ input: 'SECRET_REQUEST' }), error => {
+    assert.equal(error.code, 'INVALID_REQUEST')
+    assert.equal(error.upstreamCode, 'INVALID_ARGUMENT')
+    assert.equal(error.cause.code, 'INVALID_ARGUMENT')
+    assert.equal(error.message, 'Google Interactions request failed (HTTP 400 INVALID_ARGUMENT).')
+    assert.equal(error.retryDelayMs, 3200)
+    return safeFailure(error, 'fetch', 400)
+  })
+  assert.equal(observed.length, 1)
+  assert.equal(observed[0].status, 400)
+  assert.equal(observed[0].body.error.status, 'INVALID_ARGUMENT')
+
+  // Lowercase Interactions error.code normalizes to UPPER_SNAKE_CASE on cause.code/upstreamCode while top-level code stays backward compatible.
+  const modelNotFound = fixture(async () => new Response(JSON.stringify({
+    error: { code: 'model_not_found', message: 'SECRET_PROVIDER' },
+  }), { status: 404, headers: { 'Content-Type': 'application/json' } }))
+  await assert.rejects(modelNotFound.create({}), error => {
+    assert.equal(error.code, 'INVALID_REQUEST')
+    assert.equal(error.upstreamCode, 'MODEL_NOT_FOUND')
+    assert.equal(error.cause.code, 'MODEL_NOT_FOUND')
+    assert.equal(error.message, 'Google Interactions request failed (HTTP 404 MODEL_NOT_FOUND).')
+    return safeFailure(error, 'fetch', 404)
+  })
+
+  const untrusted = fixture(async () => new Response(JSON.stringify({
+    error: { status: 'SECRET_PROVIDER_LEAK', code: 'SECRET_KEY', message: 'SECRET_REQUEST' },
+  }), { status: 400, headers: { 'Content-Type': 'application/json' } }))
+  await assert.rejects(untrusted.create({}), error => {
+    assert.equal(error.code, 'INVALID_REQUEST')
+    assert.equal(error.upstreamCode, undefined)
+    assert.equal(error.message, 'Google Interactions request failed (HTTP 400).')
+    return safeFailure(error, 'fetch', 400)
+  })
+})
+
+test('oversized or malformed non-2xx JSON falls back silently without secondary parse errors, and onErrorBody exceptions are isolated', async () => {
+  const oversized = fixture(async () => new Response(JSON.stringify({ error: { status: 'INVALID_ARGUMENT', pad: 'x'.repeat(70000) } }), {
+    status: 400,
+    headers: { 'Content-Type': 'application/json' },
+  }))
+  await assert.rejects(oversized.create({}), error => {
+    assert.equal(error.code, 'INVALID_REQUEST')
+    assert.equal(error.message, 'Google Interactions request failed (HTTP 400).')
+    return safeFailure(error, 'fetch', 400)
+  })
+
+  const broken = fixture(async () => new Response('{not-json SECRET_KEY', {
+    status: 503,
+    headers: { 'Content-Type': 'application/json', 'Retry-After': '1' },
+  }))
+  await assert.rejects(broken.create({}), error => {
+    assert.equal(error.code, 'SERVER')
+    assert.equal(error.retryDelayMs, 1200)
+    assert.equal(error.message, 'Google Interactions request failed (HTTP 503).')
+    return safeFailure(error, 'fetch', 503)
+  })
+
+  let observerCalled = 0
+  const throwingObserver = fixture(async () => new Response(JSON.stringify({
+    error: { status: 'RESOURCE_EXHAUSTED', details: [{ retryDelay: { seconds: 2, nanos: 500000000 } }] },
+  }), { status: 429, headers: { 'Content-Type': 'application/json' } }), {
+    onErrorBody: () => { observerCalled++; throw new Error('observer boom') },
+  })
+  await assert.rejects(throwingObserver.create({}), error => {
+    assert.equal(error.code, 'RATE_LIMIT')
+    assert.equal(error.upstreamCode, 'RESOURCE_EXHAUSTED')
+    assert.equal(error.cause.code, 'RESOURCE_EXHAUSTED')
+    assert.equal(error.retryDelayMs, 2700)
+    assert.equal(error.message, 'Google Interactions request failed (HTTP 429 RESOURCE_EXHAUSTED).')
+    return safeFailure(error, 'fetch', 429)
+  })
+  assert.equal(observerCalled, 1)
+})
+
+test('streaming create and get omit the rigid wall-clock timeout while non-streaming calls keep bounded timeouts', async () => {
+  const signals = []
+  const t = fixture(async (_url, init) => {
+    signals.push(init.signal)
+    const accept = init.headers.get('accept')
+    if (accept === 'text/event-stream') {
+      return new Response('data: {"event_type":"interaction.completed","interaction":{"status":"completed"}}\n\n', {
+        headers: { 'Content-Type': 'text/event-stream' },
+      })
+    }
+    return new Response(JSON.stringify({ status: 'completed' }), { headers: { 'Content-Type': 'application/json' } })
+  })
+  for await (const _e of await t.create({ stream: true })) {}
+  for await (const _e of await t.get('id-1', { stream: true })) {}
+  await t.get('id-1', { stream: false })
+  await t.cancel('id-1')
+  await t.delete('id-1')
+  assert.equal(signals[0], undefined)
+  assert.equal(signals[1], undefined)
+  assert.ok(signals[2] instanceof AbortSignal)
+  assert.ok(signals[3] instanceof AbortSignal)
+  assert.ok(signals[4] instanceof AbortSignal)
+})
+
+test('P1-8 & P2: dual error.status/error.code extraction (including HTTP 402) and /v1/interactions apiVersion detection', async () => {
+  const dual400 = fixture(async () => new Response(JSON.stringify({
+    error: { status: 'FAILED_PRECONDITION', code: 'model_not_found', message: 'SECRET_KEY' },
+  }), { status: 400, headers: { 'Content-Type': 'application/json' } }))
+  await assert.rejects(dual400.create({}), error => {
+    assert.equal(error.code, 'INVALID_REQUEST')
+    assert.equal(error.upstreamCode, 'FAILED_PRECONDITION')
+    assert.deepEqual(error.upstreamCodes, ['FAILED_PRECONDITION', 'MODEL_NOT_FOUND'])
+    const codes = fetchErrorCodes(error)
+    assert.ok(codes.includes('FAILED_PRECONDITION'))
+    assert.ok(codes.includes('MODEL_NOT_FOUND'))
+    return safeFailure(error, 'fetch', 400)
+  })
+
+  const dual402 = fixture(async () => new Response(JSON.stringify({
+    error: { status: 'RESOURCE_EXHAUSTED', code: 'quota_exceeded', message: 'SECRET_KEY' },
+  }), { status: 402, headers: { 'Content-Type': 'application/json' } }))
+  await assert.rejects(dual402.create({}), error => {
+    assert.equal(error.code, 'PAYMENT_REQUIRED')
+    assert.equal(error.cause.code, 'PAYMENT_REQUIRED')
+    assert.deepEqual(error.upstreamCodes, ['RESOURCE_EXHAUSTED', 'QUOTA_EXCEEDED'])
+    const codes = fetchErrorCodes(error)
+    assert.ok(codes.includes('PAYMENT_REQUIRED'))
+    assert.ok(codes.includes('RESOURCE_EXHAUSTED'))
+    assert.ok(codes.includes('QUOTA_EXCEEDED'))
+    return safeFailure(error, 'fetch', 402)
+  })
+
+  assert.equal(inferInteractionsApiVersion('https://generativelanguage.googleapis.com/v1/interactions', google), 'v1')
+  assert.equal(inferInteractionsApiVersion('https://generativelanguage.googleapis.com/v1beta/interactions', google), 'v1beta')
+  assert.equal(inferInteractionsApiVersion('https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/interactions', vertex), 'v1beta1')
+  assert.equal(inferInteractionsApiVersion('https://aiplatform.googleapis.com/v1/projects/p/locations/global/interactions', vertex), 'v1')
+  assert.equal(inferInteractionsApiVersion('https://proxy.example/interactions', google), 'v1beta')
 })
 

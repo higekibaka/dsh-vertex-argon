@@ -5,7 +5,7 @@ const { z } = await shared('zod')
 // HTTP headers, request bodies and credentials are never supplied to this store.
 export const RESPONSE_LIMITS = Object.freeze({ maxRecords: 20, maxBytes: 64 * 1024 * 1024, maxRecordBytes: 16 * 1024 * 1024, maxFrames: 16384, maxActive: 4, pageChars: 65536 })
 const outcomes = ['unknown', 'done', 'max-tokens', 'tool-calls', 'error', 'aborted', 'incomplete']
-const kinds = ['gc-chunk', 'interaction-event', 'interaction-object']
+const kinds = ['gc-chunk', 'interaction-event', 'interaction-object', 'interaction-error']
 const frameSchema = z.object({ index: z.number().int().nonnegative(), hop: z.number().int().positive(), kind: z.enum(kinds), json: z.string().max(RESPONSE_LIMITS.maxRecordBytes) }).strict()
 const metadataSchema = z.object({ schemaVersion:z.literal(1), id:z.string().uuid(), sessionHash:z.string().regex(/^[a-f0-9]{24}$/).nullable(), startedAt:z.string().datetime(), protocol:z.enum(['generate-content','interactions']), outcome:z.enum(outcomes), bytes:z.number().int().nonnegative().max(RESPONSE_LIMITS.maxRecordBytes), omittedFrames:z.number().int().nonnegative(), captureError:z.boolean() }).strict()
 const responseSchema = metadataSchema.extend({ frames:z.array(frameSchema).max(RESPONSE_LIMITS.maxFrames) }).strict()

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { createArgonDiagnosticTracker, MAX_RECORDED_HOPS } from '../diagnostics.js'
+import { createArgonDiagnosticTracker, MAX_RECORDED_HOPS, fetchErrorCodes, normalizeUpstreamErrorCode, upstreamErrorCodes, transportErrorCodes } from '../diagnostics.js'
 import { recordSchema, storedRecordSchema, diagnosticDomain, diagnosticWriter, createDiagnosticHub } from '../diagnostic-store.js'
 
 const keys = ['reportedInputTokens','reportedCacheTokens','outputTokens','thoughtsTokens','totalTokens','billedPromptTokens','billedCachedTokens','billedOutputTokens','billedThoughtsTokens','billedToolTokens','billedTotalTokens']
@@ -64,4 +64,30 @@ test('legacy storage reads strip only retired fields without mutating history; n
  assert.deepEqual(hub.listRecent(), [clean])
  assert.deepEqual(legacy, before)
  await writer.close()
+})
+
+test('Google REST and Interactions safe error codes are allowlisted and accepted by diagnostics schema', () => {
+ for (const code of [
+  'INVALID_ARGUMENT', 'FAILED_PRECONDITION', 'OUT_OF_RANGE', 'UNAUTHENTICATED',
+  'PERMISSION_DENIED', 'NOT_FOUND', 'ALREADY_EXISTS', 'ABORTED',
+  'RESOURCE_EXHAUSTED', 'CANCELLED', 'INTERNAL', 'UNIMPLEMENTED',
+  'UNAVAILABLE', 'DEADLINE_EXCEEDED', 'INVALID_REQUEST', 'PARAMETER_UNKNOWN',
+  'AUTHENTICATION', 'PAYMENT_REQUIRED', 'MODEL_NOT_FOUND', 'RATE_LIMIT_EXCEEDED',
+  'QUOTA_EXCEEDED', 'TOO_MANY_REQUESTS', 'API_ERROR', 'SERVICE_UNAVAILABLE',
+ ]) {
+  assert.ok(upstreamErrorCodes.includes(code), code)
+  assert.ok(transportErrorCodes.includes(code), code)
+  assert.equal(normalizeUpstreamErrorCode(code.toLowerCase()), code)
+  assert.deepEqual(fetchErrorCodes(Object.assign(new Error('safe'), { code })), [code])
+ }
+ assert.equal(normalizeUpstreamErrorCode('model-not-found'), 'MODEL_NOT_FOUND')
+ assert.equal(normalizeUpstreamErrorCode('SECRET_USER_PROMPT'), undefined)
+ assert.equal(normalizeUpstreamErrorCode(400), undefined)
+ assert.equal(normalizeUpstreamErrorCode(''), undefined)
+ const f = fixture()
+ const hop = f.tracker.beginHop({ hopIndex: 1, trigger: 'interaction-create' })
+ hop.finish({ error: Object.assign(new Error('safe'), { status: 400, code: 'INVALID_ARGUMENT', phase: 'fetch' }) })
+ const record = f.finish()
+ assert.deepEqual(record.hops[0].errorCodes, ['INVALID_ARGUMENT'])
+ recordSchema.parse(record)
 })

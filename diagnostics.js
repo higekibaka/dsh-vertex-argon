@@ -22,6 +22,25 @@ const guarded = fn => {
 }
 
 // Strict allowlist: never persist arbitrary error messages, URLs, credentials, or stack traces.
+export const upstreamErrorCodes = Object.freeze([
+  'INVALID_ARGUMENT', 'FAILED_PRECONDITION', 'OUT_OF_RANGE', 'UNAUTHENTICATED',
+  'PERMISSION_DENIED', 'NOT_FOUND', 'ALREADY_EXISTS', 'ABORTED',
+  'RESOURCE_EXHAUSTED', 'CANCELLED', 'INTERNAL', 'UNIMPLEMENTED',
+  'UNAVAILABLE', 'DEADLINE_EXCEEDED', 'INVALID_REQUEST', 'PARAMETER_UNKNOWN',
+  'AUTHENTICATION', 'PAYMENT_REQUIRED', 'MODEL_NOT_FOUND', 'RATE_LIMIT_EXCEEDED',
+  'QUOTA_EXCEEDED', 'TOO_MANY_REQUESTS', 'API_ERROR', 'SERVICE_UNAVAILABLE',
+])
+
+const allowedUpstreamErrorCodes = new Set(upstreamErrorCodes)
+
+export function normalizeUpstreamErrorCode(raw) {
+  if (typeof raw !== 'string') return undefined
+  const trimmed = raw.trim()
+  if (!trimmed || trimmed.length > 64) return undefined
+  const normalized = trimmed.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+  return allowedUpstreamErrorCodes.has(normalized) ? normalized : undefined
+}
+
 export const transportErrorCodes = Object.freeze([
   'ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED',
   'ETIMEDOUT', 'EPIPE', 'ENETUNREACH', 'EHOSTUNREACH', 'EADDRNOTAVAIL',
@@ -32,6 +51,7 @@ export const transportErrorCodes = Object.freeze([
   'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
   'ERR_TLS_CERT_ALTNAME_INVALID', 'ERR_SSL_WRONG_VERSION_NUMBER',
   'FETCH_FAILED', 'ARGON_STREAM_ERROR', 'STREAM_PHASE_TIMEOUT',
+  ...upstreamErrorCodes,
 ])
 
 const allowedErrorCodes = new Set(transportErrorCodes)

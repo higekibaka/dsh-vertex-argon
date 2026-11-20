@@ -2,6 +2,28 @@
 
 All notable changes to **Gemini 4 Adapter** (`dsh-vertex-argon`) are documented in this file.
 
+## [2.3.0] - 2026-11-20
+
+### Added
+- **Interactions Tool Retrieval & `toolUpdate: 'addition-only'` Integration (`index.js`, `client.js`, `locale/{zh,en}.json`, `adapter.js`, `interactions-input.js`, `interaction-adapter.js`)**:
+  - Added the 14th volatile config field `interactionsToolRetrieval` (`'off' | 'explicit' | 'auto'`, default `'explicit'`) with an accessible 3-option segmented control, bilingual zh/en copy, and 14-field Reset Defaults support in the Web Settings panel.
+  - Added `supportsInteractionsToolRetrieval()` gating so only Gemini API (`google-generative-ai`) Interactions `v1beta` requests on `gemini-4-argon-google` and `gemini-4-hydrogen-google` declare `toolUpdate: 'addition-only'` to the DSH Host and inject server-side `{"type":"tool_search"}` alongside `defer_loading: true` tools (only DSH local `function` tools—including host-bridged `mcp__*` functions—and server-side `{"type":"tool_search"}` are supported; explicit remote `mcp_server` tools and client-side `execution: "client"` `tool_search` are rejected pre-flight, while custom gateways pinned to `/v1/interactions` as well as Carbon, Neon, and Vertex AI routes silently fall back to standard full tool loading without triggering upstream HTTP 400 errors).
+- **Interactions Server-Side Step & Multimodal Content Replay (`interactions.js`, `interactions-input.js`)**:
+  - Extended the Interactions streaming state machine and stateless `replaySteps` encoder to preserve `tool_search_call`, `tool_search_result`, `processing_call`, and `processing_result` steps (with `signature`, `MAX_BYTES` enforcement, and `captureSnapshot`/`restoreSnapshot` cursor rollback without emitting synthetic host `tool-call` chunks) as well as multimodal `image`, `audio`, `document`, and `video` content blocks inside `model_output.content` and `thought.summary`.
+- **Interactions Per-Hop Phased Streaming Watchdog, Stateless Pre-Stream Retry & `validated` → `auto` Fallback (`interaction-transport.js`, `interactions.js`, `interaction-adapter.js`, `interactions-input.js`)**:
+  - Replaced the fixed wall-clock stream cap with per-hop `AbortController` phased streaming timeouts (`180s` `initial-ttft`/`thinking`/`transition`, `120s` `streaming`, paused during downstream yield consumption and refreshed only on real progress, throwing `STREAM_PHASE_TIMEOUT`).
+  - Added up to 3 safe `retry-initial` `create` retries for stateless foreground Interactions (`store: false && !interactionsBackground`) strictly during the `create` request establishment phase (e.g., HTTP `408`/`429`/`5xx` or pre-connection transient network/connect-timeout errors with upstream wait guidance `<= 60s`); once HTTP `200 text/event-stream` response headers are received and streaming begins—or whenever `store: true` or background mode is active—duplicate `create` POST retries are forbidden to prevent double billing.
+  - Added automatic single-shot `tool_choice: 'validated'` → `'auto'` fallback (`retry-original`, stripping `tool_search` and `defer_loading`/`short_description`) when an implicit-`validated` initial `create` returns HTTP 400 before remote creation (excluding `MODEL_NOT_FOUND`).
+
+### Fixed
+- **Safe Structured HTTP Non-2xx Error Extraction (`interaction-transport.js`, `diagnostics.js`, `interaction-adapter.js`)**:
+  - Parsed bounded JSON error bodies (64 KiB) on non-2xx Interactions responses to extract allowlisted normalized Google REST/Interactions error codes and `error.details` `RetryInfo`/`retryDelay` hints for backoff without ever echoing raw upstream `error.message` into outward errors or redacted diagnostics; full parsed error bodies are captured only when `retainRawResponses: true`.
+- **Deferred Tool Prompt-Cache & Context-Circulation Protection (`interactions-input.js`)**:
+  - Filtered `developer` `tool-addition` blocks matching deferred tools out of `system_instruction` when `toolUpdate: 'addition-only'` is active, preventing cache-prefix invalidation and `400 Server side tool call context must be circulated` failures.
+- **Interactions Terminal Exit, Cursor-Aligned Watermarks, Replay Chain Verification & Durable State Hardening (`interactions.js`, `interactions-input.js`, `interaction-adapter.js`, `interaction-state.js`, `index.js`)**:
+  - Exited the SSE read loop immediately upon committing an authoritative terminal event (`interaction.completed`, `requires_action`, `failed`, `cancelled`, `incomplete`, `budget_exceeded`) without waiting for socket EOF; preserved `model_output.signature` on native replay and verified `replay.steps` call-ID pairing and 1:1 local `tool-call` parity before native replay (degrading mismatched completed turns to safe text transcripts); skipped snapshot cloning when `store: false` and switched `state.contents` to immutable tail updates to eliminate $O(N^2)$ snapshot overhead.
+  - Pinned a stable `logicalIdentity` across `validated` → `'auto'` 400 fallback for background tasks, atomically rolled back host first-hop input watermarks on cursor recovery, preserved remote tasks on `HOST_SHUTDOWN_CODE` when interrupted at a `yield` boundary, auto-cleared stale `accepted` handles when cold-resume `GET` returns HTTP 404, bounded non-streaming background status probes to 16 MiB, and restored `taskHub` readiness across `storageDomain` `detach`/`attach` cycles.
+
 ## [2.2.11] - 2026-11-19
 
 ### Fixed

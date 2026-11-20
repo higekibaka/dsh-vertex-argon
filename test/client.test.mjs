@@ -128,13 +128,13 @@ test('protocol controls default to GenerateContent without granting cloud storag
   await r.close()
 })
 test('reset restores both protocols and revokes background/storage options',async()=>{
-  const r=render({googleProtocol:'interactions',vertexProtocol:'interactions',interactionsBackground:true,allowInteractionStorage:true})
+  const r=render({googleProtocol:'interactions',vertexProtocol:'interactions',interactionsBackground:true,allowInteractionStorage:true,interactionsToolRetrieval:'auto'})
   assert.equal(typeof r.dictionary.resetDefaults,'string')
   const resets=r.all.filter(x=>x.type==='button'&&x.children.includes(r.dictionary.resetDefaults))
   assert.equal(resets.length,1)
   await resets[0].props.onClick()
-  assert.equal(r.writes.length,13)
-  assert.deepEqual(Object.fromEntries(r.writes),{showInModelPicker:true,reasoning:'medium',longDecode:true,maxTokens:65536,contextWindow:1048576,googleProtocol:'generate-content',vertexProtocol:'generate-content',interactionsBackground:false,allowInteractionStorage:false,retainRawResponses:false,googleServiceTier:'standard',vertexServiceTier:'standard',vertexPaygoOnly:false})
+  assert.equal(r.writes.length,14)
+  assert.deepEqual(Object.fromEntries(r.writes),{showInModelPicker:true,reasoning:'medium',longDecode:true,maxTokens:65536,contextWindow:1048576,googleProtocol:'generate-content',vertexProtocol:'generate-content',interactionsBackground:false,allowInteractionStorage:false,interactionsToolRetrieval:'explicit',retainRawResponses:false,googleServiceTier:'standard',vertexServiceTier:'standard',vertexPaygoOnly:false})
   await r.close()
 })
 test('incompatible Vertex budget is visibly warned, never silently clamped',async()=>{
@@ -311,10 +311,10 @@ test('tier writes use the real revision-fenced ConfigFormController and Host sch
     try {
       await panel.mount()
       await button(panel.draw(),r.dictionary.resetDefaults).props.onClick()
-      // 重置仍逐字段提交：反代移除后是 13 次写，且都不再出现 proxy* 字段。
+      // 重置仍逐字段提交：含 interactionsToolRetrieval 共 14 次写，且都不再出现 proxy* 字段。
       const resetOps=calls.slice(3).flatMap(call=>call.ops.map(op=>op.path[0]))
-      assert.equal(calls.length,16)
-      assert.deepEqual(resetOps.sort(),['allowInteractionStorage','contextWindow','googleProtocol','googleServiceTier','interactionsBackground','longDecode','maxTokens','reasoning','retainRawResponses','showInModelPicker','vertexPaygoOnly','vertexProtocol','vertexServiceTier'].sort())
+      assert.equal(calls.length,17)
+      assert.deepEqual(resetOps.sort(),['allowInteractionStorage','contextWindow','googleProtocol','googleServiceTier','interactionsBackground','interactionsToolRetrieval','longDecode','maxTokens','reasoning','retainRawResponses','showInModelPicker','vertexPaygoOnly','vertexProtocol','vertexServiceTier'].sort())
       assert.equal(Object.keys(controller.getSnapshot().value).some(key=>key.startsWith('proxy')),false)
     } finally { panel.close() }
 
@@ -329,6 +329,7 @@ test('in-flight tier save blocks retained competing settings and reset callbacks
     const pending=tierButton(r,'googleServiceTier','flex').props.onClick()
     await tierButton(r,'googleServiceTier','priority').props.onClick()
     await protocolButton(r,'google','generate-content').props.onClick()
+    await toolRetrievalButton(r,'auto').props.onClick()
     await r.all.find(x=>x.type==='button'&&x.children.includes(r.dictionary.resetDefaults)).props.onClick()
     assert.deepEqual(calls,[['googleServiceTier','flex']])
     settle(true);await pending
@@ -731,5 +732,81 @@ test('settings expose no dedicated reverse-proxy surface after removal',async()=
     }finally{panel.close();await r.close()}
   }
   assert.equal(Object.keys(Config({})).some(key=>key.startsWith('proxy')),false)
-  assert.equal(Object.keys(Config({})).length,13)
+  assert.equal(Object.keys(Config({})).length,14)
+})
+
+const toolRetrievalGroup=r=>r.all.find(x=>x.props['data-tool-retrieval-field']==='interactionsToolRetrieval')
+const toolRetrievalButton=(r,mode)=>toolRetrievalGroup(r).children.find(x=>x.children.includes(r.dictionary['toolRetrieval_'+mode]))
+
+test('Interactions Tool Retrieval defaults to explicit, switches cleanly across modes, and documents scope in zh/en',async()=>{
+  assert.equal(Config({}).interactionsToolRetrieval.get(),'explicit')
+  for(const mode of ['off','explicit','auto'])assert.equal(Config({interactionsToolRetrieval:mode}).interactionsToolRetrieval.get(),mode)
+  assert.throws(()=>Config({interactionsToolRetrieval:'invalid'}))
+
+  for(const language of ['zh','en']){
+    const r=render({},true,{language})
+    const group=toolRetrievalGroup(r)
+    assert.ok(group,'tool retrieval group must render in section 4')
+    assert.equal(group.props.role,'group')
+    assert.equal(group.props['aria-labelledby'],'argon-tool-retrieval-label')
+    assert.equal(group.props['aria-describedby'],'argon-tool-retrieval-hint')
+    assert.equal(toolRetrievalButton(r,'off').props['aria-pressed'],false)
+    assert.equal(toolRetrievalButton(r,'explicit').props['aria-pressed'],true)
+    assert.equal(toolRetrievalButton(r,'auto').props['aria-pressed'],false)
+    assert.equal(r.writes.length,0)
+
+    const hint=r.all.find(x=>x.props.id==='argon-tool-retrieval-hint')
+    assert.ok(hint,'tool retrieval hint must render')
+    const hintText=hint.children.join('')
+    assert.equal(hintText,r.dictionary.toolRetrievalHint)
+    for(const token of ['Gemini API','Interactions','Argon','Hydrogen','addition-only','tool_search','Carbon','Neon','Vertex AI','400']){
+      assert.ok(hintText.includes(token),`${language} hint must mention ${token}`)
+    }
+
+    for(const mode of ['off','auto','explicit']){
+      const btn=toolRetrievalButton(r,mode)
+      assert.equal(btn.props.disabled,false)
+      assert.equal(btn.props['aria-describedby'],'argon-tool-retrieval-hint')
+      await btn.props.onClick()
+      assert.deepEqual(r.writes.at(-1),['interactionsToolRetrieval',mode])
+    }
+    r.setForm({writable:false})
+    await toolRetrievalButton(r,'auto').props.onClick()
+    assert.equal(r.writes.length,3,'retained tool retrieval callback must stop when form becomes read-only')
+    await r.close()
+
+    for(const selected of ['off','explicit','auto']){
+      const active=render({interactionsToolRetrieval:selected},true,{language})
+      for(const mode of ['off','explicit','auto']){
+        assert.equal(toolRetrievalButton(active,mode).props['aria-pressed'],mode===selected)
+      }
+      await active.close()
+    }
+
+    const fallback=render({interactionsToolRetrieval:'unknown-mode'},true,{language})
+    assert.equal(toolRetrievalButton(fallback,'explicit').props['aria-pressed'],true)
+    await fallback.close()
+  }
+
+  const {ConfigFormController}=await hostClientModule('@deepseek-ai/dsh-client-ui-settings','packages/client/ui-settings/src/client/config-form.ts')
+  const resolve=value=>Object.fromEntries(Object.entries(Config(value)).map(([key,item])=>[key,item.get()]))
+  let namespace={ns:'local-vertex-argon',revision:1,value:resolve({})}
+  const listeners=new Set()
+  const mirror={getSnapshot:()=>({view:{writable:true,namespaces:[namespace]}}),subscribe:listener=>{listeners.add(listener);return()=>listeners.delete(listener)},acceptView:view=>{namespace=view;for(const listener of listeners)listener()},load:async()=>{}}
+  const ctx={remote:{settings:{mutate:async(_ns,ops,revision)=>{
+    const value={...namespace.value}
+    for(const op of ops)value[op.path[0]]=op.value
+    return{ok:true,value:{...namespace,revision:revision+1,value:resolve(value)}}
+  }}}}
+  const controller=new ConfigFormController(ctx,{namespace:namespace.ns,decode:resolve},mirror,{})
+  const r=render({},true,{formController:controller})
+  try{
+    assert.equal(controller.getSnapshot().value.interactionsToolRetrieval,'explicit')
+    await toolRetrievalButton(r,'auto').props.onClick()
+    assert.equal(controller.getSnapshot().value.interactionsToolRetrieval,'auto')
+    await toolRetrievalButton(r,'off').props.onClick()
+    assert.equal(controller.getSnapshot().value.interactionsToolRetrieval,'off')
+    await r.all.find(x=>x.type==='button'&&x.children.includes(r.dictionary.resetDefaults)).props.onClick()
+    assert.equal(controller.getSnapshot().value.interactionsToolRetrieval,'explicit')
+  }finally{await r.close();await controller.dispose()}
 })

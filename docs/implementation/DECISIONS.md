@@ -1,4 +1,4 @@
-# Gemini 4 Adapter（dsh-vertex-argon）核心技术决定与协议合同（v2.2.2）
+# Gemini 4 Adapter（dsh-vertex-argon）核心技术决定与协议合同（v2.3.0）
 
 本文区分当前实现合同与历史实测；验证来源与本轮结果见 [STATUS.md](<STATUS.md>)。
 
@@ -54,7 +54,7 @@
 - 等待连接、流迭代及帧 JSON 解析均需受约束；不能只给 `next()` 加时间限制而放任其他等待永久阻塞。
 - 只累计等待上游工作所用时间，不在 `yield` 后让消费方处理/暂停时间消耗超时预算。看门狗仅在首次进入 `thinking` / `transition` 阶段、收到非空文本、具名 `functionCall`、本跳有界集合 `seenSignatures`（上限 8,192）中未见的新签名、新检查点或首次终止信号时刷新预算；空帧、空思考帧、空 `{ functionCall: {} }`、交替空帧与重复签名不续期。
 - 用户取消立即停止，不进入自动恢复。阶段超时与用户取消必须区分；超时只能在满足安全重试条件时恢复。
-- `meta.phaseTimeouts` 的 `initialTtft`、`thinking`、`transition`、`streaming` 均以毫秒计，可在离线测试中缩短；这是内部参数，不是额外用户配置项，完整配置仍为 13 项。
+- `meta.phaseTimeouts` / `phaseTimeouts` 的 `initialTtft`、`thinking`、`transition`、`streaming` 均以毫秒计，可在离线测试中缩短；这是内部参数，不是额外用户配置项，完整配置为 14 项。
 
 ### 3.3 零交付初始重试与检查点重连
 
@@ -76,13 +76,37 @@ Continue and provide the final response or tool call.
 - 触发自愈的 STOP 不得先交给 SDK，避免宿主提前认为本轮已完成；仅控制完成信号，不回收或伪装已交付分片。
 - 第二次仅思考 STOP 不再自愈，恢复尝试共用总跳数上限，并沿用请求的输出预算配置。
 
-## 4. Interactions 状态与只读查询
+## 4. Interactions 状态、韧性机制、Tool Retrieval 与只读查询
 
 - [interaction-state.js](<../../interaction-state.js>) 在 `create` 前写入 `stage: 'creating'`。若未获得云端 ID 就断网或退出，保留未知创建锁，禁止自动重复创建；用户可在 Operations 中确认释放本地锁。
 - [interactions.js](<../../interactions.js>) 用已知 `interaction.id` 与 `lastEventId` 调用 `get(id, { stream: true, last_event_id })` 续读，避免重复提交已输出内容；兼容 `2026-05-20` 独立生命周期事件（`in_progress`、`requires_action`、`failed`、`cancelled`、`incomplete`、`budget_exceeded`）与回放流 `user_input` 步骤，已确认终态不被后续通知回退，未知非内容生命周期通知不触发远端取消。
 - 同会话发起新提示词遇到历史已知 ID 锁时，[interaction-state.js](<../../interaction-state.js>) 先以有界超时执行单次非流式对账：若云端已 `failed` / `cancelled` 或返回 `404` 则移除死记录并放行；若云端已处于 `completed` / `requires_action` / `incomplete` / `budget_exceeded` 终态则保留原 `requestKey` 的未回放句柄同时解除对新提示词的排他阻塞；流内不可恢复错误同样先经非流式对账确认 `failed` / `cancelled` / `404` 后才释放句柄。
 - [interaction-query.js](<../../interaction-query.js>) 只执行已知 ID 的单次 `GET`，使用所选路由的当前凭据。查询仍仅接受 `google-vertex` / `google-generative-ai` 两条官方通道。
 - 查询不生成、不取消、不执行返回的工具。`query-response` 必须保留，用于读取 `query` 的临时分页结果。
+
+### 4.1 非 2xx 安全错误提取与重试退避
+
+- [interaction-transport.js](<../../interaction-transport.js>) 在 HTTP 非 2xx 分支通过 `readBoundedJson(response, 65536)` 尝试解析错误 JSON（读取失败或超限时静默兜底，绝不抛二次解析异常）。
+- **安全防回显红线**：严禁将上游任意 `error.message` 原文拼入对外 `Error.message` 或脱敏诊断日志；只提取经 [diagnostics.js](<../../diagnostics.js>) 白名单校验并归一化为大写 `SNAKE_CASE` 的标准错误码（如 `INVALID_ARGUMENT`、`RESOURCE_EXHAUSTED`、`MODEL_NOT_FOUND` 等）挂至错误或 `cause.code` 供 `fetchErrorCodes()` 采集，并在固定文案中附带 HTTP 状态码与白名单错误码。
+- 从 `error.details` 提取 `RetryInfo` / `retryDelay` 传入 `parseUpstreamRetryDelayMs({ headers, details })` 参与退避；仅当用户显式开启 `retainRawResponses: true` 时，[interaction-adapter.js](<../../interaction-adapter.js>) 通过受控响应仓 `observeResponse('interaction-error', hopIndex, parsedJson)` 保留完整错误对象。
+
+### 4.2 流式分阶段滑动看门狗与无状态建连阶段重试
+
+- 对齐 GenerateContent 阶段预算（`initialTtft: 180000`、`thinking: 180000`、`transition: 180000`、`streaming: 120000`，支持内部 `phaseTimeouts` 毫秒覆盖），流式 `create` 与流式 `get` 每跳持有独立 `AbortController`；仅在等待上游连接或 `iterator.next()` 期间计时（`yield` 给下游消费期间暂停计时）。
+- 看门狗仅在首次进入 `thinking` / `transition` 阶段、收到非空文本、具名 `function_call` / `tool_search_call`、有界集合 `seenSignatures`（上限 8,192）未见的新签名、新 `event_id` 检查点或终态事件时刷新预算；超时抛出 `code: 'STREAM_PHASE_TIMEOUT'`、`recoverableStreamError: true`，严格区分用户 `options.signal` 取消。非流式 `get` 探针、`cancel`、`delete` 保持原有单次超时。
+- 当 `store === false && !background` 时，`retry-initial`（至多 3 次，指数退避叠加服务端等待下限，后续尝试记为 `trigger: 'retry-initial'`、`usedContinuationToken: false`）严格限定在 **`create` 请求建立阶段** 抛出可恢复错误（如 HTTP `408`/`429`/`5xx` 或未建连的瞬态网络错误/建连超时，且 `parseUpstreamRetryDelayMs(err) <= 60000`）时触发；一旦已收到 HTTP `200 text/event-stream` 响应头进入流阶段，断流不再重发 `create` POST；`store: true` 或 `background: true` 下同样严禁重发，避免重复计费。
+
+### 4.3 `tool_choice: 'validated'` → `'auto'` 安全退避
+
+- `buildInteractionRequest` 在调用方显式指定合法 `options.toolChoice`（`'auto'` / `'any'` / `'none'` / `'validated'` 或 `{ allowed_tools }`）时优先尊重；未显式指定且存在工具时默认使用 `'validated'`。
+- 若未显式指定 `options.toolChoice`、默认使用了 `'validated'`、且首次 `create` 在远端未建单且零交付（`!interactionId && !emitted`）时直接返回 HTTP `400`（且白名单错误码非 `MODEL_NOT_FOUND`），自动构建回退请求将 `generation_config.tool_choice` 改为 `'auto'` 并同步剥离服务端 `{"type":"tool_search"}` 与所有工具上的 `defer_loading` / `short_description`，仅重试 1 次（诊断 hop 记 `trigger: 'retry-original'`、`usedContinuationToken: false`）。
+
+### 4.4 服务端步骤、多模态块回放与 Tool Retrieval（`toolUpdate: 'addition-only'`）
+
+- [interactions.js](<../../interactions.js>) 与 [interactions-input.js](<../../interactions-input.js>) 完整支持服务端步骤 `tool_search_call`、`tool_search_result`、`processing_call`、`processing_result` 及 `model_output.content` / `thought.summary` 中的 `image` / `audio` / `document` / `video` 多模态块：均计入 `MAX_BYTES` 上限、纳入 `captureSnapshot`/`restoreSnapshot` 游标回滚快照、按原始 `index` 顺序连同 `signature` 原样写入 `replaySteps`；服务端步骤不向宿主产出伪造 `tool-call`，非文本块不产出伪造 `text-delta`/`reasoning-delta`；切回 GenerateContent（`generateContentHistory`）时旧回合仍安全降级为纯文本转录。
+- [adapter.js](<../../adapter.js>) 导出能力门控 `supportsInteractionsToolRetrieval({ model, route, protocol, mode, apiVersion })`：仅当 `mode !== 'off'`、`protocol === 'interactions'`、`route === 'google-generative-ai'`、`apiVersion !== 'v1'`（自定义网关 URL 显式锁定 `/v1/interactions` 非 `v1beta` 时同样回退为 `false`）且上游模型为 `argon` / `hydrogen` 时返回 `true`。此时 `getProfiles()`（缓存键纳入 `interactionsToolRetrieval`）与 `prepareCall()` 返回的模型元数据声明 `toolUpdate: 'addition-only'`，使宿主 `dsh-llm` 的 `projectToolUpdates` 原样保留 `tool.deferLoading === true`；Carbon / Neon、Vertex AI 通道与显式 `/v1/interactions` 网关一律返回 `false`（不声明 `toolUpdate`，并剥离工具上的 `deferLoading` / `shortDescription`），避免向不支持模型或端点发送 `defer_loading` 触发上游 `400`。
+- `interactionsToolRetrieval` 三档（[index.js](<../../index.js>) 第 14 项 `volatile` 配置，默认 `'explicit'`）：`'off'` 关闭；`'explicit'` 仅延迟显式 `deferLoading: true` 工具；`'auto'` 额外对未显式关闭的外部/MCP/插件长尾工具（总工具数 `>= 2`）自动标记 `defer_loading: true`。本适配器仅支持 DSH 本地 `function` 工具（含宿主桥接的 `mcp__*` 函数工具）与服务端 `{"type":"tool_search"}`（存在至少 1 个 `defer_loading: true` 工具时在 `tools` 首位注入，严禁附带 `name`/`description`/`parameters`，各工具仍发送完整 `parameters` schema）；若显式传入原生远端 `mcp_server` 工具或客户端模式 `execution: 'client'` 的 `tool_search`，均在发包前直接拒绝。
+- 开启 `toolUpdate: 'addition-only'` 后，组装 `system_instruction` / `user_input` 时若 `system` / `developer` 消息含 `{ type: 'tool-addition', toolName }` 且命中本次请求的 `deferredToolNames` 集合，跳过写入 `[Tool availability update: tool-addition ...]` 文本（过滤后无剩余文本块则跳过整条消息），既保护提示词缓存前缀又避免诱发模型跳过 `tool_search` 直接调用延迟工具而报 `400 Server side tool call context must be circulated`。
 
 ## 5. 精简诊断、存储兼容与 Inspector
 

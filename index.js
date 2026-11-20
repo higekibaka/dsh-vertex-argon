@@ -42,6 +42,7 @@ export const Config = z.object({
   retainRawResponses: z.boolean().default(false).volatile(),
   interactionsBackground: z.boolean().default(false).volatile(),
   allowInteractionStorage: z.boolean().default(false).volatile(),
+  interactionsToolRetrieval: z.union(['off', 'explicit', 'auto']).default('explicit').volatile(),
   contextWindow: z.number().step(1).min(1).max(1048576).default(1048576).volatile(),
   maxTokens: z.number().step(1).min(1).max(MAX_LONG_DECODE_TOKENS).default(MAX_SINGLE_CALL_TOKENS).volatile(),
 })
@@ -55,6 +56,7 @@ export function apply(ctx, config) {
   const query = createConfiguredInteractionQuery(ctx, () => config)
   ctx.effect(() => () => query.close(), 'vertex-argon: read-only query lifetime')
   ctx.effect(() => () => responseHub.close(), 'vertex-argon: raw response memory lifetime')
+  ctx.effect(() => () => taskHub.close(), 'vertex-argon: background interaction recovery lifetime')
   ctx.inject?.(['storageDomain'], async storageCtx => {
     let disposed = false, domain
     storageCtx.effect(() => async () => { disposed = true; await responseHub.detach(domain) }, 'vertex-argon: opt-in raw response retention')
@@ -68,13 +70,14 @@ export function apply(ctx, config) {
     }
   })
   ctx.inject?.(['storageDomain'], async storageCtx => {
-    let disposed = false
-    storageCtx.effect(() => async () => { disposed = true; await taskHub.close() }, 'vertex-argon: background interaction recovery')
+    let disposed = false, domain
+    storageCtx.effect(() => async () => { disposed = true; await taskHub.detach(domain) }, 'vertex-argon: background interaction recovery')
     try {
-      const domain = await storageCtx.storageDomain.open(interactionStateDomain)
+      domain = await storageCtx.storageDomain.open(interactionStateDomain)
       if (disposed) { await domain.close(); return }
       taskHub.attach(domain)
     } catch {
+      try { await domain?.close() } catch {}
       taskHub.fail()
       storageCtx.logger?.warn?.('Gemini 4 Adapter background recovery storage unavailable; background creation is disabled.')
     }

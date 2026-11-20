@@ -77,6 +77,7 @@ window.__ModuleLoader__.load({
     // Plain-JS Client has no cross-bundle value imports. Offline parity tests
     // compare this reviewed UI gate with service-level.js; Host remains authoritative.
     const SERVICE_TIERS = ['standard', 'flex', 'priority']
+    const TOOL_RETRIEVAL_MODES = ['off', 'explicit', 'auto']
     const SERVICE_TIER_CAPABILITIES = {
       'google-generative-ai/generate-content': SERVICE_TIERS,
       'google-generative-ai/interactions': SERVICE_TIERS,
@@ -85,6 +86,7 @@ window.__ModuleLoader__.load({
     }
     const tierAllowed = (route, protocol, tier) => SERVICE_TIER_CAPABILITIES[route + '/' + protocol]?.includes(tier) === true
     function serviceSettingAllowed(value, key, next) {
+      if (key === 'interactionsToolRetrieval') return TOOL_RETRIEVAL_MODES.includes(next)
       if (key === 'googleServiceTier' || key === 'vertexServiceTier') {
         const vertex = key === 'vertexServiceTier'
         return tierAllowed(vertex ? 'google-vertex' : 'google-generative-ai', value[vertex ? 'vertexProtocol' : 'googleProtocol'] ?? 'generate-content', next)
@@ -185,11 +187,16 @@ window.__ModuleLoader__.load({
         customValueTag: ' · 自定义当前值',
         effectiveBudget: '静态有效配置上限（含历史安全预留）',
         effectiveClampedHint: '（长解码已关闭，有效上限 ≤ 65,536 且受窗口预留限制，原配置值保留）',
-        interactionsTitle: '4. Interactions 存储许可与后台执行',
+        interactionsTitle: '4. Interactions 存储许可、后台执行与工具检索',
         storageLabel: '允许 Interactions 在 Google 端存储任务数据',
         storageHint: '采用 Interactions 的通道共用此许可。任何后台执行都须先授权存储（store: true）；关闭只影响新请求，不删除已有云端记录，也不等于所有平台零留存。',
         backgroundLabel: 'Interactions 后台执行',
         backgroundHint: '仅托管云端生成，支持按任务 ID 恢复并在停止时请求远端取消；DSH 本地工具仍在本机执行。未开启存储许可时此项禁用。未知远端状态仅阻止插件自动重发，不保证远端已停止或免人工处理。',
+        toolRetrievalLabel: 'Interactions 工具按需检索（Tool Retrieval）',
+        toolRetrieval_off: '关闭',
+        toolRetrieval_explicit: '按工具声明延迟（默认）',
+        toolRetrieval_auto: '自动延迟外部与 MCP 工具',
+        toolRetrievalHint: '仅在 Gemini API 通道 + Interactions 协议下的 Argon / Hydrogen 模型生效：开启后向宿主声明 addition-only 动态工具能力，并注入服务端 tool_search 按需加载延迟工具；Carbon / Neon 与 Vertex AI 通道自动回退为常规全量加载，不会触发上游 400。',
         resetDefaults: '恢复插件默认值',
         saving: '保存中…',
         saved: '已保存；正在运行的请求不受影响',
@@ -270,11 +277,16 @@ window.__ModuleLoader__.load({
         customValueTag: ' · Custom value',
         effectiveBudget: 'Static effective budget cap (with history reserve)',
         effectiveClampedHint: ' (Long Decode is off; effective cap is ≤ 65,536 and bounded by window reserve while keeping your configured value)',
-        interactionsTitle: '4. Interactions Storage Consent & Background',
+        interactionsTitle: '4. Interactions Storage, Background & Tool Retrieval',
         storageLabel: 'Allow Google to store Interactions task data',
         storageHint: 'Shared by routes using Interactions. All background execution requires explicit storage consent (store: true). Disabling affects future requests only; it neither deletes existing cloud records nor guarantees zero retention on every platform.',
         backgroundLabel: 'Interactions background execution',
         backgroundHint: 'Hosts model generation remotely with task-ID recovery and remote cancel on Stop; DSH local tools still run on this machine. Disabled until storage consent is enabled. Unknown remote state only blocks automatic duplicate sends and does not guarantee remote termination without manual review.',
+        toolRetrievalLabel: 'Interactions Tool Retrieval',
+        toolRetrieval_off: 'Off',
+        toolRetrieval_explicit: 'Explicit deferred (Default)',
+        toolRetrieval_auto: 'Auto-defer external & MCP',
+        toolRetrievalHint: 'Active only for Argon and Hydrogen models on the Gemini API route with the Interactions protocol: declares addition-only dynamic tool capability to the Host and injects server-side tool_search to load deferred tools on demand. Carbon, Neon, and Vertex AI routes automatically fall back to standard full tool loading without triggering upstream 400 errors.',
         resetDefaults: 'Restore Plugin Defaults',
         saving: 'Saving…',
         saved: 'Saved; in-flight requests are unaffected',
@@ -1134,6 +1146,7 @@ window.__ModuleLoader__.load({
       const vertexProtocol = val.vertexProtocol || 'generate-content'
       const background = val.interactionsBackground === true
       const allowStorage = val.allowInteractionStorage === true
+      const toolRetrieval = TOOL_RETRIEVAL_MODES.includes(val.interactionsToolRetrieval) ? val.interactionsToolRetrieval : 'explicit'
       const retainRaw = val.retainRawResponses === true
       const googleTier = val.googleServiceTier ?? 'standard'
       const vertexTier = val.vertexServiceTier ?? 'standard'
@@ -1180,9 +1193,10 @@ window.__ModuleLoader__.load({
           const ok7 = await setField('vertexProtocol', 'generate-content')
           const ok8 = await setField('interactionsBackground', false)
           const ok9 = await setField('allowInteractionStorage', false)
+          const ok14 = await setField('interactionsToolRetrieval', 'explicit')
           const ok10 = await setField('retainRawResponses', false)
           if (!alive.current) return
-          setNotice(ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11 && ok12 && ok13 ? 'saved' : 'error')
+          setNotice(ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11 && ok12 && ok13 && ok14 ? 'saved' : 'error')
         } catch { if (alive.current) setNotice('error') }
         finally { writing.current = false; if (alive.current) setPending(false) }
       }
@@ -1369,6 +1383,24 @@ window.__ModuleLoader__.load({
             }, t(background ? 'longDecodeOn' : 'longDecodeOff')),
           ),
           h('p', { className: 'muted' }, t('backgroundHint')),
+          h('div', { className: 'row', style: { marginTop: '12px' } },
+            h('strong', { id: 'argon-tool-retrieval-label' }, t('toolRetrievalLabel')),
+            h('div', {
+              className: 'group', role: 'group',
+              'aria-labelledby': 'argon-tool-retrieval-label',
+              'aria-describedby': 'argon-tool-retrieval-hint',
+              'data-tool-retrieval-field': 'interactionsToolRetrieval',
+            },
+              ...TOOL_RETRIEVAL_MODES.map(mode =>
+                h('button', {
+                  key: mode, type: 'button', 'aria-pressed': toolRetrieval === mode,
+                  'aria-describedby': 'argon-tool-retrieval-hint',
+                  disabled, onClick: () => updateField('interactionsToolRetrieval', mode),
+                }, t('toolRetrieval_' + mode))
+              ),
+            ),
+          ),
+          h('p', { className: 'muted', id: 'argon-tool-retrieval-hint' }, t('toolRetrievalHint')),
           h('div', { className: 'row', style: { marginTop: '10px' } },
             h('span', {
               className: 'status' + (notice === 'error' || notice === 'tierNotVerified' ? ' error' : ''),

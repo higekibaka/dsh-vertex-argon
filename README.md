@@ -4,11 +4,11 @@
 
 **面向 [DeepSeek Harness](<https://github.com/deepseek-ai/deepseek-harness>) 的 Google 官方双通道（Vertex AI + Gemini Developer API）Gemini 4 适配器，原生支持 Argon、Carbon、Hydrogen 与 Neon 八模型路由、GenerateContent / Interactions 双协议、65K+ 多跳长解码与请求级诊断。**
 
-- **当前版本**：`2.2.11`（[CHANGELOG.md](<CHANGELOG.md>)）
+- **当前版本**：`2.3.0`（[CHANGELOG.md](<CHANGELOG.md>)）
 - **npm 包名**：`dsh-vertex-argon`（保留既有包名、官方通道路由与本地存储域 ID，官方通道用户可直接原地升级；`2.0.0` 已移除 `1.6.x` 非官方反代通道）
 - **运行要求**：DSH `>=0.2.0-rc.2`，Node.js `^22.19.0 || >=24.0.0`（见 [package.json](<package.json>)）
 
-[快速开始](<#快速开始>) · [双官方通道与八模型](<#双官方通道与八模型>) · [长解码与流式恢复](<#generatecontent长解码与四项韧性机制>) · [配置速查](<#完整配置13-项>) · [诊断与工具](<#gemini-4-诊断与-argon_inspect-工具>) · [长解码实测参考](<#历史实测参考奥德赛七号全年舰长日志>)
+[快速开始](<#快速开始>) · [双官方通道与八模型](<#双官方通道与八模型>) · [GenerateContent 长解码](<#generatecontent长解码与四项韧性机制>) · [Interactions 韧性与 Tool Retrieval](<#interactions韧性加固与-tool-retrieval>) · [配置速查](<#完整配置14-项>) · [诊断与工具](<#gemini-4-诊断与-argon_inspect-工具>) · [长解码实测参考](<#历史实测参考奥德赛七号全年舰长日志>)
 
 ---
 
@@ -16,7 +16,7 @@
 
 - **双官方通道 × 八模型路由**：同时接入 Google Cloud **Vertex AI**（`gemini-4-argon` / `gemini-4-carbon` / `gemini-4-hydrogen` / `gemini-4-neon`）与 **Gemini Developer API**（`gemini-4-argon-google` / `gemini-4-carbon-google` / `gemini-4-hydrogen-google` / `gemini-4-neon-google`），两通道凭据与网关严格隔离，绝不暗中互借或静默回退。
 - **65K+ 多跳长解码与流自愈**：单跳上限 `65,536` tokens，最大输出预算可达 `1,048,576`（最多 32 跳）；首个检查点前实时流式输出，支持检查点尾段回滚续传、逐跳四阶段超时看门狗、零交付首包重试、仅思考结束单次续答自愈，以及 `MALFORMED_FUNCTION_CALL` 后 `VALIDATED` → `AUTO` 工具模式自动退避。
-- **Interactions 协议与后台任务恢复**：支持前台流式及显式授权后的云端后台执行；内置 `creating` 预写防重计费锁、`last_event_id` 断点续读、`2026-05-20` 独立生命周期事件兼容，以及同会话新提示词触发的历史死锁非流式探针对账。
+- **Interactions 协议、韧性加固与 Tool Retrieval**：支持前台流式及显式授权后的云端后台执行；内置 `creating` 预写防重计费锁、`last_event_id` 断点续读、`2026-05-20` 独立生命周期事件兼容、同会话历史死锁非流式对账、逐跳分阶段看门狗、无状态建连阶段重试、`validated` → `auto` 400 自动退避、非 2xx 安全白名单错误提取、多态步骤/内容块带签名回放，以及面向 Gemini API Argon / Hydrogen 的服务端 Tool Retrieval（`tool_search` + `defer_loading`）。
 - **签名保真与跨模型安全降级**：完整保留并回放 `thoughtSignature` / `thought_signature`（含无文本独立签名块）；Argon / Carbon 原生映射 `low` / `medium` / `high` 三档（`max` 收敛为 `high`），Hydrogen / Neon 额外放行 `xhigh` 第四档（`max` 收敛为 `xhigh` 并剥离显式 `cachedContent` / `cached_content`，永不下发 `thinkingBudget`）；在 Argon ↔ Carbon ↔ Hydrogen ↔ Neon 或跨通道切换时自动将旧工具历史安全降级为文本记录并清洗污染块。
 - **Gemini 4 诊断面板与只读工具**：在右侧栏、会话详情页与单条回复底部提供请求摘要、基础 Token 水位（严格区分首跳上下文水位与跨跳累计用量）、11 列逐跳轨迹、分页原始响应证据、云端 Interaction ID 只读查询与全局恢复锁管理，并向智能体提供延迟加载的只读工具 `argon_inspect`。
 
@@ -86,7 +86,35 @@ dsh plugin --profile desktop add dsh-vertex-argon
 
 ---
 
-## 完整配置：13 项
+## Interactions：韧性加固与 Tool Retrieval
+
+Interactions 协议除云端后台恢复（`creating` 预写锁、`last_event_id` 断点续读与非流式僵尸锁对账）外，同步内置四项协议韧性机制与 Google Tool Retrieval 按需工具检索能力（完整契约见 [协议合同](<docs/implementation/DECISIONS.md>)）：
+
+### 四项韧性加固
+
+1. **非 2xx 安全结构化错误提取**：对非 2xx 响应体做有界 JSON 解析（64 KiB），严禁将上游任意 `error.message` 原文拼入对外错误或脱敏诊断；仅提取受白名单校验的归一化错误码（如 `INVALID_ARGUMENT`、`RESOURCE_EXHAUSTED`）与 HTTP 状态码，并解析 `error.details` 中的 `RetryInfo` / `retryDelay` 参与退避；开启 `retainRawResponses` 时将原始错误 JSON 记入受控响应仓。
+2. **流式分阶段滑动看门狗**：对齐 GenerateContent 阶段预算（`initial-ttft` / `thinking` / `transition` 各 `180s`，`streaming` `120s`），每跳持有独立 `AbortController`，仅在等待上游连接或迭代期间计时（下游暂停消费不消耗预算），且仅在首次阶段推进、非空文本、具名 `function_call`/`tool_search_call`、有界集合新签名、新 `event_id` 检查点或终态事件时刷新预算。
+3. **无状态建连阶段重试**：当 `store: false` 且未开启后台执行（`!interactionsBackground`）时，仅在 **`create` 请求建立阶段** 遇到可恢复错误（如 HTTP `408`/`429`/`5xx` 或建连超时等未建连瞬态网络错误，且服务端建议等待 `<= 60s`）才重发 `create`（至多 3 次，诊断标记 `retry-initial`）；一旦已收到 HTTP `200 text/event-stream` 响应头进入流阶段，断流不再重发 `create` POST；`store: true` 或后台模式下同样严禁重发，避免重复计费。
+4. **`validated` → `auto` 400 自动退避与多态步骤回放**：含工具请求默认使用 `tool_choice: 'validated'`；若未显式指定 `toolChoice` 且首次 `create` 远端未建单前直接返回 HTTP `400`（排除 `MODEL_NOT_FOUND`），自动退避为 `'auto'` 并同步剥离服务端 `tool_search` 与所有 `defer_loading` / `short_description` 重试 1 次（`retry-original`）。状态机同时完整保留 `tool_search_call`、`tool_search_result`、`processing_call`、`processing_result` 与 `image`/`audio`/`document`/`video` 非文本块及签名用于无状态回放，且不向宿主发送伪造工具调用。
+
+### Tool Retrieval 三档模式与模型/通道适用矩阵
+
+本适配器仅支持 DSH 本地 `function` 工具（含宿主桥接的 `mcp__*` 函数工具）与服务端 `{"type": "tool_search"}`；显式传入原生远端 `mcp_server` 工具或客户端模式 `execution: "client"` 的 `tool_search` 均会在发包前直接拒绝。`interactionsToolRetrieval` 支持三档配置（默认 `explicit`）：
+
+- **`off`（关闭）**：剥离输入工具上的 `deferLoading` / `shortDescription`，按常规全量声明发送。
+- **`explicit`（按工具声明延迟 · 默认）**：仅对显式声明 `deferLoading: true` 的工具（如只读工具 `argon_inspect`）输出 `defer_loading: true`，并在存在延迟工具时于 `tools` 首位自动注入唯一服务端 `{"type": "tool_search"}`；同时向宿主声明 `toolUpdate: 'addition-only'` 保留延迟标记，并过滤已延迟工具的 `developer` `tool-addition` 避免污染 `system_instruction`。
+- **`auto`（自动延迟外部与 MCP 工具）**：除显式 `deferLoading: true` 外，当工具总数 `>= 2` 时对未显式设 `deferLoading: false` 的外部/MCP/插件长尾工具自动标记 `defer_loading: true`。
+
+| 官方通道 `route` | 协议 | 模型 | Tool Retrieval 行为 |
+|---|---|---|---|
+| `google-generative-ai` | `interactions`（`v1beta`） | `gemini-4-argon-google` / `gemini-4-hydrogen-google` | 支持（`explicit` / `auto` 下向宿主声明 `toolUpdate: 'addition-only'` 并注入服务端 `tool_search`；若自定义网关 URL 显式锁定 `/v1/interactions` 非 `v1beta`，则自动回退常规全量模式） |
+| `google-generative-ai` | `interactions` | `gemini-4-carbon-google` / `gemini-4-neon-google` | 自动回退常规全量加载（剥离 `defer_loading`，不会触发上游 `400`） |
+| `google-vertex` | `interactions` | 全部四模型 | 自动回退常规全量加载（Vertex AI 文档尚未背书，不会触发上游 `400`） |
+| 任一官方通道 | `generate-content` | 全部八模型 | 不适用（Google Tool Retrieval 仅 Interactions `v1beta` 支持） |
+
+---
+
+## 完整配置：14 项
 
 以下为 [index.js](<index.js>) 定义的全部实时生效配置（UI 设置面板见 [client.js](<client.js>)）：
 
@@ -102,8 +130,9 @@ dsh plugin --profile desktop add dsh-vertex-argon
 | 协议与服务层级 | `googleServiceTier` | `standard` | `standard` / `flex` / `priority`（仅作用于 Gemini API） |
 | 协议与服务层级 | `vertexServiceTier` | `standard` | `standard` / `flex` / `priority`（受下方能力矩阵约束） |
 | 协议与服务层级 | `vertexPaygoOnly` | `false` | 仅为 Vertex AI GenerateContent 附加 PayGo 共享池请求头 |
-| Interactions 后台模式 | `allowInteractionStorage` | `false` | 允许向 Google 发送 `store: true` 云端存储许可（后台模式前置条件） |
-| Interactions 后台模式 | `interactionsBackground` | `false` | 启用 Interactions 云端后台执行与断点恢复 |
+| Interactions 后台与工具检索 | `allowInteractionStorage` | `false` | 允许向 Google 发送 `store: true` 云端存储许可（后台模式前置条件） |
+| Interactions 后台与工具检索 | `interactionsBackground` | `false` | 启用 Interactions 云端后台执行与断点恢复 |
+| Interactions 后台与工具检索 | `interactionsToolRetrieval` | `explicit` | `off` / `explicit` / `auto`；仅 Gemini API + Interactions 下的 Argon / Hydrogen 生效，其余模型与 Vertex AI 自动回退全量加载 |
 | 诊断与高级 | `retainRawResponses` | `false` | 允许本地留存解析后的上游 JSON 响应帧（关闭不影响既有记录） |
 
 ### 服务层级与 Vertex PayGo 能力矩阵

@@ -6,9 +6,19 @@ import { createArgonDiagnosticTracker } from './diagnostics.js'
 import { createInteractionsHandler } from './interaction-adapter.js'
 import { interactionImageRequestTarget } from './interaction-image.js'
 import { SERVICE_TIERS, resolveServicePolicy, mergeServiceHeaders } from './service-level.js'
-import { generateContentHistory, resolveOfficialGemini4Model, resolveGemini4ReasoningLevel, defaultReasoningForModel } from './interactions-input.js'
+import {
+  generateContentHistory,
+  resolveOfficialGemini4Model,
+  resolveGemini4ReasoningLevel,
+  defaultReasoningForModel,
+  TOOL_RETRIEVAL_MODES,
+  DEFAULT_TOOL_RETRIEVAL_MODE,
+  supportsInteractionsToolRetrieval,
+} from './interactions-input.js'
+export { TOOL_RETRIEVAL_MODES, DEFAULT_TOOL_RETRIEVAL_MODE, supportsInteractionsToolRetrieval } from './interactions-input.js'
 import { createGoogleSignatureBridge } from './google-signatures.js'
 import { createInteractionQuery } from './interaction-query.js'
+import { interactionsEndpoint, inferInteractionsApiVersion } from './interaction-transport.js'
 import { assertPreparedStructuredOutput } from './structured-output.js'
 import { continueArgonRequestStream, STREAM_READ_TIMEOUT_MS, LONG_DECODE_SYMBOL as ARGON_LONG_DECODE_SYMBOL } from './generate-content.js'
 export { MAX_CONTINUATION_HOPS, RECONNECT_INITIAL_DELAY_MS, RECONNECT_MAX_DELAY_MS, RECONNECT_JITTER_RATIO, computeReconnectDelayMs } from './generate-content.js'
@@ -823,6 +833,9 @@ export function resolveConfigValues(raw = {}) {
   const interactionsBackground = readVal(source?.interactionsBackground) ?? false
   const allowInteractionStorage = readVal(source?.allowInteractionStorage) ?? false
   if (typeof interactionsBackground !== 'boolean' || typeof allowInteractionStorage !== 'boolean') throw new LlmError('Interactions background/storage consent must be explicit booleans.', 'INVALID_CONFIG')
+  const rawToolRetrieval = readVal(source?.interactionsToolRetrieval)
+  const interactionsToolRetrieval = rawToolRetrieval === undefined ? DEFAULT_TOOL_RETRIEVAL_MODE : rawToolRetrieval
+  if (!TOOL_RETRIEVAL_MODES.includes(interactionsToolRetrieval)) throw new LlmError('Invalid Argon interactions tool retrieval mode.', 'INVALID_CONFIG')
   for (const protocol of [googleProtocol, vertexProtocol]) {
     if (!['generate-content', 'interactions'].includes(protocol)) throw new LlmError('Invalid Argon protocol.', 'INVALID_CONFIG')
   }
@@ -855,6 +868,7 @@ export function resolveConfigValues(raw = {}) {
     retainRawResponses,
     interactionsBackground,
     allowInteractionStorage,
+    interactionsToolRetrieval,
     routes: source?.routes,
   }
 }
@@ -953,6 +967,17 @@ export function argonProvider(nativeVertex, models, defaultLevel = undefined, na
   }
 }
 
+function interactionsApiVersionForRoute(route, routes) {
+  if (route !== 'google-generative-ai') return 'v1beta1'
+  const baseURL = routes?.googleBaseUrl
+  if (!baseURL) return 'v1beta'
+  try {
+    return inferInteractionsApiVersion(interactionsEndpoint({ route, baseURL }), route)
+  } catch {
+    return inferInteractionsApiVersion(baseURL, route)
+  }
+}
+
 export class ArgonAdapter extends LlmAdapter {
   constructor(inner, isVisible = () => true, interactionHandler, configSnapshot) {
     super()
@@ -974,19 +999,33 @@ export class ArgonAdapter extends LlmAdapter {
     if (!this.isVisible()) return []
     return this.inner.listModels(provider)
   }
-  resolveModel(provider, model, signal) { return this.inner.resolveModel(provider, model, signal) }
+  async resolveModel(provider, model, signal) {
+    const resolved = await this.inner.resolveModel(provider, model, signal)
+    const cfg = this.configSnapshot?.()
+    const route = isGoogleApiModel(model) ? 'google-generative-ai' : 'google-vertex'
+    const protocol = route === 'google-generative-ai' ? cfg?.googleProtocol : cfg?.vertexProtocol
+    const apiVersion = interactionsApiVersionForRoute(route, cfg?.routes)
+    if (provider === PROVIDER && supportsInteractionsToolRetrieval({ model, route, protocol, mode: cfg?.interactionsToolRetrieval, apiVersion })) {
+      return { ...resolved, toolUpdate: 'addition-only' }
+    }
+    return resolved
+  }
   async prepareCall(provider, model, signal) {
     const cfg = this.configSnapshot?.()
     const googleApi = isGoogleApiModel(model)
+    const route = googleApi ? 'google-generative-ai' : 'google-vertex'
     const protocol = googleApi ? cfg?.googleProtocol : cfg?.vertexProtocol
-    if (provider === PROVIDER && cfg) resolveServicePolicy(cfg, googleApi ? 'google-generative-ai' : 'google-vertex', protocol)
+    if (provider === PROVIDER && cfg) resolveServicePolicy(cfg, route, protocol)
     const prepared = await this.inner.prepareCall(provider, model, signal)
     const resolvedModel = provider === PROVIDER
       ? (this.inner.current?.()?.models?.getModel?.(provider, model) ?? (cfg ? { provider, id: model, [MAX_TOKENS_CEILING]: cfg.explicitMaxTokensCap } : undefined))
       : undefined
     if (provider === PROVIDER && protocol === 'interactions' && this.interactionHandler) {
+      const apiVersion = interactionsApiVersionForRoute(route, cfg?.routes)
+      const toolRetrievalSupported = supportsInteractionsToolRetrieval({ model, route, protocol, mode: cfg?.interactionsToolRetrieval, apiVersion })
+      const preparedModel = toolRetrievalSupported ? { ...prepared.model, toolUpdate: 'addition-only' } : prepared.model
       return {
-        model: prepared.model,
+        model: preparedModel,
         stream: options => {
           const pinned = pinPreparedOptions(options, provider, model)
           assertGemini4MaxTokens(pinned, resolvedModel, cfg?.longDecode)
@@ -1072,6 +1111,7 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
       vp: cfg.vertexProtocol,
       background: cfg.interactionsBackground,
       storage: cfg.allowInteractionStorage,
+      tr: cfg.interactionsToolRetrieval,
       gt: cfg.googleServiceTier,
       vt: cfg.vertexServiceTier,
       paygo: cfg.vertexPaygoOnly,
@@ -1238,6 +1278,11 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
       })
     }
     for (let i = 0; i < models.length; i++) {
+      const mProtocol = models[i].api === 'google-generative-ai' ? cfg.googleProtocol : cfg.vertexProtocol
+      const mApiVersion = interactionsApiVersionForRoute(models[i].api, detected)
+      if (supportsInteractionsToolRetrieval({ model: models[i].id, route: models[i].api, protocol: mProtocol, mode: cfg.interactionsToolRetrieval, apiVersion: mApiVersion })) {
+        models[i].toolUpdate = 'addition-only'
+      }
       models[i][MAX_TOKENS_CEILING] = cfg.explicitMaxTokensCap
       models[i] = freezeDescriptor(models[i])
     }

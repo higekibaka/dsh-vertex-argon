@@ -474,7 +474,7 @@ test('P1-乙 & R10-P1-3: captureSnapshot failure prevents replay after delivered
       index: 0,
       event_type: 'step.start',
       event_id: 'e2',
-      step: { type: 'thought', summary: [{ type: 'image', uri: 'https://example.invalid/t.png' }] },
+      step: { type: 'thought', summary: [{ type: 'unknown_modality', uri: 'https://example.invalid/t.png' }] },
     },
   ], {
     settings: { store: true },
@@ -483,6 +483,22 @@ test('P1-乙 & R10-P1-3: captureSnapshot failure prevents replay after delivered
   assert.equal(badSummary.finish.reason.kind, 'error')
   assert.equal(badSummary.finish.reason.failure.code, 'ARGON_INTERACTIONS_PROTOCOL')
   assert.equal(badSummary.calls.filter(c => c.method === 'get').length, 0)
+
+  const malformedImageSummary = await run([
+    { ...created, event_id: 'e1' },
+    {
+      index: 0,
+      event_type: 'step.start',
+      event_id: 'e2',
+      step: { type: 'thought', summary: [{ type: 'image', mime_type: 'image/png' }] },
+    },
+  ], {
+    settings: { store: true },
+    reconnect: [{ ...done(), event_id: 'e3' }],
+  })
+  assert.equal(malformedImageSummary.finish.reason.kind, 'error')
+  assert.equal(malformedImageSummary.finish.reason.failure.code, 'ARGON_INTERACTIONS_PROTOCOL')
+  assert.equal(malformedImageSummary.calls.filter(c => c.method === 'get').length, 0)
 
   const hugeMeta = await run([
     { ...created, event_id: 'e1' },
@@ -499,5 +515,737 @@ test('P1-乙 & R10-P1-3: captureSnapshot failure prevents replay after delivered
   assert.equal(hugeMeta.finish.reason.kind, 'error')
   assert.equal(hugeMeta.finish.reason.failure.code, 'ARGON_INTERACTIONS_PROTOCOL')
   assert.equal(hugeMeta.calls.filter(c => c.method === 'get').length, 0)
+})
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+
+test('phase watchdog pauses while downstream consumer delays, and rejects stalled streams with STREAM_PHASE_TIMEOUT', async () => {
+  // Consumer backpressure must NOT trigger STREAM_PHASE_TIMEOUT.
+  const slowConsumerTransport = {
+    create: async () => (async function* () {
+      yield created
+      yield start(0, 'model_output')
+      yield delta(0, 'text', { text: 'part-1 ' })
+      yield delta(0, 'text', { text: 'part-2' })
+      yield stop(0)
+      yield done()
+    })(),
+    get: async () => assert.fail('unexpected get'),
+    cancel: async () => ({ status: 'cancelled' }),
+  }
+  const collected = []
+  for await (const chunk of streamInteractions(options(), {
+    route: 'google-generative-ai',
+    store: false,
+    background: false,
+    transport: slowConsumerTransport,
+    phaseTimeouts: { initialTtft: 40, thinking: 40, transition: 40, streaming: 40 },
+    reconnectBackoff: { initialDelayMs: 0 },
+  })) {
+    collected.push(chunk)
+    if (chunk.type === 'text-delta') await sleep(70)
+  }
+  assert.equal(collected.at(-1).reason.kind, 'stop')
+  assert.equal(collected.filter(c => c.type === 'text-delta').map(c => c.text).join(''), 'part-1 part-2')
+
+  // Repeated identical signatures / empty heartbeats cannot reset the thinking watchdog.
+  let pseudoAttempts = 0
+  const pseudoTransport = {
+    create: async (_body, { signal }) => {
+      pseudoAttempts++
+      return (async function* () {
+        yield created
+        yield start(0, 'thought')
+        yield delta(0, 'thought_summary', { content: { type: 'text', text: 'thinking' } })
+        yield delta(0, 'thought_signature', { signature: 'sig-1' })
+        for (let i = 0; i < 12; i++) {
+          await sleep(12)
+          if (signal?.aborted) throw signal.reason
+          yield delta(0, 'thought_signature', { signature: 'sig-1' })
+          yield event('interaction.status_update', { interaction: { id: 'remote-1', status: 'in_progress' } })
+        }
+        yield stop(0)
+        yield done()
+      })()
+    },
+    get: async () => assert.fail('unexpected get'),
+    cancel: async () => ({ status: 'cancelled' }),
+  }
+  const pseudoChunks = []
+  for await (const chunk of streamInteractions(options(), {
+    route: 'google-generative-ai',
+    store: false,
+    background: false,
+    transport: pseudoTransport,
+    phaseTimeouts: { initialTtft: 40, thinking: 40, transition: 40, streaming: 40 },
+    reconnectBackoff: { initialDelayMs: 0 },
+  })) {
+    pseudoChunks.push(chunk)
+  }
+  assert.equal(pseudoAttempts, 1)
+  assert.equal(pseudoChunks.at(-1).reason.kind, 'error')
+  assert.equal(pseudoChunks.at(-1).reason.failure.code, 'STREAM_PHASE_TIMEOUT')
+})
+
+test('phase watchdog emits STREAM_PHASE_TIMEOUT distinct from user abort and retries zero-delivered stateless create', async () => {
+  // 1) After visible text is emitted on store:false, timeout throws STREAM_PHASE_TIMEOUT without repeating POST.
+  let creates = 0
+  const stallAfterText = {
+    create: async (_body, { signal }) => {
+      creates++
+      return (async function* () {
+        yield created
+        yield start(0, 'model_output')
+        yield delta(0, 'text', { text: 'started' })
+        await new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))
+      })()
+    },
+    get: async () => assert.fail('unexpected get'),
+    cancel: async () => ({ status: 'cancelled' }),
+  }
+  const timedOut = await run([], {
+    settings: {
+      store: false,
+      background: false,
+      transport: stallAfterText,
+      phaseTimeouts: { initialTtft: 100, thinking: 100, transition: 100, streaming: 35 },
+    },
+  })
+  assert.equal(creates, 1)
+  assert.equal(timedOut.finish.reason.kind, 'error')
+  assert.equal(timedOut.finish.reason.failure.code, 'STREAM_PHASE_TIMEOUT')
+  assert.equal(timedOut.finish.reason.failure.status, 504)
+
+  // 2) User abort produces kind:'aborted', code:'ABORTED', NOT STREAM_PHASE_TIMEOUT.
+  const controller = new AbortController()
+  const optsAbort = { ...options(), signal: controller.signal }
+  const hanging = {
+    create: async (_body, { signal }) => new Promise((_, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+      setTimeout(() => controller.abort(), 15)
+    }),
+    get: async () => assert.fail('unexpected get'),
+    cancel: async () => ({ status: 'cancelled' }),
+  }
+  const aborted = await run([], {
+    opts: optsAbort,
+    settings: {
+      store: false,
+      background: false,
+      transport: hanging,
+      phaseTimeouts: { initialTtft: 500 },
+    },
+  })
+  assert.equal(aborted.finish.reason.kind, 'aborted')
+  assert.equal(aborted.finish.reason.failure.code, 'ABORTED')
+})
+
+test('store:false zero-delivered initial create retries up to 3 times on fetch-stage pre-connect/408/429/5xx errors and never retries after HTTP 200 stream or store:true', async () => {
+  // Succeeds on 4th attempt (3 retries) after HTTP 503, ECONNREFUSED, and UND_ERR_CONNECT_TIMEOUT during fetch.
+  const retryEvents = []
+  const delays = []
+  let attempts = 0
+  const flakyCreate = {
+    create: async () => {
+      attempts++
+      if (attempts === 1) throw Object.assign(new Error('HTTP 503'), { status: 503, phase: 'fetch', retryDelayMs: 5 })
+      if (attempts === 2) throw Object.assign(new Error('refused'), { code: 'ECONNREFUSED', phase: 'fetch' })
+      if (attempts === 3) throw Object.assign(new Error('connect timeout'), { cause: { code: 'UND_ERR_CONNECT_TIMEOUT' }, phase: 'fetch' })
+      return stream([created, start(0, 'model_output'), delta(0, 'text', { text: 'recovered' }), stop(0), done()])
+    },
+    get: async () => assert.fail('must not call get when store:false'),
+    cancel: async () => ({ status: 'cancelled' }),
+  }
+  const ok = await run([], {
+    settings: {
+      store: false,
+      background: false,
+      transport: flakyCreate,
+      phaseTimeouts: { initialTtft: 30, thinking: 30, transition: 30, streaming: 30 },
+      onReconnectDelay: ms => delays.push(ms),
+      onCreateRetry: info => retryEvents.push(info.trigger),
+    },
+  })
+  assert.equal(ok.finish.reason.kind, 'stop')
+  assert.equal(ok.text, 'recovered')
+  assert.equal(attempts, 4)
+  assert.deepEqual(retryEvents, ['retry-initial', 'retry-initial', 'retry-initial'])
+  assert.equal(delays[0], 5)
+
+  // Once transport.create returns an HTTP 200 SSE stream (or throws post-connect ECONNRESET),
+  // stateless store:false MUST NOT resubmit POST (even on empty 200 EOF, pre-frame drop, or TTFT stall).
+  for (const [label, createFn, expectedCode] of [
+    ['200 empty SSE EOF', async () => stream([]), 'ARGON_INTERACTIONS_INTERRUPTED'],
+    ['200 pre-frame ECONNRESET', async () => (async function* () { throw Object.assign(new Error('drop'), { code: 'ECONNRESET', phase: 'stream', status: 200 }) })(), 'ECONNRESET'],
+    ['200 pre-frame TTFT timeout', async (_body, { signal }) => (async function* () { await new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true })) })(), 'STREAM_PHASE_TIMEOUT'],
+    ['fetch-stage post-connect ECONNRESET', async () => { throw Object.assign(new Error('reset'), { code: 'ECONNRESET', phase: 'fetch' }) }, 'ECONNRESET'],
+  ]) {
+    let postCount = 0
+    const res = await run([], {
+      settings: {
+        store: false,
+        background: false,
+        phaseTimeouts: { initialTtft: 25, thinking: 25, transition: 25, streaming: 25 },
+        transport: {
+          create: async (body, optsArg) => { postCount++; return createFn(body, optsArg) },
+          get: async () => assert.fail('must not call get when store:false'),
+          cancel: async () => ({ status: 'cancelled' }),
+        },
+      },
+    })
+    assert.equal(postCount, 1, label)
+    assert.equal(res.finish.reason.kind, 'error', label)
+    assert.equal(res.finish.reason.failure.code, expectedCode, label)
+  }
+
+  // Fails fast when server asks for Retry-After > 60s.
+  let longRetryCalls = 0
+  const longRetry = await run([], {
+    settings: {
+      store: false,
+      background: false,
+      transport: {
+        create: async () => { longRetryCalls++; throw Object.assign(new Error('429'), { status: 429, phase: 'fetch', retryDelayMs: 65000 }) },
+        get: async () => assert.fail('unexpected get'),
+        cancel: async () => ({ status: 'cancelled' }),
+      },
+    },
+  })
+  assert.equal(longRetry.finish.reason.kind, 'error')
+  assert.equal(longRetryCalls, 1)
+
+  // Never retries create POST when store:true or background:true.
+  for (const flags of [{ store: true, background: false }, { store: true, background: true }]) {
+    let storedCalls = 0
+    const res = await run([], {
+      settings: {
+        ...flags,
+        transport: {
+          create: async () => { storedCalls++; throw Object.assign(new Error('503'), { status: 503, phase: 'fetch' }) },
+          get: async () => assert.fail('unexpected get'),
+          cancel: async () => ({ status: 'cancelled' }),
+        },
+      },
+    })
+    assert.equal(res.finish.reason.kind, 'error')
+    assert.equal(storedCalls, 1)
+  }
+})
+
+test('default validated tool_choice falls back once to auto on HTTP 400 fetch error and strips server tool_search/defer_loading', async () => {
+  const bodies = []
+  const triggers = []
+  const opts = {
+    ...options(),
+    tools: [
+      { name: 'bash', description: 'run bash', parameters: { type: 'object', properties: {} } },
+      { name: 'argon_inspect', description: 'inspect', shortDescription: 'inspect short', deferLoading: true, parameters: { type: 'object', properties: {} } },
+    ],
+  }
+  const fallbackTransport = {
+    create: async body => {
+      bodies.push(body)
+      if (bodies.length === 1) throw Object.assign(new Error('HTTP 400 INVALID_ARGUMENT'), { status: 400, phase: 'fetch', code: 'INVALID_ARGUMENT' })
+      return stream([created, start(0, 'model_output'), delta(0, 'text', { text: 'auto-ok' }), stop(0), done()])
+    },
+    get: async () => assert.fail('unexpected get'),
+    cancel: async () => ({ status: 'cancelled' }),
+  }
+  const out = await run([], {
+    opts,
+    settings: {
+      route: 'google-generative-ai',
+      interactionsToolRetrieval: 'explicit',
+      transport: fallbackTransport,
+      onCreateRetry: info => triggers.push(info.trigger),
+    },
+  })
+  assert.equal(out.finish.reason.kind, 'stop')
+  assert.equal(out.text, 'auto-ok')
+  assert.equal(bodies.length, 2)
+  assert.deepEqual(triggers, ['retry-original'])
+  assert.equal(bodies[0].generation_config.tool_choice, 'validated')
+  assert.equal(bodies[0].tools[0].type, 'tool_search')
+  assert.equal(bodies[0].tools[2].defer_loading, true)
+  assert.equal(bodies[0].tools[2].short_description, 'inspect short')
+  assert.equal(bodies[1].generation_config.tool_choice, 'auto')
+  assert.equal(bodies[1].tools.some(t => t.type === 'tool_search'), false)
+  assert.equal(bodies[1].tools.some(t => 'defer_loading' in t || 'short_description' in t), false)
+
+  // MODEL_NOT_FOUND 400 must NOT trigger validated->auto retry.
+  let mnfCalls = 0
+  const mnf = await run([], {
+    opts,
+    settings: {
+      transport: {
+        create: async () => { mnfCalls++; throw Object.assign(new Error('HTTP 400 MODEL_NOT_FOUND'), { status: 400, phase: 'fetch', code: 'MODEL_NOT_FOUND' }) },
+        get: async () => assert.fail('unexpected get'),
+        cancel: async () => ({ status: 'cancelled' }),
+      },
+    },
+  })
+  assert.equal(mnf.finish.reason.kind, 'error')
+  assert.equal(mnfCalls, 1)
+
+  // Explicit options.toolChoice:'validated' must NOT silently downgrade.
+  let explicitCalls = 0
+  const explicit = await run([], {
+    opts: { ...opts, toolChoice: 'validated' },
+    settings: {
+      transport: {
+        create: async () => { explicitCalls++; throw Object.assign(new Error('HTTP 400'), { status: 400, phase: 'fetch', code: 'INVALID_ARGUMENT' }) },
+        get: async () => assert.fail('unexpected get'),
+        cancel: async () => ({ status: 'cancelled' }),
+      },
+    },
+  })
+  assert.equal(explicit.finish.reason.kind, 'error')
+  assert.equal(explicitCalls, 1)
+})
+
+test('server-side steps (tool_search_*, processing_*) and multimodal content blocks stay silent to host and roundtrip verbatim in replaySteps with cursor rollback', async () => {
+  const initial = [
+    { ...created, event_id: 's1' },
+    { ...start(0, 'thought', { summary: [{ type: 'text', text: 'Need tool ' }, { type: 'image', uri: 'https://example.invalid/thought.png', mime_type: 'image/png' }] }), event_id: 's2' },
+    { ...delta(0, 'thought_signature', { signature: 'sig-thought' }), event_id: 's3' },
+    { ...stop(0), event_id: 's4' },
+    { ...start(1, 'tool_search_call', { id: 'ts-1', arguments: { function_names: ['alpha'] } }), event_id: 's5' },
+    delta(1, 'tool_search_call', { arguments: { function_names: ['stale-unindexed'] } }),
+    new Error('drop'),
+  ]
+  const reconnect = [
+    { ...delta(1, 'tool_search_call', { arguments: { function_names: ['beta'] }, signature: 'sig-ts-call' }), event_id: 's6' },
+    { ...stop(1), event_id: 's7' },
+    { ...start(2, 'tool_search_result', { call_id: 'ts-1', result: [{ type: 'function', name: 'alpha' }] }), event_id: 's8' },
+    { ...delta(2, 'tool_search_result', { result: [{ type: 'function', name: 'beta' }], signature: 'sig-ts-res' }), event_id: 's9' },
+    { ...stop(2), event_id: 's10' },
+    { ...start(3, 'processing_call', { id: 'proc-1' }), event_id: 's11' },
+    { ...delta(3, 'processing_call', { signature: 'sig-proc-call' }), event_id: 's12' },
+    { ...stop(3), event_id: 's13' },
+    { ...start(4, 'processing_result', { call_id: 'proc-1', signature: 'sig-proc-res' }), event_id: 's14' },
+    { ...stop(4), event_id: 's15' },
+    { ...start(5, 'model_output', { content: [{ type: 'text', text: 'Here: ' }, { type: 'image', data: 'AQID', mime_type: 'image/png' }] }), event_id: 's16' },
+    { ...delta(5, 'audio', { uri: 'https://example.invalid/a.mp3', mime_type: 'audio/mpeg' }), event_id: 's17' },
+    { ...delta(5, 'text', { text: 'done.' }), event_id: 's18' },
+    { ...stop(5), event_id: 's19' },
+    { ...start(6, 'function_call', { id: 'fn-1', name: 'add', arguments: { a: 7 } }), event_id: 's20' },
+    { ...stop(6), event_id: 's21' },
+    { ...done('requires_action'), event_id: 's22' },
+  ]
+  const out = await run(initial, { settings: { store: true }, reconnect })
+  assert.equal(out.finish.reason.kind, 'tool-calls')
+  assert.equal(out.text, 'Here: done.')
+  // Only the local function_call is emitted as a tool-call block; never tool_search_call/processing_call.
+  const toolBlocks = out.blocks.filter(b => b.type === 'tool-call')
+  assert.equal(toolBlocks.length, 1)
+  assert.equal(toolBlocks[0].id, 'fn-1')
+  const steps = out.finish.replayState.response.steps
+  assert.deepEqual(steps.map(s => s.type), [
+    'thought', 'tool_search_call', 'tool_search_result',
+    'processing_call', 'processing_result', 'model_output', 'function_call',
+  ])
+  assert.deepEqual(steps[0].summary, [{ type: 'text', text: 'Need tool ' }, { type: 'image', uri: 'https://example.invalid/thought.png', mime_type: 'image/png' }])
+  assert.equal(steps[0].signature, 'sig-thought')
+  // Unindexed stale delta ('stale-unindexed') was rolled back on reconnect!
+  assert.deepEqual(steps[1], { type: 'tool_search_call', id: 'ts-1', arguments: { function_names: ['alpha', 'beta'] }, signature: 'sig-ts-call' })
+  assert.deepEqual(steps[2], { type: 'tool_search_result', call_id: 'ts-1', result: [{ type: 'function', name: 'alpha' }, { type: 'function', name: 'beta' }], signature: 'sig-ts-res' })
+  assert.deepEqual(steps[3], { type: 'processing_call', id: 'proc-1', signature: 'sig-proc-call' })
+  assert.deepEqual(steps[4], { type: 'processing_result', call_id: 'proc-1', signature: 'sig-proc-res' })
+  assert.deepEqual(steps[5], {
+    type: 'model_output',
+    content: [
+      { type: 'text', text: 'Here: ' },
+      { type: 'image', data: 'AQID', mime_type: 'image/png' },
+      { type: 'audio', uri: 'https://example.invalid/a.mp3', mime_type: 'audio/mpeg' },
+      { type: 'text', text: 'done.' },
+    ],
+  })
+
+  // Missing required id/call_id on server-side steps fails closed.
+  const missingId = await run([created, start(0, 'tool_search_call', { arguments: { function_names: ['x'] } }), stop(0), done()])
+  assert.equal(missingId.finish.reason.kind, 'error')
+  assert.equal(missingId.finish.reason.failure.code, 'ARGON_INTERACTIONS_PROTOCOL')
+  const missingCallId = await run([created, start(0, 'processing_result'), stop(0), done()])
+  assert.equal(missingCallId.finish.reason.kind, 'error')
+  assert.equal(missingCallId.finish.reason.failure.code, 'ARGON_INTERACTIONS_PROTOCOL')
+})
+
+test('P1-1 & P1-2: background create waits for durable ID settlement on shutdown, and background GET aborts underlying signal on phase timeout', async () => {
+  const { createInteractionStateHub, durableInteractionTransport } = await import('../interaction-state.js')
+
+  // P1-1: host shutdown while background create is in-flight must wait until ID is persisted before releasing claim / closing storage.
+  const rows1 = new Map()
+  let domainClosed = false
+  const hub1 = createInteractionStateHub()
+  hub1.attach({
+    table: () => ({
+      get: k => rows1.get(k),
+      get size() { return rows1.size },
+      entries: () => rows1.entries(),
+      put: async (k, v) => { if (domainClosed) throw new Error('domain already closed'); rows1.set(k, v) },
+      delete: async k => rows1.delete(k),
+    }),
+    close: async () => { domainClosed = true },
+  })
+  const id1 = hub1.identity({ sessionId: 's-p1-1', endpoint: 'https://example.test/interactions', principalHash: 'a'.repeat(64), body: { input: 'x' } })
+  const reqCtrl = new AbortController()
+  const claim = hub1.claim(id1.key, reqCtrl, id1.sessionHash)
+  let createSettled = false
+  const base1 = {
+    create: async () => (async function* () {
+      await sleep(80)
+      createSettled = true
+      yield { event_type: 'interaction.created', interaction: { id: 'remote-late', status: 'in_progress' } }
+    })(),
+    get: async () => stream([]),
+    cancel: async () => ({ status: 'cancelled' }),
+  }
+  const durable1 = durableInteractionTransport(base1, hub1, id1, { signal: reqCtrl.signal })
+  const runPromise = (async () => {
+    const out = []
+    try {
+      for await (const c of streamInteractions({ ...options(), signal: reqCtrl.signal }, {
+        route: 'google-generative-ai',
+        background: true,
+        store: true,
+        transport: durable1,
+        reconnectBackoff: { initialDelayMs: 0 },
+      })) out.push(c)
+    } finally {
+      claim.release()
+    }
+    return out
+  })()
+  await sleep(15)
+  const closePromise = hub1.close()
+  const out1 = await runPromise
+  await closePromise
+  assert.equal(createSettled, true)
+  assert.equal(domainClosed, true)
+  assert.equal(rows1.get(id1.key)?.interactionId, 'remote-late')
+  assert.equal(rows1.get(id1.key)?.stage, 'accepted')
+  assert.equal(out1.at(-1).reason.kind, 'aborted')
+
+  // P1-2: stalled first background GET aborts its underlying AbortSignal on STREAM_PHASE_TIMEOUT and recovers on second GET.
+  const rows2 = new Map()
+  const hub2 = createInteractionStateHub()
+  hub2.attach({
+    table: () => ({
+      get: k => rows2.get(k),
+      get size() { return rows2.size },
+      entries: () => rows2.entries(),
+      put: async (k, v) => rows2.set(k, v),
+      delete: async k => rows2.delete(k),
+    }),
+    close: async () => {},
+  })
+  const id2 = hub2.identity({ sessionId: 's-p1-2', endpoint: 'https://example.test/interactions', principalHash: 'b'.repeat(64), body: { input: 'y' } })
+  const getSignals = []
+  let getCount = 0
+  const base2 = {
+    create: async () => stream([{ event_type: 'interaction.created', interaction: { id: 'remote-bg', status: 'in_progress' } }]),
+    get: async (_id, reqOpts) => {
+      getSignals.push(reqOpts?.signal)
+      if (++getCount === 1) {
+        return (async function* () {
+          await new Promise((_, reject) => reqOpts.signal?.addEventListener('abort', () => reject(reqOpts.signal.reason), { once: true }))
+        })()
+      }
+      return stream([
+        { ...start(0, 'model_output'), event_id: 'bg-1' },
+        { ...delta(0, 'text', { text: 'bg-ok' }), event_id: 'bg-2' },
+        { ...stop(0), event_id: 'bg-3' },
+        { event_type: 'interaction.completed', event_id: 'bg-4', interaction: { id: 'remote-bg', status: 'completed' } },
+      ])
+    },
+    cancel: async () => ({ status: 'cancelled' }),
+  }
+  const durable2 = durableInteractionTransport(base2, hub2, id2)
+  const out2 = await run([], {
+    settings: {
+      store: true,
+      background: true,
+      transport: durable2,
+      phaseTimeouts: { initialTtft: 35, thinking: 35, transition: 35, streaming: 35 },
+    },
+  })
+  assert.equal(out2.finish.reason.kind, 'stop')
+  assert.equal(out2.text, 'bg-ok')
+  assert.equal(getCount, 2)
+  assert.ok(getSignals[0] instanceof AbortSignal)
+  assert.equal(getSignals[0].aborted, true)
+  await durable2.finish({ complete: true, reason: 'completed' })
+  await hub2.close()
+})
+
+test('P1-3: captureSnapshot stays linear across 4000 indexed deltas and preserves immutable rollback semantics', async () => {
+  const count = 4000
+  const chunkText = 'a'.repeat(400)
+  const events = [
+    { ...created, event_id: 'e-init' },
+    { ...start(0, 'model_output'), event_id: 'e-start' },
+  ]
+  for (let i = 0; i < count; i++) {
+    events.push({ ...delta(0, 'text', { text: chunkText }), event_id: 'e-' + i })
+  }
+  events.push({ ...stop(0), event_id: 'e-stop' }, { ...done(), event_id: 'e-done' })
+  const startedAt = performance.now()
+  const out = await run(events, { settings: { store: true } })
+  const elapsedMs = performance.now() - startedAt
+  assert.equal(out.finish.reason.kind, 'stop')
+  assert.equal(out.text.length, count * chunkText.length)
+  assert.equal(out.finish.replayState.response.steps[0].content[0].text.length, count * chunkText.length)
+  assert.ok(elapsedMs < 800, `Expected linear snapshot performance (<800ms), got ${elapsedMs.toFixed(1)}ms`)
+
+  // Verify immutable contents snapshot still rolls back an unindexed thought summary text delta cleanly.
+  const rolled = await run([
+    { ...created, event_id: 'r0' },
+    { ...start(0, 'thought'), event_id: 'r1' },
+    { ...delta(0, 'thought_summary', { content: { type: 'text', text: 'A' } }), event_id: 'r2' },
+    { ...start(1, 'function_call', { id: 'fc1', name: 'add' }), event_id: 'r3' },
+    delta(1, 'arguments_delta', { arguments: '{"a":999' }),
+    new Error('drop'),
+  ], {
+    settings: { store: true },
+    reconnect: [
+      { ...delta(1, 'arguments_delta', { arguments: '{"a":1}' }), event_id: 'r4' },
+      { ...stop(1), event_id: 'r5' },
+      { ...stop(0), event_id: 'r6' },
+      { ...done('requires_action'), event_id: 'r7' },
+    ],
+  })
+  assert.equal(rolled.finish.reason.kind, 'tool-calls')
+  assert.equal(rolled.finish.replayState.response.steps[0].summary[0].text, 'A')
+  assert.equal(rolled.blocks.find(b => b.type === 'tool-call').arguments, '{"a":1}')
+})
+
+test('P1-1: authoritative terminal event (requires_action) finalizes immediately even if stream hangs or drops after it', async () => {
+  for (const postTerminal of ['hang', 'drop']) {
+    let creates = 0, closed = false
+    const transport = {
+      create: async () => {
+        creates++
+        return (async function* () {
+          try {
+            yield created
+            yield start(0, 'function_call', { id: 'fc-term', name: 'add', arguments: { a: 9 } })
+            yield stop(0)
+            yield event('interaction.requires_action', { interaction: { id: 'remote-1', status: 'requires_action' } })
+            if (postTerminal === 'hang') await new Promise(() => {})
+            throw Object.assign(new Error('late reset'), { code: 'ECONNRESET', phase: 'stream' })
+          } finally {
+            closed = true
+          }
+        })()
+      },
+      get: async () => assert.fail('must not reconnect after terminal event'),
+      cancel: async () => assert.fail('must not cancel after terminal event'),
+    }
+    const out = await run([], {
+      settings: {
+        store: false,
+        background: false,
+        transport,
+        phaseTimeouts: { initialTtft: 40, thinking: 40, transition: 40, streaming: 40 },
+      },
+    })
+    assert.equal(creates, 1)
+    assert.equal(closed, true)
+    assert.equal(out.finish.reason.kind, 'tool-calls')
+    assert.equal(out.blocks.find(b => b.type === 'tool-call').arguments, '{"a":9}')
+  }
+})
+
+test('P1-3, P1-7, P1-8, P1-9: watchdog requires genuine state progress, store:false skips snapshots & never retries after SSE receipt or permanent/pre-dispatch/TLS errors', async () => {
+  // P1-3: Repeated identical tool_search_call / function_call deltas do NOT refresh watchdog budget.
+  let repeatCreates = 0
+  const repeatTransport = {
+    create: async (_body, { signal }) => {
+      repeatCreates++
+      return (async function* () {
+        yield created
+        yield start(0, 'tool_search_call', { id: 'ts-rep', arguments: { function_names: ['alpha'] } })
+        for (let i = 0; i < 12; i++) {
+          await sleep(12)
+          if (signal?.aborted) throw signal.reason
+          yield delta(0, 'tool_search_call', { id: 'ts-rep', arguments: { function_names: ['alpha'] } })
+        }
+        yield stop(0)
+        yield done()
+      })()
+    },
+    get: async () => assert.fail('unexpected get'),
+    cancel: async () => ({ status: 'cancelled' }),
+  }
+  const repOut = await run([], {
+    settings: {
+      store: false,
+      background: false,
+      transport: repeatTransport,
+      phaseTimeouts: { initialTtft: 40, thinking: 40, transition: 40, streaming: 40 },
+    },
+  })
+  assert.equal(repeatCreates, 1)
+  assert.equal(repOut.finish.reason.kind, 'error')
+  assert.equal(repOut.finish.reason.failure.code, 'STREAM_PHASE_TIMEOUT')
+
+  // P1-7: store:false never invokes captureSnapshot even when events carry event_id.
+  let snapCalls = 0
+  const noSnapOut = await run([
+    { ...created, event_id: 'ns-1' },
+    { ...start(0, 'model_output'), event_id: 'ns-2' },
+    { ...delta(0, 'text', { text: 'ok' }), event_id: 'ns-3' },
+    { ...stop(0), event_id: 'ns-4' },
+    { ...done(), event_id: 'ns-5' },
+  ], { settings: { store: false, onCaptureSnapshot: () => { snapCalls++; return {} } } })
+  assert.equal(noSnapOut.finish.reason.kind, 'stop')
+  assert.equal(snapCalls, 0)
+
+  // P1-9: store:false MUST NOT retry POST once any SSE event (e.g. interaction.created) has arrived.
+  let postCreatedAttempts = 0
+  const postCreatedDrop = await run([], {
+    settings: {
+      store: false,
+      background: false,
+      transport: {
+        create: async () => {
+          postCreatedAttempts++
+          return (async function* () {
+            yield created
+            throw Object.assign(new Error('mid-stream reset'), { code: 'ECONNRESET', phase: 'stream', status: 200 })
+          })()
+        },
+        get: async () => assert.fail('unexpected get'),
+        cancel: async () => ({ status: 'cancelled' }),
+      },
+    },
+  })
+  assert.equal(postCreatedAttempts, 1)
+  assert.equal(postCreatedDrop.finish.reason.kind, 'error')
+
+  // P1-9: pre-dispatch, requestSubmitted:false, permanent TLS errors, and uncoded errors are NEVER retried.
+  for (const permanentErr of [
+    Object.assign(new Error('auth failed'), { phase: 'pre-dispatch', requestSubmitted: false, code: 'ECONNRESET' }),
+    Object.assign(new Error('cert expired'), { code: 'CERT_HAS_EXPIRED', phase: 'fetch' }),
+    Object.assign(new Error('self signed'), { cause: { code: 'SELF_SIGNED_CERT_IN_CHAIN' }, phase: 'fetch' }),
+    Object.assign(new Error('ssl err'), { code: 'ERR_SSL_WRONG_VERSION_NUMBER', phase: 'fetch' }),
+    Object.assign(new Error('proxy tls'), { code: 'UND_ERR_PRX_TLS', phase: 'fetch' }),
+    new Error('uncoded non-network failure'),
+  ]) {
+    let tries = 0
+    const res = await run([], {
+      settings: {
+        store: false,
+        background: false,
+        transport: {
+          create: async () => { tries++; throw permanentErr },
+          get: async () => assert.fail('unexpected get'),
+          cancel: async () => ({ status: 'cancelled' }),
+        },
+      },
+    })
+    assert.equal(res.finish.reason.kind, 'error')
+    assert.equal(tries, 1, `Should not retry: ${permanentErr.message}`)
+  }
+
+  // P1-8: validated->auto 400 fallback ONLY fires on connections === 1 && phase === 'fetch', and checks dual upstreamCodes for MODEL_NOT_FOUND.
+  let secondAttempt400Calls = 0
+  const afterRetry400 = await run([], {
+    settings: {
+      store: false,
+      background: false,
+      transport: {
+        create: async () => {
+          secondAttempt400Calls++
+          if (secondAttempt400Calls === 1) throw Object.assign(new Error('503'), { status: 503, phase: 'fetch' })
+          throw Object.assign(new Error('400'), { status: 400, phase: 'fetch', code: 'INVALID_REQUEST' })
+        },
+        get: async () => assert.fail('unexpected get'),
+        cancel: async () => ({ status: 'cancelled' }),
+      },
+    },
+  })
+  assert.equal(afterRetry400.finish.reason.kind, 'error')
+  assert.equal(secondAttempt400Calls, 2)
+
+  let nonFetch400Calls = 0
+  const nonFetch400 = await run([], {
+    settings: {
+      store: false,
+      background: false,
+      transport: {
+        create: async () => { nonFetch400Calls++; throw Object.assign(new Error('400'), { status: 400, phase: 'response-body' }) },
+        get: async () => assert.fail('unexpected get'),
+        cancel: async () => ({ status: 'cancelled' }),
+      },
+    },
+  })
+  assert.equal(nonFetch400.finish.reason.kind, 'error')
+  assert.equal(nonFetch400Calls, 1)
+
+  let dualMnfCalls = 0
+  const dualMnf = await run([], {
+    settings: {
+      store: false,
+      background: false,
+      transport: {
+        create: async () => { dualMnfCalls++; throw Object.assign(new Error('400'), { status: 400, phase: 'fetch', code: 'INVALID_REQUEST', upstreamCode: 'FAILED_PRECONDITION', upstreamCodes: ['FAILED_PRECONDITION', 'MODEL_NOT_FOUND'] }) },
+        get: async () => assert.fail('unexpected get'),
+        cancel: async () => ({ status: 'cancelled' }),
+      },
+    },
+  })
+  assert.equal(dualMnf.finish.reason.kind, 'error')
+  assert.equal(dualMnfCalls, 1)
+})
+
+test('generator suspended at yield during host shutdown .return() reports host-shutdown without sending /cancel and retains background handle', async () => {
+  const { createInteractionStateHub, durableInteractionTransport } = await import('../interaction-state.js')
+  const { HOST_SHUTDOWN_CODE } = await import('../interaction-lifecycle.js')
+  const rows = new Map()
+  const hub = createInteractionStateHub()
+  hub.attach({
+    table: () => ({
+      get: k => rows.get(k),
+      get size() { return rows.size },
+      entries: () => rows.entries(),
+      put: async (k, v) => rows.set(k, v),
+      delete: async k => rows.delete(k),
+    }),
+    close: async () => {},
+  })
+  const identity = hub.identity({ sessionId: 's-yield-shutdown', endpoint: 'https://example.test/interactions', principalHash: 'c'.repeat(64), body: { input: 'z' } })
+  const controller = new AbortController()
+  let cancels = 0, exitReason
+  const base = {
+    create: async () => stream([{ event_type: 'interaction.created', interaction: { id: 'remote-yield', status: 'in_progress' } }]),
+    get: async () => stream([
+      { ...start(0, 'model_output'), event_id: 'y1' },
+      { ...delta(0, 'text', { text: 'part-1' }), event_id: 'y2' },
+      { ...delta(0, 'text', { text: 'part-2' }), event_id: 'y3' },
+    ]),
+    cancel: async () => { cancels++; return { status: 'cancelled' } },
+  }
+  const durable = durableInteractionTransport(base, hub, identity, { signal: controller.signal })
+  const gen = streamInteractions({ ...options(), signal: controller.signal }, {
+    route: 'google-generative-ai',
+    background: true,
+    store: true,
+    transport: durable,
+    reconnectBackoff: { initialDelayMs: 0 },
+    onExit: reason => { exitReason = reason },
+  })
+  // Advance until the generator is paused right on a yielded chunk (before stream end).
+  const first = await gen.next()
+  assert.equal(first.done, false)
+  // Simulate host shutdown abort followed immediately by consumer .return() while paused at yield.
+  controller.abort(Object.assign(new Error('Host shutdown'), { name: 'AbortError', code: HOST_SHUTDOWN_CODE }))
+  await gen.return()
+  await durable.finish({ complete: false, reason: exitReason })
+  assert.equal(exitReason, 'host-shutdown')
+  assert.equal(cancels, 0)
+  assert.equal(rows.size, 1)
+  assert.equal(rows.get(identity.key)?.interactionId, 'remote-yield')
+  await hub.close()
 })
 

@@ -23,12 +23,32 @@ export const interactionStateDomain = {
 // fresh DSH turn accumulator. A saved cursor alone cannot reconstruct lost text.
 export const BACKGROUND_CREATE_TIMEOUT_MS = 60000
 export const REMOTE_CANCEL_TIMEOUT_MS = 30000
+export const REMOTE_PROBE_MAX_BYTES = 16 * 1024 * 1024
 
 export function createInteractionStateHub({ closeTimeoutMs = BACKGROUND_CREATE_TIMEOUT_MS + REMOTE_CANCEL_TIMEOUT_MS + 5000 } = {}) {
-  let table, domain, failure, closed = false
+  let table, domain, failure = false, closed = false, detachPromise
   const active = new Map()
+  async function drainAndDetach(ownedDomain) {
+    // Keep storage open until in-flight ID discovery and cleanup have settled.
+    for (const { controller } of active.values()) controller.abort(Object.assign(new Error('Host shutdown interrupted local reading.'), { name: 'AbortError', code: HOST_SHUTDOWN_CODE }))
+    const deadline = Date.now() + closeTimeoutMs
+    while (active.size && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20))
+    const target = ownedDomain ?? domain
+    if (!ownedDomain || domain === ownedDomain) {
+      domain = undefined
+      table = undefined
+    }
+    await target?.close()
+  }
   return {
-    attach(handle) { domain = handle; table = handle.table('tasks') },
+    attach(handle) {
+      if (detachPromise) throw new Error('Background recovery storage is detaching.')
+      const nextTable = handle.table('tasks')
+      domain = handle
+      table = nextTable
+      failure = false
+      closed = false
+    },
     fail() { failure = true },
     requireReady() {
       if (closed || failure || !table) throw new Error('Persistent Interactions recovery storage is unavailable; background execution was not started.')
@@ -61,6 +81,7 @@ export function createInteractionStateHub({ closeTimeoutMs = BACKGROUND_CREATE_T
     async remove(key) { this.requireReady(); await table.delete(key) },
     claim(key, controller = new AbortController(), sessionHash) {
       this.requireReady()
+      if (detachPromise) throw new Error('Persistent Interactions recovery storage is unavailable; background execution was not started.')
       if (active.has(key) || (sessionHash && [...active.values()].some(value => value.sessionHash === sessionHash))) throw new Error('This background interaction or session is already being consumed.')
       const value = { controller, sessionHash }
       active.set(key, value)
@@ -82,13 +103,16 @@ export function createInteractionStateHub({ closeTimeoutMs = BACKGROUND_CREATE_T
         return released
       } finally { claim.release() }
     },
+    detach(value) {
+      if (detachPromise) return detachPromise
+      if (value !== undefined && (!domain || value !== domain)) return Promise.resolve()
+      if (!domain && !active.size) { table = undefined; return Promise.resolve() }
+      const ownedDomain = value ?? domain
+      detachPromise = drainAndDetach(ownedDomain).finally(() => { detachPromise = undefined })
+      return detachPromise
+    },
     async close() {
-      // Keep storage open until in-flight ID discovery and cleanup have settled.
-      for (const { controller } of active.values()) controller.abort(Object.assign(new Error('Host shutdown interrupted local reading.'), { name: 'AbortError', code: HOST_SHUTDOWN_CODE }))
-      const deadline = Date.now() + closeTimeoutMs
-      while (active.size && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20))
-      closed = true
-      await domain?.close()
+      try { await this.detach() } finally { closed = true }
     },
   }
 }
@@ -102,6 +126,7 @@ export function durableInteractionTransport(base, hub, identity, { signal, onEve
   let stopped = false
   let cancelPromise
   let sawUnrecoverableError = false
+  let sawRemoteNotFound = false
   const isTerminal = status => ['completed', 'requires_action', 'incomplete', 'failed', 'cancelled', 'budget_exceeded'].includes(status)
   async function save(stage = 'accepted') {
     task = await hub.put(identity, { stage, interactionId: task?.interactionId ?? null, lastEventId })
@@ -137,15 +162,25 @@ export function durableInteractionTransport(base, hub, identity, { signal, onEve
   return {
     get interactionId() { return task?.interactionId },
     get cancellationState() { return stopped ? 'confirmed' : cancelPromise || task?.stage === 'unknown' || task?.stage === 'cancel-failed' ? 'unconfirmed' : 'not-requested' },
-    async create(body) {
+    async create(body, requestOptions) {
       signal?.throwIfAborted()
+      const streamSignal = requestOptions?.signal
+        ? (signal && requestOptions.signal !== signal ? AbortSignal.any([signal, requestOptions.signal]) : requestOptions.signal)
+        : signal
       if (task) {
         if (!task.interactionId) throw new Error('A previous background creation has an unknown outcome; refusing a duplicate billable POST. Open Gemini 4 diagnostics > Operations > Background Task Recovery to review and explicitly release the local block.')
         if (task.stage === 'cancel-failed') {
           await this.cancel(task.interactionId)
           throw new Error('The previous background task is now cancelled. Start the request again explicitly if still needed.')
         }
-        return watch(() => base.get(task.interactionId, { stream: true, signal }), { id: task.interactionId, status: 'in_progress' })
+        return watch(async () => {
+          try {
+            return await base.get(task.interactionId, { stream: true, signal: streamSignal })
+          } catch (error) {
+            if (error?.status === 404) sawRemoteNotFound = true
+            throw error
+          }
+        }, { id: task.interactionId, status: 'in_progress' })
       }
       // A changed prompt must not evade the unknown-create/active-task guard.
       for (const previous of hub.entries()) {
@@ -161,7 +196,7 @@ export function durableInteractionTransport(base, hub, identity, { signal, onEve
           // cancellation confirmation instead of stalling the new prompt.
           const probeSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(REMOTE_CANCEL_TIMEOUT_MS)]) : AbortSignal.timeout(REMOTE_CANCEL_TIMEOUT_MS)
           try {
-            const probe = await base.get(previous.interactionId, { stream: false, signal: probeSignal })
+            const probe = await base.get(previous.interactionId, { stream: false, signal: probeSignal, maxResponseBytes: REMOTE_PROBE_MAX_BYTES })
             if (probe && typeof probe === 'object' && typeof probe[Symbol.asyncIterator] !== 'function') remote = probe
             else try { await probe?.return?.() } catch {}
           } catch (error) {
@@ -211,7 +246,7 @@ export function durableInteractionTransport(base, hub, identity, { signal, onEve
         // have event_id; the documented resumable background stream is GET.
         // Background execution continues when this local POST response is closed.
         // No generated content has escaped, so GET can start from the beginning.
-        return watch(() => base.get(created.id, { stream: true, signal }), { id: created.id, status: created.status ?? 'in_progress' })
+        return watch(() => base.get(created.id, { stream: true, signal: streamSignal }), { id: created.id, status: created.status ?? 'in_progress' })
       } catch (error) {
         if (task?.interactionId) {
           // Keep a known ID recoverable even if persisting/consuming the first event failed.
@@ -238,7 +273,19 @@ export function durableInteractionTransport(base, hub, identity, { signal, onEve
         try { await iterator?.return?.() } catch {}
       }
     },
-    async get(id, options) { return watch(() => base.get(id, options)) },
+    async get(id, options) {
+      const merged = options?.signal
+        ? (signal && options.signal !== signal ? { ...options, signal: AbortSignal.any([signal, options.signal]) } : options)
+        : (signal ? { ...options, signal } : options)
+      return watch(async () => {
+        try {
+          return await base.get(id, merged)
+        } catch (error) {
+          if (error?.status === 404 && task?.interactionId && id === task.interactionId) sawRemoteNotFound = true
+          throw error
+        }
+      })
+    },
     async cancel(id, options = {}) {
       if (stopped) return
       if (cancelPromise) return cancelPromise
@@ -251,7 +298,7 @@ export function durableInteractionTransport(base, hub, identity, { signal, onEve
         }
         for (let attempt = 0; !isTerminal(response?.status) && attempt < 3; attempt++) {
           if (attempt) await new Promise(resolve => setTimeout(resolve, 250 * (2 ** attempt)))
-          response = await base.get(id, { signal })
+          response = await base.get(id, { signal, maxResponseBytes: REMOTE_PROBE_MAX_BYTES })
         }
         if (!isTerminal(response?.status)) throw new Error('Remote cancellation did not reach a terminal status.')
         stopped = true
@@ -266,11 +313,11 @@ export function durableInteractionTransport(base, hub, identity, { signal, onEve
     },
     async finish({ complete = false, reason = 'consumer-abandoned' } = {}) {
       if (stopped || !task) return
-      // A remote failure, cancellation or unrecoverable error stream is already
-      // terminal in the cloud: the local lock must go even when the local replay
+      // A remote failure, cancellation, vanished task (404), or unrecoverable error stream
+      // is already terminal in the cloud: the local lock must go even when the local replay
       // never completed. Completed, requires_action, incomplete and budget-exceeded
       // results stay retained so an interrupted replay needs no new billable POST.
-      if ((complete && terminal) || ['failed','cancelled'].includes(terminalStatus)) { await hub.remove(identity.key); return }
+      if ((complete && terminal) || ['failed','cancelled'].includes(terminalStatus) || sawRemoteNotFound) { await hub.remove(identity.key); return }
       // A local error frame is not proof of a remote terminal state. Verify the
       // cloud task before dropping the recovery handle: a still-running task keeps
       // its handle, a finished (or 404) one releases it.
@@ -281,7 +328,7 @@ export function durableInteractionTransport(base, hub, identity, { signal, onEve
         let probe
         // The probe is a final network read, so it is bounded exactly like the
         // cancellation confirmation instead of stalling the host turn.
-        try { probe = await base.get(task.interactionId, { stream: false, signal: AbortSignal.timeout(REMOTE_CANCEL_TIMEOUT_MS) }) } catch (error) {
+        try { probe = await base.get(task.interactionId, { stream: false, signal: AbortSignal.timeout(REMOTE_CANCEL_TIMEOUT_MS), maxResponseBytes: REMOTE_PROBE_MAX_BYTES }) } catch (error) {
           if (error?.status === 404) await hub.remove(identity.key)
           // Any other probe failure leaves cloud state unverified: keep the handle.
           return

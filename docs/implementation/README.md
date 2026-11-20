@@ -1,11 +1,11 @@
-# Gemini 4 Adapter（dsh-vertex-argon）实现架构与模块边界（v2.2.2）
+# Gemini 4 Adapter（dsh-vertex-argon）实现架构与模块边界（v2.3.0）
 
 本目录描述当前本地工程；实现合同见 [DECISIONS.md](<DECISIONS.md>)，本轮验证与历史实测分开记录于 [STATUS.md](<STATUS.md>)。文档更新不表示插件已安装、已发布或新增了云端验证。
 
 ## 1. 插件与宿主边界
 
 - 展示品牌名 **Gemini 4 Adapter**（诊断面板显示为 **Gemini 4 诊断** / **Gemini 4 diagnostics**）；底层 npm 包名保持 `dsh-vertex-argon`，Host 注册名 `local-vertex-argon`，Provider ID `google-vertex-argon`。
-- 当前工程版本 `2.2.2`，支持 DSH `>=0.2.0-rc.2`；Node.js `^22.19.0 || >=24.0.0`。元数据以 [package.json](<../../package.json>) 为准。
+- 当前工程版本 `2.3.0`，支持 DSH `>=0.2.0-rc.2`；Node.js `^22.19.0 || >=24.0.0`。元数据以 [package.json](<../../package.json>) 为准。
 - 仅使用宿主公开的 `llm`、`storageDomain`、`typert`、`settings`、`tools` 与 Web Client Slots，不修改宿主源码、已安装归档或 profile。
 - `installGemini4PiAiPatch` 同时守护原生 `google` / `google-vertex` 的 `PiAiAdapter.prototype.prepareCall` / `stream`、`piProvider.stream` / `streamSimple` 与已声明 Gemini 4 模型的 `thinkingLevelMap`；不引入隐式辅助模型请求。
 
@@ -38,13 +38,13 @@ flowchart TD
 
 ### 入口与配置
 
-- [index.js](<../../index.js>)：13 项 `volatile` 配置、存储域、Typert 服务、请求关联事件与延迟加载工具注册。配置完整表见 [主文档](<../../README.md#完整配置13-项>)。
-- [client.js](<../../client.js>)：设置页面、右侧栏/会话主视图/回复快捷入口，以及 **Debug / Operations** 两个工作区；不挂载范围聚合仪表盘。
+- [index.js](<../../index.js>)：14 项 `volatile` 配置（含 `interactionsToolRetrieval`）、存储域、Typert 服务、请求关联事件与延迟加载工具注册。配置完整表见 [主文档](<../../README.md#完整配置14-项>)。
+- [client.js](<../../client.js>)：设置页面（含 Interactions 工具按需检索三档控制与 14 项默认重置）、右侧栏/会话主视图/回复快捷入口，以及 **Debug / Operations** 两个工作区；不挂载范围聚合仪表盘。
 - [runtime.js](<../../runtime.js>)：从现有宿主解析 `@deepseek-ai/*`、`@earendil-works/pi-ai`、`@google/genai`、`zod` 等依赖。
 
 ### 路由、连接与服务层级
 
-- [adapter.js](<../../adapter.js>)：八模型注册、配置快照与缓存失效、凭据解析和原生适配器补丁。Gemini API Key 与 Vertex Key 各自独立解析，互不回退。
+- [adapter.js](<../../adapter.js>)：八模型注册、配置快照与缓存失效（纳入 `interactionsToolRetrieval`）、凭据解析、`supportsInteractionsToolRetrieval` 能力门控（在 Gemini API + Interactions + Argon / Hydrogen 下声明 `toolUpdate: 'addition-only'`）和原生适配器补丁。Gemini API Key 与 Vertex Key 各自独立解析，互不回退。
 - [google-connection.js](<../../google-connection.js>)：创建 `GoogleGenAI` 与 Interactions 传输；显式 Key 覆盖、环境键与自定义 `baseURL` 支持官方通道隔离。
 - [service-level.js](<../../service-level.js>)：既有服务层级/PayGo 能力矩阵与真实回执提取；两条官方通道各自使用自己的矩阵，不互相沿用。
 
@@ -55,10 +55,10 @@ flowchart TD
 
 ### Interactions 与后台恢复
 
-- [interactions.js](<../../interactions.js>)：流式状态机、后台轮询与 `last_event_id` 断点续读。
-- [interaction-adapter.js](<../../interaction-adapter.js>)：适配请求、诊断、基本 Token 用量和原始响应捕获。
-- [interactions-input.js](<../../interactions-input.js>) / [interaction-image.js](<../../interaction-image.js>)：历史消息、工具、图片等请求转换；删除诊断模态账本不等于删除多模态输入支持。
-- [interaction-transport.js](<../../interaction-transport.js>)：`create` / `get` / `cancel` 传输与 SSE 解析。
+- [interactions.js](<../../interactions.js>)：流式状态机、逐跳分阶段滑动看门狗（`180s/180s/180s/120s`）、后台轮询、`last_event_id` 断点续读，以及 `tool_search_call` / `tool_search_result` / `processing_call` / `processing_result` 与多模态内容块原样带签名回放。
+- [interaction-adapter.js](<../../interaction-adapter.js>)：适配请求、无状态（`store: false && !background`）`create` 建连阶段重试（`retry-initial`，收到 HTTP `200 text/event-stream` 后不再重发）、`validated` → `auto` 400 单次退避（`retry-original`）、受控原始错误响应捕获、诊断与基本 Token 用量。
+- [interactions-input.js](<../../interactions-input.js>) / [interaction-image.js](<../../interaction-image.js>)：历史消息、DSH 本地 `function` 工具（含宿主桥接 `mcp__*` 函数）与服务端 Tool Retrieval（`off` / `explicit` / `auto`，发包前拒绝原生远端 `mcp_server` 与客户端 `execution: "client"` `tool_search`，对非支持模型/通道及显式 `/v1/interactions` 网关剥离 `deferLoading`，过滤 deferred 工具 `developer` `tool-addition` 避免污染 `system_instruction`）、图片等请求转换；删除诊断模态账本不等于删除多模态输入支持。
+- [interaction-transport.js](<../../interaction-transport.js>)：`create` / `get` / `cancel` 传输、SSE 解析、非 2xx 有界 JSON 白名单安全错误提取（不回显原始 `error.message`）与 `RetryInfo` 延时解析。
 - [interaction-state.js](<../../interaction-state.js>) / [interaction-lifecycle.js](<../../interaction-lifecycle.js>)：`creating` 预写锁、恢复状态、轮询生命周期。
 - [interaction-query.js](<../../interaction-query.js>)：已知 Cloud Interaction ID 的只读单次 `GET`，仅 Google/Vertex。
 

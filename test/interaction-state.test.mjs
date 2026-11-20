@@ -504,3 +504,133 @@ test('a terminal error frame racing a local abort never cancels or leaves cancel
   assert.equal(rows.size, 0)
 })
 
+test('cold resume GET returning 404 throws without duplicate POST and finish() clears the vanished handle', async () => {
+  const { hub, identity, rows } = fixture()
+  await hub.put(identity, { stage: 'accepted', interactionId: 'vanished-id', lastEventId: 'e9' })
+  let posts = 0, gets = 0, exit
+  const base = {
+    create: async () => { posts++; assert.fail('must not resend POST on cold resume 404') },
+    get: async (id, opts) => {
+      gets++
+      assert.equal(id, 'vanished-id')
+      assert.equal(opts.stream, true)
+      throw Object.assign(new Error('HTTP 404 NOT_FOUND'), { status: 404, phase: 'fetch' })
+    },
+    cancel: async () => assert.fail('must not cancel vanished 404 task'),
+  }
+  const durable = durableInteractionTransport(base, hub, identity)
+  const chunks = await collect(streamInteractions(
+    { provider: 'p', model: 'gemini-4-argon-google', maxTokens: 64, messages: [{ role: 'user', content: [{ type: 'text', text: 'fixture' }] }] },
+    { route: 'google-generative-ai', background: true, store: true, transport: durable, reconnectBackoff: { initialDelayMs: 0 }, onExit: r => { exit = r } },
+  ))
+  assert.equal(posts, 0)
+  assert.equal(gets, 1)
+  assert.equal(chunks.at(-1).reason.kind, 'error')
+  assert.equal(chunks.at(-1).reason.failure.status, 404)
+  await durable.finish({ complete: false, reason: exit })
+  assert.equal(rows.size, 0)
+})
+
+test('all three non-streaming background GET probes enforce 16 MiB maxResponseBytes and oversize retains handle', async () => {
+  const MAX = 16 * 1024 * 1024
+  // 1) Zombie lock reconcile probe passes maxResponseBytes and oversize retains lock.
+  {
+    const { hub, identity, rows } = fixture()
+    await hub.put(identity, { stage: 'accepted', interactionId: 'zombie-big', lastEventId: null })
+    const other = hub.identity({ sessionId: 'session', endpoint: 'https://example.test/interactions', principalHash: '1'.repeat(64), body: { input: 'DIFFERENT' } })
+    const seen = []
+    const base = {
+      create: async () => assert.fail('should remain locked'),
+      get: async (_id, opts) => { seen.push(opts); throw Object.assign(new Error('Response exceeded 16 MiB limit'), { code: 'RESPONSE_TOO_LARGE' }) },
+    }
+    await assert.rejects(durableInteractionTransport(base, hub, other).create({ stream: true }), /outstanding remote task/)
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0].stream, false)
+    assert.equal(seen[0].maxResponseBytes, MAX)
+    assert.equal(rows.size, 1)
+  }
+  // 2) Cancel confirmation poll passes maxResponseBytes.
+  {
+    const { hub, identity, rows } = fixture()
+    await hub.put(identity, { stage: 'accepted', interactionId: 'cancel-big', lastEventId: null })
+    const seen = []
+    const base = {
+      cancel: async () => ({ status: 'in_progress' }),
+      get: async (_id, opts) => { seen.push(opts); return { status: 'cancelled' } },
+    }
+    const t = durableInteractionTransport(base, hub, identity)
+    await t.cancel('cancel-big')
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0].maxResponseBytes, MAX)
+    assert.equal(rows.size, 0)
+  }
+  // 3) finish() error reconcile probe passes maxResponseBytes and oversize retains handle.
+  {
+    const { hub, identity, rows } = fixture()
+    await hub.put(identity, { stage: 'accepted', interactionId: 'err-big', lastEventId: null })
+    const seen = []
+    const base = {
+      get: async (_id, opts) => { seen.push(opts); throw Object.assign(new Error('Response exceeded 16 MiB limit'), { code: 'RESPONSE_TOO_LARGE' }) },
+    }
+    const t = durableInteractionTransport(base, hub, identity)
+    await t.finish({ complete: false, reason: 'remote-error' })
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0].stream, false)
+    assert.equal(seen[0].maxResponseBytes, MAX)
+    assert.equal(rows.size, 1)
+  }
+})
+
+test('interaction state hub supports storageDomain detach, failure recovery, close, and re-attach', async () => {
+  const makeDomain = () => {
+    const rows = new Map()
+    let closed = 0
+    return {
+      rows,
+      closed: () => closed,
+      domain: {
+        table: () => ({
+          get: k => rows.get(k),
+          get size() { return rows.size },
+          entries: () => rows.entries(),
+          put: async (k, v) => { interactionStateDomain.tables.tasks.valueSchema.parse(v); rows.set(k, v) },
+          delete: async k => rows.delete(k),
+        }),
+        close: async () => { closed++ },
+      },
+    }
+  }
+  const hub = createInteractionStateHub()
+  const a = makeDomain(), b = makeDomain(), c = makeDomain()
+
+  // Recover after initial fail() via attach().
+  hub.fail()
+  assert.throws(() => hub.requireReady(), /unavailable/)
+  hub.attach(a.domain)
+  const idA = hub.identity({ sessionId: 's', endpoint: 'https://example.test/interactions', principalHash: 'a'.repeat(64), body: { x: 1 } })
+  await hub.put(idA, { stage: 'accepted', interactionId: 'r-a' })
+  assert.equal(a.rows.size, 1)
+
+  // Detaching domain A closes A, rejects storage operations while detached, and allows re-attaching domain B.
+  await hub.detach(a.domain)
+  assert.equal(a.closed(), 1)
+  assert.throws(() => hub.requireReady(), /unavailable/)
+  // Detaching a stale/unrelated domain is a no-op.
+  await hub.detach(a.domain)
+  assert.equal(a.closed(), 1)
+
+  hub.attach(b.domain)
+  const idB = hub.identity({ sessionId: 's', endpoint: 'https://example.test/interactions', principalHash: 'b'.repeat(64), body: { x: 2 } })
+  await hub.put(idB, { stage: 'accepted', interactionId: 'r-b' })
+  assert.equal(b.rows.size, 1)
+
+  // Closing and then re-attaching domain C also resets closed/failure flags cleanly.
+  await hub.close()
+  assert.equal(b.closed(), 1)
+  assert.throws(() => hub.requireReady(), /unavailable/)
+  hub.attach(c.domain)
+  hub.requireReady()
+  await hub.close()
+  assert.equal(c.closed(), 1)
+})
+

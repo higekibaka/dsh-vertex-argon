@@ -34,10 +34,37 @@ export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, get
     const route = isGoogleApiModel(options.model) ? 'google-generative-ai' : 'google-vertex'
     const requestController = new AbortController()
     const signal = options.signal ? AbortSignal.any([options.signal, requestController.signal]) : requestController.signal
-    let tracker, durable, claim, complete = false, usage, firstInput, firstCached, hopIndex = 0
+    let tracker, durable, claim, logicalIdentity, complete = false, usage, firstInput, firstCached, hopIndex = 0, activeHopIndex = 0
     let finalOutcome = 'incomplete', finalError, exitReason = 'consumer-abandoned'
     let originalPromptClosed = false, firstModelOutputStopped = false, pendingBackoffMs = 0
+    let nextCreateTrigger = 'interaction-create'
     const modelOutputs = new Set()
+    const resetObservedUsage = () => {
+      usage = undefined
+      firstInput = undefined
+      firstCached = undefined
+      originalPromptClosed = false
+      firstModelOutputStopped = false
+      modelOutputs.clear()
+    }
+    const captureObservedSnapshot = () => ({
+      firstInput,
+      firstCached,
+      firstModelOutputStopped,
+      originalPromptClosed,
+      modelOutputs: [...modelOutputs],
+      committedUsage: usage ? { ...usage } : undefined,
+    })
+    const restoreObservedSnapshot = snap => {
+      if (!snap) return
+      firstInput = snap.firstInput
+      firstCached = snap.firstCached
+      firstModelOutputStopped = snap.firstModelOutputStopped
+      originalPromptClosed = snap.originalPromptClosed
+      modelOutputs.clear()
+      for (const idx of snap.modelOutputs) modelOutputs.add(idx)
+      usage = snap.committedUsage ? { ...snap.committedUsage } : undefined
+    }
     const observed = event => {
       const type = event.event_type ?? event.type
       if (type === 'step.start' && event.step?.type === 'model_output') {
@@ -105,14 +132,31 @@ export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, get
       if (cfg.interactionsBackground) taskHub?.requireReady()
       if (cfg.interactionsBackground && !taskHub) throw new Error('Background recovery storage is not configured.')
       const routes = getRoutes(cfg)
-      const connection = await createGoogleConnection(GoogleGenAI, { route, resolveSecret, apiKeyEnv: routes.googleApiKeyEnv, baseURL: route === 'google-vertex' ? routes.vertexBaseUrl : routes.googleBaseUrl, onResponse: receipt => { if (route === 'google-generative-ai' && receipt.operation === 'create') tracker?.recordServiceTier(receipt.serviceTier, 'response-header') } })
+      const connection = await createGoogleConnection(GoogleGenAI, {
+        route,
+        resolveSecret,
+        apiKeyEnv: routes.googleApiKeyEnv,
+        baseURL: route === 'google-vertex' ? routes.vertexBaseUrl : routes.googleBaseUrl,
+        onResponse: receipt => { if (route === 'google-generative-ai' && receipt.operation === 'create') tracker?.recordServiceTier(receipt.serviceTier, 'response-header') },
+        onErrorBody: (_status, parsedJson, meta) => {
+          if (
+            cfg.retainRawResponses &&
+            activeHopIndex > 0 &&
+            meta?.stream === true &&
+            (meta?.operation === 'create' || meta?.operation === 'get')
+          ) {
+            tracker?.observeResponse('interaction-error', activeHopIndex, parsedJson)
+          }
+        },
+      })
       tracker = createArgonDiagnosticTracker({ route, model: options.model, protocol: 'interactions', background: cfg.interactionsBackground, apiVersion: connection.apiVersion, thinkingLevel: controls.reasoning.toUpperCase(), longDecode: controls.maxTokens > 65536, maxTokens: controls.maxTokens, sessionId: options.sessionId, requestedServiceTier: servicePolicy.tier }, recordDiagnostic, { responseHub, retainRawResponses: cfg.retainRawResponses })
       tracker?.setApiVersion(connection.apiVersion)
-      const observe = async (operation, args, trigger) => {
-        // A reconnect hint observed by the stream belongs to the next resume hop.
-        const backoffDelayMs = trigger === 'interaction-create' ? 0 : pendingBackoffMs
+      const observe = async (operation, args, trigger, hopSignal) => {
+        // A reconnect hint observed by the stream belongs to the next resume or retry hop.
+        const backoffDelayMs = trigger === 'interaction-create' || trigger === 'retry-original' ? 0 : pendingBackoffMs
         pendingBackoffMs = 0
-        const hop = tracker?.beginHop({ hopIndex: ++hopIndex, trigger, usedContinuationToken: trigger !== 'interaction-create', backoffDelayMs, body: operation === 'create' ? JSON.stringify(args[0]) : undefined })
+        const currentHop = ++hopIndex
+        const hop = tracker?.beginHop({ hopIndex: currentHop, trigger, usedContinuationToken: trigger === 'interaction-resume', backoffDelayMs, body: operation === 'create' ? JSON.stringify(args[0]) : undefined })
         let status, hopUsage
         const recordHopUsage = response => {
           const u = response?.interaction?.usage ?? response?.usage ?? response?.metadata?.total_usage
@@ -126,13 +170,20 @@ export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, get
             totalTokens: hopUsage.total_tokens,
           })
         }
+        activeHopIndex = currentHop
         try {
           const response = await (durable ?? connection.transport)[operation](...args)
-          if (!response?.[Symbol.asyncIterator]) { tracker?.observeResponse('interaction-object', hopIndex, response); recordHopUsage(response); hop?.finish({ finishReason: terminalStates.has(response?.status) ? response.status.toUpperCase() : undefined }); return response }
+          if (!response?.[Symbol.asyncIterator]) {
+            if (activeHopIndex === currentHop) activeHopIndex = 0
+            tracker?.observeResponse('interaction-object', currentHop, response)
+            recordHopUsage(response)
+            hop?.finish({ finishReason: terminalStates.has(response?.status) ? response.status.toUpperCase() : undefined })
+            return response
+          }
           return (async function* () {
             try {
               for await (const event of response) {
-                tracker?.observeResponse('interaction-event', hopIndex, event)
+                tracker?.observeResponse('interaction-event', currentHop, event)
                 recordHopUsage(event)
                 // Dedicated 2026-05-20 terminal lifecycle events imply their own state.
                 const eventType = event.event_type ?? event.type
@@ -142,21 +193,49 @@ export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, get
                 yield event
               }
               hop?.finish({ finishReason: terminalStates.has(status) ? status.toUpperCase() : undefined })
-            } catch (error) { hop?.finish({ error, aborted: signal.aborted }); throw error }
-            finally { hop?.finish({ aborted: signal.aborted, finishReason: terminalStates.has(status) ? status.toUpperCase() : undefined }) }
+            } catch (error) {
+              const hopError = !signal.aborted && hopSignal?.aborted && hopSignal.reason?.code === 'STREAM_PHASE_TIMEOUT' ? hopSignal.reason : error
+              hop?.finish({ error: hopError, aborted: signal.aborted })
+              throw error
+            }
+            finally {
+              if (activeHopIndex === currentHop) activeHopIndex = 0
+              const hopError = !terminalStates.has(status) && hopSignal?.aborted && !signal.aborted && hopSignal.reason?.code === 'STREAM_PHASE_TIMEOUT' ? hopSignal.reason : undefined
+              hop?.finish({ ...(hopError ? { error: hopError } : {}), aborted: signal.aborted, finishReason: terminalStates.has(status) ? status.toUpperCase() : undefined })
+            }
           })()
-        } catch (error) { hop?.finish({ error, aborted: signal.aborted }); throw error }
+        } catch (error) {
+          if (activeHopIndex === currentHop) activeHopIndex = 0
+          const hopError = !signal.aborted && hopSignal?.aborted && hopSignal.reason?.code === 'STREAM_PHASE_TIMEOUT' ? hopSignal.reason : error
+          hop?.finish({ error: hopError, aborted: signal.aborted })
+          throw error
+        }
       }
       const transport = {
         async create(body, requestOptions) {
+          const trigger = nextCreateTrigger
+          nextCreateTrigger = 'interaction-create'
+          if (trigger !== 'interaction-create') resetObservedUsage()
+          const hopSignal = requestOptions?.signal ? AbortSignal.any([signal, requestOptions.signal]) : signal
           if (cfg.interactionsBackground) {
-            const identity = taskHub.identity({ sessionId: options.sessionId, purpose: options.purpose, endpoint: connection.endpoint, principalHash: connection.principalHash, body })
-            claim = taskHub.claim(identity.key, requestController, identity.sessionHash)
-            durable = durableInteractionTransport(connection.transport, taskHub, identity, { signal })
+            // Pin durable logical identity to the initial request body so a
+            // validated -> auto fallback shares the same recovery handle on cold restart.
+            if (!logicalIdentity) {
+              logicalIdentity = taskHub.identity({ sessionId: options.sessionId, purpose: options.purpose, endpoint: connection.endpoint, principalHash: connection.principalHash, body })
+            }
+            if (!claim) {
+              claim = taskHub.claim(logicalIdentity.key, requestController, logicalIdentity.sessionHash)
+            }
+            if (!durable) {
+              durable = durableInteractionTransport(connection.transport, taskHub, logicalIdentity, { signal })
+            }
           }
-          return observe('create', [body, { ...requestOptions, signal }], 'interaction-create')
+          return observe('create', [body, { ...requestOptions, signal: hopSignal }], trigger, hopSignal)
         },
-        get(id, requestOptions) { return observe('get', [id, { ...requestOptions, signal }], 'interaction-resume') },
+        get(id, requestOptions) {
+          const hopSignal = requestOptions?.signal ? AbortSignal.any([signal, requestOptions.signal]) : signal
+          return observe('get', [id, { ...requestOptions, signal: hopSignal }], 'interaction-resume', hopSignal)
+        },
         cancel(id, requestOptions) { return (durable ?? connection.transport).cancel(id, requestOptions) },
       }
       const resolveImage = async block => {
@@ -174,7 +253,7 @@ export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, get
         return block
       }) }))
       const { streamInteractions } = await import('./interactions.js')
-      for await (const chunk of streamInteractions({ ...options, maxTokens: controls.maxTokens, messages, signal }, { route, upstreamModel, ...controls, longDecode: cfg.longDecode, serviceTier: route === 'google-generative-ai' ? servicePolicy.tier : undefined, background: cfg.interactionsBackground, store: cfg.allowInteractionStorage, transport, resolveImage, structuredOutput, onEvent: observed, onReconnectDelay: ms => { pendingBackoffMs = ms }, onTerminal: () => { complete = true }, onExit: reason => { exitReason = reason } })) {
+      for await (const chunk of streamInteractions({ ...options, maxTokens: controls.maxTokens, messages, signal }, { route, upstreamModel, apiVersion: connection.apiVersion, ...controls, longDecode: cfg.longDecode, interactionsToolRetrieval: cfg.interactionsToolRetrieval, ...(options.phaseTimeouts ? { phaseTimeouts: options.phaseTimeouts } : {}), serviceTier: route === 'google-generative-ai' ? servicePolicy.tier : undefined, background: cfg.interactionsBackground, store: cfg.allowInteractionStorage, transport, resolveImage, structuredOutput, onEvent: observed, onCaptureSnapshot: captureObservedSnapshot, onRestoreSnapshot: restoreObservedSnapshot, onResetObserver: resetObservedUsage, onReconnectDelay: ms => { pendingBackoffMs = ms }, onCreateRetry: ({ trigger }) => { nextCreateTrigger = trigger }, onTerminal: () => { complete = true }, onExit: reason => { exitReason = reason } })) {
         if (chunk.type === 'usage') {
           recordUsage()
           // Only an observed first-hop input watermark can be normalized for the

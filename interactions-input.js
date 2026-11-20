@@ -1,5 +1,22 @@
 import { createHash } from 'node:crypto'
 export const INTERACTIONS_REPLAY_API = 'google-interactions-v1'
+export const TOOL_RETRIEVAL_MODES = Object.freeze(['off', 'explicit', 'auto'])
+export const DEFAULT_TOOL_RETRIEVAL_MODE = 'explicit'
+export const CORE_RESIDENT_TOOLS = Object.freeze([
+  'bash', 'read', 'write', 'edit', 'apply_patch', 'glob', 'grep', 'ls',
+  'view_image', 'todo_write', 'ask_user', 'subagent', 'task', 'skill',
+  'run_code', 'web_search', 'web_fetch',
+])
+const CORE_RESIDENT_TOOL_SET = new Set(CORE_RESIDENT_TOOLS)
+const TOOL_RETRIEVAL_FAMILIES = new Set(['argon', 'hydrogen'])
+const ALLOWED_TOOL_CHOICES = new Set(['auto', 'any', 'none', 'validated'])
+const ALLOWED_REPLAY_STEP_TYPES = new Set([
+  'thought', 'model_output', 'function_call',
+  'tool_search_call', 'tool_search_result',
+  'processing_call', 'processing_result',
+])
+const MEDIA_CONTENT_TYPES = new Set(['image', 'audio', 'document', 'video'])
+
 export const OFFICIAL_GEMINI4_MODEL_RE = /^(?:models\/)?(gemini-4-(argon|carbon|hydrogen|neon))(-google)?$/i
 export function resolveOfficialGemini4Model(modelId) {
   if (typeof modelId !== 'string') return null
@@ -15,6 +32,15 @@ export function resolveOfficialGemini4Model(modelId) {
     isGoogleApi,
     supportsXhigh: family === 'hydrogen' || family === 'neon',
   }
+}
+
+export function supportsInteractionsToolRetrieval({ model, route, protocol, mode = DEFAULT_TOOL_RETRIEVAL_MODE, apiVersion } = {}) {
+  if (mode !== 'explicit' && mode !== 'auto') return false
+  if (protocol !== 'interactions') return false
+  if (route !== 'google-generative-ai') return false
+  if (typeof apiVersion === 'string' && apiVersion.toLowerCase() === 'v1') return false
+  const official = resolveOfficialGemini4Model(model)
+  return Boolean(official && TOOL_RETRIEVAL_FAMILIES.has(official.family))
 }
 export function defaultReasoningForModel(modelId) {
   const official = resolveOfficialGemini4Model(modelId)
@@ -80,12 +106,288 @@ export function scrubPollutedAssistantText(text) {
   }
   return next
 }
+function isPlainObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const proto = Object.getPrototypeOf(value)
+  return proto === null || proto === Object.prototype
+}
+function isValidReplayContentBlock(block) {
+  if (!isPlainObject(block) || typeof block.type !== 'string') return false
+  if (block.type === 'text') return typeof block.text === 'string'
+  if (MEDIA_CONTENT_TYPES.has(block.type)) {
+    const hasData = block.data !== undefined
+    const hasUri = block.uri !== undefined
+    if (!hasData && !hasUri) return false
+    if (hasData && (typeof block.data !== 'string' || !block.data.length)) return false
+    if (hasUri && (typeof block.uri !== 'string' || !block.uri.length)) return false
+    if (block.mime_type !== undefined && (typeof block.mime_type !== 'string' || !block.mime_type.length)) return false
+    return true
+  }
+  return false
+}
+function isValidReplayStep(step) {
+  if (!isPlainObject(step) || !ALLOWED_REPLAY_STEP_TYPES.has(step.type)) return false
+  if (step.signature !== undefined && typeof step.signature !== 'string') return false
+  if (step.type === 'tool_search_call' || step.type === 'processing_call') {
+    if (typeof step.id !== 'string' || !step.id.length) return false
+    if (step.type === 'tool_search_call' && step.arguments !== undefined) {
+      if (!isPlainObject(step.arguments)) return false
+      if (step.arguments.function_names !== undefined && (!Array.isArray(step.arguments.function_names) || step.arguments.function_names.some(n => typeof n !== 'string'))) return false
+    }
+    return true
+  }
+  if (step.type === 'tool_search_result' || step.type === 'processing_result') {
+    if (typeof step.call_id !== 'string' || !step.call_id.length) return false
+    if (step.type === 'tool_search_result' && step.result !== undefined) {
+      if (!Array.isArray(step.result) || step.result.some(item => !isPlainObject(item))) return false
+    }
+    return true
+  }
+  if (step.type === 'model_output' && step.content !== undefined) {
+    if (!Array.isArray(step.content) || step.content.some(block => !isValidReplayContentBlock(block))) return false
+  }
+  if (step.type === 'thought' && step.summary !== undefined) {
+    if (!Array.isArray(step.summary) || step.summary.some(block => !isValidReplayContentBlock(block))) return false
+  }
+  return true
+}
+function normalizeToolChoiceMode(mode) {
+  if (typeof mode !== 'string') return null
+  if (mode === 'required') return 'any'
+  return ALLOWED_TOOL_CHOICES.has(mode) ? mode : null
+}
+function normalizeToolChoice(toolChoice) {
+  if (toolChoice === undefined) return undefined
+  if (typeof toolChoice === 'string') {
+    const mode = normalizeToolChoiceMode(toolChoice)
+    if (mode) return mode
+    throw new Error('Invalid Interactions toolChoice option.')
+  }
+  if (isPlainObject(toolChoice)) {
+    if (Object.hasOwn(toolChoice, 'allowed_tools')) {
+      const allowed = toolChoice.allowed_tools
+      if (isPlainObject(allowed)) {
+        const cloned = copy(toolChoice)
+        if (allowed.mode !== undefined) {
+          const mode = normalizeToolChoiceMode(allowed.mode)
+          if (!mode) throw new Error('Invalid Interactions toolChoice.allowed_tools.mode option.')
+          cloned.allowed_tools.mode = mode
+        }
+        if (allowed.tools !== undefined && (!Array.isArray(allowed.tools) || allowed.tools.some(name => typeof name !== 'string' || !name))) {
+          throw new Error('Invalid Interactions toolChoice.allowed_tools.tools option.')
+        }
+        return cloned
+      }
+      if (Array.isArray(allowed) && allowed.every(name => typeof name === 'string' && name.length > 0)) {
+        return copy(toolChoice)
+      }
+      throw new Error('Invalid Interactions toolChoice option.')
+    }
+    if ((toolChoice.type === 'function' || toolChoice.type === 'tool') && typeof toolChoice.name === 'string' && toolChoice.name.trim().length > 0) {
+      return { allowed_tools: { mode: 'any', tools: [toolChoice.name] } }
+    }
+    if (toolChoice.type === 'function' && isPlainObject(toolChoice.function) && typeof toolChoice.function.name === 'string' && toolChoice.function.name.trim().length > 0) {
+      return { allowed_tools: { mode: 'any', tools: [toolChoice.function.name] } }
+    }
+    if (typeof toolChoice.toolName === 'string' && toolChoice.toolName.trim().length > 0) {
+      return { allowed_tools: { mode: 'any', tools: [toolChoice.toolName] } }
+    }
+  }
+  throw new Error('Invalid Interactions toolChoice option.')
+}
+function canonicalJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return '[' + value.map(canonicalJson).join(',') + ']'
+  const keys = Object.keys(value).sort()
+  return '{' + keys.filter(k => value[k] !== undefined).map(k => JSON.stringify(k) + ':' + canonicalJson(value[k])).join(',') + '}'
+}
+function isConsistentNativeReplaySteps(steps, visibleCalls) {
+  if (!Array.isArray(steps)) return false
+  const seenToolSearchCalls = new Set()
+  const seenProcessingCalls = new Set()
+  const replayFnCalls = []
+  for (const step of steps) {
+    if (!isValidReplayStep(step)) return false
+    if (step.type === 'tool_search_call') {
+      seenToolSearchCalls.add(step.id)
+    } else if (step.type === 'tool_search_result') {
+      if (!seenToolSearchCalls.has(step.call_id)) return false
+    } else if (step.type === 'processing_call') {
+      seenProcessingCalls.add(step.id)
+    } else if (step.type === 'processing_result') {
+      if (!seenProcessingCalls.has(step.call_id)) return false
+    } else if (step.type === 'function_call') {
+      replayFnCalls.push(step)
+    }
+  }
+  if (replayFnCalls.length !== visibleCalls.length) return false
+  for (let i = 0; i < visibleCalls.length; i++) {
+    const rc = replayFnCalls[i]
+    const vc = visibleCalls[i]
+    const rcId = rc.id ?? rc.call_id
+    if (typeof rcId !== 'string' || !rcId || rcId !== vc.id) return false
+    if (typeof rc.name !== 'string' || !rc.name || rc.name !== vc.name) return false
+    let rcArgs, vcArgs
+    try {
+      rcArgs = argsOf(rc.arguments ?? {})
+      vcArgs = argsOf(vc.arguments ?? {})
+    } catch {
+      return false
+    }
+    if (canonicalJson(rcArgs) !== canonicalJson(vcArgs)) return false
+  }
+  return true
+}
+function prepareInteractionTools(rawTools, { model, route, retrievalMode, effectiveToolChoice, apiVersion }) {
+  const deferredToolNames = new Set()
+  if (!rawTools?.length) return { tools: undefined, deferredToolNames }
+  let toolSearchCount = 0
+  let hasExplicitServerToolSearch = false
+  const nonSearchTools = []
+  for (const tool of rawTools) {
+    if (!tool || typeof tool !== 'object' || Array.isArray(tool)) {
+      throw new Error('Invalid Interactions tool declaration.')
+    }
+    if (tool.type === 'tool_search') {
+      toolSearchCount++
+      if (toolSearchCount > 1) throw new Error('Interactions request allows at most one tool_search tool.')
+      if (tool.execution === 'client') {
+        throw new Error('Client-side tool_search execution is not supported; only server-side tool_search is supported.')
+      }
+      if (tool.execution !== undefined && tool.execution !== 'server') {
+        throw new Error('Invalid tool_search execution mode.')
+      }
+      const extraKeys = Object.keys(tool).filter(k => k !== 'type' && k !== 'execution' && tool[k] !== undefined)
+      if (extraKeys.length > 0) {
+        throw new Error('Server-side tool_search must not specify name, description, parameters, or other client fields.')
+      }
+      hasExplicitServerToolSearch = true
+      continue
+    }
+    if (tool.type === 'mcp_server') {
+      throw new Error('Remote mcp_server tools are not supported in Interactions; declare local function tools instead.')
+    }
+    nonSearchTools.push(tool)
+  }
+  const disablesServerRetrieval =
+    effectiveToolChoice === 'auto' ||
+    effectiveToolChoice === 'none' ||
+    (isPlainObject(effectiveToolChoice) && ['auto', 'none'].includes(effectiveToolChoice.allowed_tools?.mode))
+  const pinnedTools = new Set(
+    isPlainObject(effectiveToolChoice)
+      ? (Array.isArray(effectiveToolChoice.allowed_tools)
+          ? effectiveToolChoice.allowed_tools
+          : Array.isArray(effectiveToolChoice.allowed_tools?.tools) ? effectiveToolChoice.allowed_tools.tools : [])
+      : [],
+  )
+  const serverRetrievalEnabled = !disablesServerRetrieval && supportsInteractionsToolRetrieval({
+    model,
+    route,
+    protocol: 'interactions',
+    mode: retrievalMode,
+    apiVersion,
+  })
+  const totalTools = nonSearchTools.length
+  const serializedNonSearch = nonSearchTools.map(tool => {
+    const explicitDefer = tool.deferLoading !== undefined ? tool.deferLoading : tool.defer_loading
+    const isPinned = typeof tool.name === 'string' && pinnedTools.has(tool.name)
+    const shouldDefer = serverRetrievalEnabled && !isPinned && (
+      retrievalMode === 'auto'
+        ? (explicitDefer === true || (explicitDefer !== false && totalTools >= 2 && !CORE_RESIDENT_TOOL_SET.has(tool.name)))
+        : explicitDefer === true
+    )
+    const rawShort = tool.shortDescription ?? tool.short_description
+    const shortDescription = shouldDefer && typeof rawShort === 'string' && rawShort.trim().length > 0 ? rawShort : undefined
+    if (shouldDefer && typeof tool.name === 'string') deferredToolNames.add(tool.name)
+    return {
+      type: 'function',
+      name: tool.name,
+      description: tool.description,
+      parameters: copy(tool.parameters),
+      ...(shouldDefer ? { defer_loading: true } : {}),
+      ...(shortDescription !== undefined ? { short_description: shortDescription } : {}),
+    }
+  })
+  if (deferredToolNames.size > 0 || (hasExplicitServerToolSearch && serverRetrievalEnabled)) {
+    return { tools: [{ type: 'tool_search' }, ...serializedNonSearch], deferredToolNames }
+  }
+  return { tools: serializedNonSearch.length ? serializedNonSearch : undefined, deferredToolNames }
+}
+function degradeToolSearchInputSteps(input) {
+  if (!Array.isArray(input) || !input.some(s => s?.type === 'tool_search_call' || s?.type === 'tool_search_result')) return input
+  const degraded = []
+  const degradedCalls = new Map()
+  let idx = 0
+  while (idx < input.length) {
+    const step = input[idx]
+    if (step?.type === 'user_input') {
+      degraded.push(step)
+      idx++
+      continue
+    }
+    if (step?.type === 'function_result') {
+      const header = degradedCalls.get(step.call_id)
+      if (header !== undefined) {
+        degradedCalls.delete(step.call_id)
+        const resultParts = Array.isArray(step.result) ? step.result : [{ type: 'text', text: '[Tool completed without output.]' }]
+        degraded.push({
+          type: 'user_input',
+          content: [{ type: 'text', text: header + '\n[Result of previously executed tool call ' + step.call_id + (step.is_error ? '; error' : '') + ']' }, ...resultParts],
+        })
+      } else {
+        degraded.push(step)
+      }
+      idx++
+      continue
+    }
+    const turnStart = idx
+    while (idx < input.length && input[idx]?.type !== 'user_input' && input[idx]?.type !== 'function_result') idx++
+    const turnSteps = input.slice(turnStart, idx)
+    if (!turnSteps.some(s => s?.type === 'tool_search_call' || s?.type === 'tool_search_result')) {
+      degraded.push(...turnSteps)
+      continue
+    }
+    const textContent = []
+    for (const s of turnSteps) {
+      if (s?.type === 'model_output' && Array.isArray(s.content)) {
+        for (const block of s.content) if (block?.type === 'text' && typeof block.text === 'string' && block.text.length > 0) textContent.push({ type: 'text', text: block.text })
+      } else if (s?.type === 'function_call') {
+        const callId = s.id ?? s.call_id
+        if (callId) degradedCalls.set(callId, '[Previously executed tool ' + s.name + '; call ' + callId + ']\n' + JSON.stringify(s.arguments ?? {}))
+      }
+    }
+    degraded.push({ type: 'model_output', content: textContent.length ? textContent : [{ type: 'text', text: '[Previous model reasoning omitted.]' }] })
+  }
+  return degraded
+}
+export function downgradeToolChoiceToAuto(requestBody) {
+  const next = copy(requestBody)
+  if (!isPlainObject(next.generation_config)) next.generation_config = {}
+  if (Array.isArray(next.tools)) {
+    next.tools = next.tools
+      .filter(tool => !(tool?.type === 'tool_search' && tool?.execution !== 'client'))
+      .map(tool => {
+        if (!tool || typeof tool !== 'object') return tool
+        const { defer_loading: _dl, short_description: _sd, ...clean } = tool
+        return clean
+      })
+    if (next.tools.length === 0) {
+      delete next.tools
+      delete next.generation_config.tool_choice
+      if (Array.isArray(next.input)) next.input = degradeToolSearchInputSteps(next.input)
+      return next
+    }
+  }
+  if (Array.isArray(next.input)) next.input = degradeToolSearchInputSteps(next.input)
+  next.generation_config.tool_choice = 'auto'
+  return next
+}
 function argsOf(value) {
   const args = typeof value === 'string' ? JSON.parse(value) : value
   if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Function arguments must be a complete JSON object.')
   return args
 }
-async function contentOf(blocks, settings, scrubText = false) {
+async function contentOf(blocks, settings, scrubText = false, deferredToolNames = null) {
   const content=[]
   for (const block of blocks ?? []) {
     if (block.type === 'text') {
@@ -98,7 +400,12 @@ async function contentOf(blocks, settings, scrubText = false) {
       if (!image || image.type !== 'image' || !image.mime_type || (!image.data && !image.uri)) throw new Error('Invalid resolved Interactions image.')
       content.push(image)
     } else if (block.type === 'file') throw new Error('File references must be resolved by the host before Interactions dispatch.')
-    else if (block.type === 'tool-addition' || block.type === 'tool-removal') content.push({type:'text',text:'[Tool availability update: '+block.type+' '+block.toolName+']'})
+    else if (block.type === 'tool-addition') {
+      if (deferredToolNames?.has(block.toolName)) continue
+      content.push({type:'text',text:'[Tool availability update: '+block.type+' '+block.toolName+']'})
+    } else if (block.type === 'tool-removal') {
+      content.push({type:'text',text:'[Tool availability update: '+block.type+' '+block.toolName+']'})
+    }
     else if (block.type !== 'reasoning' && block.type !== 'tool-call') throw new Error('Unsupported Interactions input content type.')
   }
   return content
@@ -159,12 +466,24 @@ export async function buildInteractionRequest(options, settings = {}) {
   if (settings.background && !settings.store) throw new Error('Background Interactions requires explicit storage consent.')
   if (max>65536 && !settings.background) throw new Error('Interactions above 65,536 tokens requires background execution.')
   if (max>65536 && settings.route==='google-vertex') throw new Error('Vertex Interactions long decode is not verified; use GenerateContent.')
+  const explicitToolChoice = normalizeToolChoice(options.toolChoice)
+  const effectiveToolChoice = explicitToolChoice ?? 'validated'
+  const rawRetrievalMode = settings.interactionsToolRetrieval ?? settings.toolRetrieval
+  const retrievalMode = TOOL_RETRIEVAL_MODES.includes(rawRetrievalMode) ? rawRetrievalMode : DEFAULT_TOOL_RETRIEVAL_MODE
+  const { tools: preparedTools, deferredToolNames } = prepareInteractionTools(options.tools, {
+    model: options.model || upstreamModel,
+    route: settings.route,
+    retrievalMode,
+    effectiveToolChoice,
+    apiVersion: settings.apiVersion,
+  })
+  const hasServerToolSearch = Boolean(preparedTools?.some(t => t?.type === 'tool_search' && t?.execution !== 'client'))
   const input=[], system=options.system?[options.system]:[], toolPlansByIndex=new Map(), claimedToolIndices=new Set()
   for (const [position, message] of options.messages.entries()) {
     if (message.role==='system' || message.role==='developer') {
-      const parts=await contentOf(message.content,settings)
+      const parts=await contentOf(message.content,settings,false,deferredToolNames)
       if (parts.some(p=>p.type!=='text')) throw new Error('System instructions must be text.')
-      system.push(parts.map(p=>p.text).join('\n'))
+      if (parts.length > 0) system.push(parts.map(p=>p.text).join('\n'))
       continue
     }
     if (message.role==='user') {
@@ -177,8 +496,9 @@ export async function buildInteractionRequest(options, settings = {}) {
     if (message.role==='assistant') {
       const replay=message.source?.replayState?.response
       const polluted=message.content.some(b=>b?.type==='text'&&hasPollutedAssistantText(b.text))
-      const native=!polluted && replay?.api===INTERACTIONS_REPLAY_API && replay.provider===options.provider && replay.model===options.model && replay.route===settings.route && replay.contentHash===contentHash(message.content) && replay.historyHash===historyHash(options.messages.slice(0,position)) && Array.isArray(replay.steps)
       const calls=message.content.filter(b=>b.type==='tool-call')
+      const hasReplayToolSearch=Array.isArray(replay?.steps)&&replay.steps.some(s=>s?.type==='tool_search_call'||s?.type==='tool_search_result')
+      const native=!polluted && replay?.api===INTERACTIONS_REPLAY_API && replay.provider===options.provider && replay.model===options.model && replay.route===settings.route && replay.contentHash===contentHash(message.content) && replay.historyHash===historyHash(options.messages.slice(0,position)) && (hasServerToolSearch || !hasReplayToolSearch) && isConsistentNativeReplaySteps(replay.steps, calls)
       for(const call of calls){
         const matchIndex = findUnclaimedToolResultIndex(options.messages, position + 1, call.id, claimedToolIndices)
         if (!native && matchIndex === -1) {
@@ -196,7 +516,6 @@ export async function buildInteractionRequest(options, settings = {}) {
         }
       }
       if(native){
-        if(replay.steps.some(s=>!['thought','model_output','function_call'].includes(s.type)))throw new Error('Invalid Interactions replay step.')
         input.push(...copy(replay.steps))
       }else{
         const content=await contentOf(message.content,settings,true)
@@ -222,9 +541,9 @@ export async function buildInteractionRequest(options, settings = {}) {
   }
   if(settings.serviceTier && settings.serviceTier !== 'standard') request.service_tier=settings.serviceTier
   if(system.length)request.system_instruction=system.join('\n\n')
-  if(options.tools?.length){
-    request.tools=options.tools.map(tool=>({type:'function',name:tool.name,description:tool.description,parameters:copy(tool.parameters)}))
-    request.generation_config.tool_choice='validated'
+  if(preparedTools?.length){
+    request.tools=preparedTools
+    request.generation_config.tool_choice=effectiveToolChoice
   }
   return settings.structuredOutput ? settings.structuredOutput.interactions(request) : request
 }

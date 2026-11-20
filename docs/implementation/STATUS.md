@@ -1,9 +1,9 @@
-# Gemini 4 Adapter（dsh-vertex-argon）发版状态与验证账本（v2.2.11）
+# Gemini 4 Adapter（dsh-vertex-argon）发版状态与验证账本（v2.3.0）
 
-- **用户工程版本**：`2.2.11`（展示品牌名 **Gemini 4 Adapter**，底层包名保持 `dsh-vertex-argon`），以 [package.json](<../../package.json>) 为准。
+- **用户工程版本**：`2.3.0`（展示品牌名 **Gemini 4 Adapter**，底层包名保持 `dsh-vertex-argon`），以 [package.json](<../../package.json>) 为准。
 - **声明兼容**：DSH `>=0.2.0-rc.2`；Node.js `^22.19.0 || >=24.0.0`。以 [package.json](<../../package.json>) 为准。
-- **本轮范围**：`v2.2.11` 在 `interactions.js` 将 `captureSnapshot()` 纳入不可重试异常边界并在已产出事件上置位 `unindexedVisibleOutput`、收紧 `thought.summary` 非 `text` 拒收并计入 `step.id`/`step.name` 字节与净化 `observeUsage`；在 `interactions-input.js` 阻断对带签名污染正文与工具调用混合轮的原地清洗；在 `generate-content.js` 拒绝已知分项之和超过 `totalTokenCount - promptTokenCount` 的矛盾用量自愈；在 `interaction-adapter.js` 为 `totalTokens` 补全 `unattributedNonInputTokens()`。
-- **验证状态**：2026-11-19 完成 `v2.2.11` 离线全量回归（详见 [CHANGELOG.md](<../../CHANGELOG.md>)）：挂载本机既有 React `19.2.0` 路径作为 `NODE_PATH` 时，36 个测试文件全量通过；`git diff --check` 退出码 `0`。
+- **本轮范围**：`v2.3.0` 完成 Interactions 协议韧性加固（非 2xx 有界安全错误提取与可选 `interaction-error` 响应帧留存、每跳分阶段滑动超时看门狗、权威终态即刻收尾、`store: false && !background` 建连阶段 `retry-initial` 重试、默认 `tool_choice: 'validated' -> 'auto'` 首跳 400 安全退避与持久化逻辑身份对齐、多模态块与服务端步骤无状态回放及游标水位事务回滚、后台 404 死锁清理与 `storageDomain` 解绑重绑）及服务端 **Tool Retrieval（`interactionsToolRetrieval: 'off' | 'explicit' | 'auto'` + DSH `toolUpdate: 'addition-only'`）** 全链路接入。
+- **验证状态**：2026-11-20 完成离线全量回归（详见 [CHANGELOG.md](<../../CHANGELOG.md>)）：挂载本机既有 React `19.2.0` 路径作为 `NODE_PATH` 时，**37 个测试文件，735 项测试，735 通过，0 失败，0 跳过**；`git diff --check` 退出码 `0`。
 
 ## 1. 生产文件边界
 

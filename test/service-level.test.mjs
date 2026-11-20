@@ -47,7 +47,7 @@ test('Vertex PayGo-only is explicit and Gemini Flex failure never reissues at St
  try {
   const config={googleProtocol:'interactions',googleServiceTier:'flex',routes:{hasGoogle:true,hasVertex:true}}
   const out=await collect(createArgonAdapter(ctx,config).stream(request(GOOGLE_API_MODEL)))
-  assert.equal(out.at(-1).reason.kind,'error');assert.equal(wire.length,1);assert.equal(wire[0].body.service_tier,'flex')
+  assert.equal(out.at(-1).reason.kind,'error');assert.equal(wire.length,4);assert.ok(wire.every(w=>w.body.service_tier==='flex'))
   globalThis.fetch=async(_url,init)=>{wire.push({body:JSON.parse(init.body),headers:new Headers(init.headers)});return sse([{candidates:[{content:{role:'model',parts:[{text:'ok'}]},finishReason:'STOP'}]}])}
   const vertex=createArgonAdapter(ctx,{vertexProtocol:'generate-content',vertexServiceTier:'priority',vertexPaygoOnly:true,routes:{hasGoogle:true,hasVertex:true}})
   await collect(vertex.stream(request(MODEL)))

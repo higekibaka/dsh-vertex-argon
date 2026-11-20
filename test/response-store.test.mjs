@@ -84,3 +84,11 @@ test('failed attachment leaves memory usable and does not prevent a later valid 
 test('closing the hub drains writes and late captures cannot resurrect disposed data',async()=>{
  const hub=createResponseHub();const c=hub.begin(meta,true);c.observe('gc-chunk',1,{text:'late'});await hub.close();assert.equal(c.finish('done').status,'unavailable');assert.equal(page(hub).status,'not-retained')
 })
+test('opt-in retention accepts interaction-error frames cleanly without captureError',()=>{
+ const hub=createResponseHub();const c=hub.begin({...meta,protocol:'interactions'},true)
+ c.observe('interaction-error',1,{error:{code:400,status:'INVALID_ARGUMENT'}})
+ const summary=c.finish('error')
+ assert.equal(summary.status,'captured');assert.equal(summary.captureError,false);assert.equal(summary.frames,1)
+ const res=page(hub);assert.equal(res.status,'available');assert.equal(res.frame.kind,'interaction-error')
+ assert.deepEqual(JSON.parse(res.frame.text),{error:{code:400,status:'INVALID_ARGUMENT'}})
+})

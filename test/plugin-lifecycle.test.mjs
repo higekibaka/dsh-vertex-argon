@@ -88,8 +88,10 @@ test('new configuration preserves legacy defaults and validates protocol enum',(
  assert.equal(cfg.vertexProtocol.get(),'generate-content')
  assert.equal(cfg.interactionsBackground.get(),false)
  assert.equal(cfg.allowInteractionStorage.get(),false)
+ assert.equal(cfg.interactionsToolRetrieval.get(),'explicit')
  assert.equal(cfg.maxTokens.get(),65536)
  assert.throws(()=>plugin.Config({googleProtocol:'auto-fallback'}))
+ assert.throws(()=>plugin.Config({interactionsToolRetrieval:'invalid'}))
  assert.throws(()=>resolveConfigValues({allowInteractionStorage:'false'}),/explicit booleans/)
 })
 test('raw storage attach failure closes its newly opened domain reservation',async()=>{
@@ -101,6 +103,17 @@ test('raw storage attach failure closes its newly opened domain reservation',asy
   assert.equal(closed,1)
   for(const dispose of childDisposers)await dispose()
   assert.equal(closed,1)
+
+  // Background taskHub storageDomain detaches cleanly and recovers on subsequent storageDomain reload.
+  let taskCloses=0
+  const makeTaskDomain=()=>{const rows=new Map();return {table:()=>({get:k=>rows.get(k),get size(){return rows.size},entries:()=>rows.entries(),put:async(k,v)=>rows.set(k,v),delete:async k=>rows.delete(k)}),close:async()=>{taskCloses++}}}
+  const taskDisposers1=[],taskDisposers2=[]
+  await storageInitializers[1]({effect:fn=>taskDisposers1.push(fn()),storageDomain:{open:async spec=>{assert.equal(spec.name,'vertex_argon_interactions');return makeTaskDomain()}},logger:{warn:()=>{}}})
+  for(const dispose of taskDisposers1)await dispose()
+  assert.equal(taskCloses,1)
+  await storageInitializers[1]({effect:fn=>taskDisposers2.push(fn()),storageDomain:{open:async spec=>{assert.equal(spec.name,'vertex_argon_interactions');return makeTaskDomain()}},logger:{warn:()=>{}}})
+  for(const dispose of taskDisposers2)await dispose()
+  assert.equal(taskCloses,2)
  }finally{for(const dispose of rootDisposers.reverse())await dispose()}
 })
 

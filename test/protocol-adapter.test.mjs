@@ -607,3 +607,257 @@ test('R11-P2-3: Interactions preserves unattributed non-input difference in tota
     responder = prevResponder
   }
 })
+test('Interactions non-2xx JSON errors record allowlisted errorCodes safely and retain interaction-error only when retainRawResponses is true', async () => {
+  const prevResponder = responder
+  for (const retain of [false, true]) {
+    let diagnostic
+    const responseHub = createResponseHub()
+    responder = () => new Response(JSON.stringify({
+      error: {
+        code: 400,
+        status: 'INVALID_ARGUMENT',
+        message: 'SECRET_USER_PROMPT must never escape',
+      },
+    }), { status: 400, headers: { 'Content-Type': 'application/json' } })
+    try {
+      const config = { ...cfg(), retainRawResponses: retain }
+      const adapter = createArgonAdapter(ctx, config, undefined, undefined, d => diagnostic = d, undefined, responseHub)
+      const out = await collect(adapter.stream(req(GOOGLE_API_MODEL)))
+      assert.equal(out.at(-1).reason.kind, 'error')
+      assert.equal(out.at(-1).reason.failure.code, 'INVALID_REQUEST')
+      assert.match(out.at(-1).reason.failure.message, /HTTP 400 INVALID_ARGUMENT/)
+      assert.equal(JSON.stringify(out).includes('SECRET_USER_PROMPT'), false)
+      assert.equal(JSON.stringify(diagnostic).includes('SECRET_USER_PROMPT'), false)
+      assert.ok(diagnostic.hops[0].errorCodes.includes('INVALID_ARGUMENT'))
+      recordSchema.parse(diagnostic)
+      const stored = responseHub.read({ id: diagnostic.id, sessionHash: diagnostic.sessionHash })
+      if (retain) {
+        assert.equal(stored.status, 'available')
+        assert.equal(stored.frame.kind, 'interaction-error')
+        assert.equal(diagnostic.responseCapture.status, 'captured')
+        assert.equal(diagnostic.responseCapture.captureError, false)
+        assert.equal(JSON.parse(stored.frame.text).error.status, 'INVALID_ARGUMENT')
+      } else {
+        assert.equal(stored.status, 'not-retained')
+        assert.equal(diagnostic.responseCapture.status, 'disabled')
+      }
+    } finally {
+      responder = prevResponder
+      await responseHub.close()
+    }
+  }
+})
+
+test('Interactions adapter records retry-initial and retry-original diagnostics with usedContinuationToken: false', async () => {
+  const prevResponder = responder
+  // 1) store:false zero-delivered 503 -> retry-initial
+  let calls = 0, diagRetryInitial
+  responder = () => {
+    calls++
+    if (calls === 1) return new Response(JSON.stringify({ error: { status: 'UNAVAILABLE' } }), { status: 503, headers: { 'Content-Type': 'application/json', 'Retry-After': '0' } })
+    return sse(interactionEvents)
+  }
+  try {
+    const adapter = createArgonAdapter(ctx, cfg(), undefined, undefined, d => diagRetryInitial = d)
+    const out = await collect(adapter.stream(req(GOOGLE_API_MODEL)))
+    assert.equal(out.at(-1).reason.kind, 'stop')
+    assert.equal(calls, 2)
+    assert.equal(diagRetryInitial.hops.length, 2)
+    assert.equal(diagRetryInitial.hops[0].trigger, 'interaction-create')
+    assert.deepEqual(diagRetryInitial.hops[0].errorCodes, ['UNAVAILABLE'])
+    assert.equal(diagRetryInitial.hops[1].trigger, 'retry-initial')
+    assert.equal(diagRetryInitial.hops[1].usedContinuationToken, false)
+    recordSchema.parse(diagRetryInitial)
+  } finally {
+    responder = prevResponder
+  }
+
+  // 2) default validated tool_choice HTTP 400 -> retry-original with tool_choice:'auto'
+  let fallbackCalls = 0, diagFallback
+  const beforeWire = wire.length
+  responder = () => {
+    fallbackCalls++
+    if (fallbackCalls === 1) return new Response(JSON.stringify({ error: { status: 'INVALID_ARGUMENT', message: 'SECRET' } }), { status: 400, headers: { 'Content-Type': 'application/json' } })
+    return sse(interactionEvents)
+  }
+  try {
+    const adapter = createArgonAdapter(ctx, cfg(), undefined, undefined, d => diagFallback = d)
+    const out = await collect(adapter.stream(toolRequest(GOOGLE_API_MODEL)))
+    assert.equal(out.at(-1).reason.kind, 'stop')
+    assert.equal(fallbackCalls, 2)
+    const sent = wire.slice(beforeWire)
+    assert.equal(sent[0].body.generation_config.tool_choice, 'validated')
+    assert.equal(sent[1].body.generation_config.tool_choice, 'auto')
+    assert.equal(diagFallback.hops[1].trigger, 'retry-original')
+    assert.equal(diagFallback.hops[1].usedContinuationToken, false)
+    recordSchema.parse(diagFallback)
+  } finally {
+    responder = prevResponder
+  }
+})
+
+test('P1-2: background validated->auto fallback keeps the same logicalIdentity so cold restart resumes via GET without another POST', async () => {
+  const prevResponder = responder
+  for (const remoteState of ['in_progress', 'requires_action']) {
+    const rows = new Map()
+    const storageDomain = {
+      table: () => ({
+        get: k => rows.get(k),
+        get size() { return rows.size },
+        entries: () => rows.entries(),
+        put: async (k, v) => rows.set(k, v),
+        delete: async k => rows.delete(k),
+      }),
+      close: async () => {},
+    }
+    const hub1 = createInteractionStateHub()
+    hub1.attach(storageDomain)
+    const before = wire.length
+    let posts = 0, gets = 0
+    responder = entry => {
+      if (entry.method === 'POST') {
+        posts++
+        if (posts === 1) {
+          return new Response(JSON.stringify({ error: { status: 'INVALID_ARGUMENT' } }), { status: 400, headers: { 'Content-Type': 'application/json' } })
+        }
+        return sse([{ event_type: 'interaction.created', interaction: { id: 'remote-bg-' + remoteState, status: 'in_progress' } }])
+      }
+      gets++
+      // First run drops all GETs so the remote ID remains persisted for cold restart!
+      if (gets <= 4) return new Response('{}', { status: 503 })
+      if (remoteState === 'requires_action') {
+        return sse([
+          { event_type: 'step.start', event_id: 'ra-1', index: 0, step: { type: 'function_call', id: 'c1', name: 'add', arguments: { a: 5 } } },
+          { event_type: 'step.stop', event_id: 'ra-2', index: 0 },
+          { event_type: 'interaction.requires_action', event_id: 'ra-3', interaction: { id: 'remote-bg-' + remoteState, status: 'requires_action' } },
+        ])
+      }
+      return sse([
+        { event_type: 'interaction.in_progress', event_id: 'ip-1', interaction: { id: 'remote-bg-' + remoteState, status: 'in_progress' } },
+        { event_type: 'step.start', event_id: 'ip-2', index: 0, step: { type: 'model_output' } },
+        { event_type: 'step.delta', event_id: 'ip-3', index: 0, delta: { type: 'text', text: 'resumed-ok' } },
+        { event_type: 'step.stop', event_id: 'ip-4', index: 0 },
+        { event_type: 'interaction.completed', event_id: 'ip-5', interaction: { id: 'remote-bg-' + remoteState, status: 'completed' } },
+      ])
+    }
+    try {
+      const config = { ...cfg(), interactionsBackground: true, allowInteractionStorage: true }
+      const request1 = toolRequest(GOOGLE_API_MODEL)
+      const firstRun = await collect(createArgonAdapter(ctx, config, undefined, undefined, undefined, hub1).stream(request1))
+      assert.equal(firstRun.at(-1).reason.kind, 'error')
+      assert.equal(firstRun.at(-1).reason.failure.code, 'ARGON_BACKGROUND_READ_INTERRUPTED')
+      assert.equal(posts, 2)
+      assert.equal(rows.size, 1)
+      await hub1.close()
+
+      // Cold restart with a fresh hub backed by the same persisted rows and the ORIGINAL user request!
+      const hub2 = createInteractionStateHub()
+      hub2.attach(storageDomain)
+      try {
+        const postsBeforeRestart = posts
+        const resumed = await collect(createArgonAdapter(ctx, config, undefined, undefined, undefined, hub2).stream(toolRequest(GOOGLE_API_MODEL)))
+        assert.equal(posts, postsBeforeRestart, 'Cold restart must NOT send another POST')
+        assert.equal(resumed.at(-1).reason.kind, remoteState === 'requires_action' ? 'tool-calls' : 'stop')
+        assert.equal(rows.size, 0)
+        const calls = wire.slice(before)
+        assert.equal(calls.filter(c => c.method === 'POST').length, 2)
+        assert.ok(calls.at(-1).url.includes('/remote-bg-' + remoteState + '?stream=true'))
+      } finally {
+        await hub2.close()
+      }
+    } finally {
+      responder = prevResponder
+    }
+  }
+})
+
+test('P1-6: unindexed empty model_output drop rolls back host first-hop watermark identically to an uninterrupted stream', async () => {
+  const prevResponder = responder
+  const normalEvents = [
+    { event_type: 'interaction.created', event_id: 'wm-1', interaction: { id: 'remote-wm', status: 'in_progress' } },
+    { event_type: 'step.start', event_id: 'wm-2', index: 0, step: { type: 'model_output' } },
+    { event_type: 'step.delta', event_id: 'wm-3', index: 0, delta: { type: 'text', text: 'hello' } },
+    { event_type: 'step.stop', event_id: 'wm-4', index: 0 },
+    { event_type: 'interaction.completed', event_id: 'wm-5', interaction: { id: 'remote-wm', status: 'completed', usage: { total_input_tokens: 120, total_cached_tokens: 30, total_output_tokens: 8, total_thought_tokens: 4, total_tokens: 132 } } },
+  ]
+  try {
+    // 1) Baseline uninterrupted stream
+    responder = () => sse(normalEvents)
+    const baseline = await collect(createArgonAdapter(ctx, { ...cfg(), allowInteractionStorage: true }).stream(req(GOOGLE_API_MODEL)))
+    const baselineUsage = baseline.find(c => c.type === 'usage')?.usage
+    assert.ok(baselineUsage)
+
+    // 2) Unindexed empty model_output (step.start + step.stop WITHOUT event_id) followed by mid-stream drop + reconnect
+    let attempt = 0
+    responder = entry => {
+      attempt++
+      if (attempt === 1) {
+        assert.equal(entry.method, 'POST')
+        return sse([
+          { event_type: 'interaction.created', event_id: 'wm-1', interaction: { id: 'remote-wm', status: 'in_progress' } },
+          { event_type: 'step.start', index: 0, step: { type: 'model_output' } },
+          { event_type: 'step.stop', index: 0 },
+        ])
+      }
+      assert.equal(entry.method, 'GET')
+      assert.ok(entry.url.includes('last_event_id=wm-1'))
+      return sse(normalEvents.slice(1))
+    }
+    const recovered = await collect(createArgonAdapter(ctx, { ...cfg(), allowInteractionStorage: true }).stream(req(GOOGLE_API_MODEL)))
+    assert.equal(attempt, 2)
+    assert.equal(recovered.at(-1).reason.kind, 'stop')
+    const recoveredUsage = recovered.find(c => c.type === 'usage')?.usage
+    assert.deepEqual(recoveredUsage, baselineUsage)
+  } finally {
+    responder = prevResponder
+  }
+})
+
+test('P2: onErrorBody ignores non-streaming zombie reconcile probes and cancel errors while retaining active generation hop errors', async () => {
+  const prevResponder = responder
+  const rows = new Map()
+  const hub = createInteractionStateHub()
+  hub.attach({
+    table: () => ({
+      get: k => rows.get(k),
+      get size() { return rows.size },
+      entries: () => rows.entries(),
+      put: async (k, v) => rows.set(k, v),
+      delete: async k => rows.delete(k),
+    }),
+    close: async () => {},
+  })
+  const responseHub = createResponseHub()
+  let diagnostic
+  // Seed a stale zombie record on the same session that triggers a non-streaming GET reconcile probe returning JSON 404.
+  const { createGoogleConnection } = await import('../google-connection.js')
+  const { shared } = await import('../runtime.js')
+  const { GoogleGenAI } = await shared('@google/genai')
+  const conn = await createGoogleConnection(GoogleGenAI, { route: 'google-generative-ai', resolveSecret: async () => 'fixture' })
+  const matchingStale = hub.identity({ sessionId: 'fixture-session', endpoint: conn.endpoint, principalHash: conn.principalHash, body: { stale: true } })
+  await hub.put(matchingStale, { stage: 'accepted', interactionId: 'zombie-404' })
+
+  responder = entry => {
+    if (entry.method === 'GET' && entry.url.includes('/zombie-404') && !entry.url.includes('stream=true')) {
+      return new Response(JSON.stringify({ error: { code: 404, status: 'NOT_FOUND', message: 'zombie gone' } }), { status: 404, headers: { 'Content-Type': 'application/json' } })
+    }
+    if (entry.method === 'POST') return sse([interactionEvents[0]])
+    return sse(interactionEvents)
+  }
+  try {
+    const config = { ...cfg(), interactionsBackground: true, allowInteractionStorage: true, retainRawResponses: true }
+    const out = await collect(createArgonAdapter(ctx, config, undefined, undefined, d => diagnostic = d, hub, responseHub).stream(req(GOOGLE_API_MODEL)))
+    assert.equal(out.at(-1).reason.kind, 'stop')
+    // Inspect all retained frames: ZERO interaction-error frames from the zombie-404 probe!
+    const frames = []
+    for (let idx = 0; idx < diagnostic.responseCapture.frames; idx++) {
+      frames.push(responseHub.read({ id: diagnostic.id, sessionHash: diagnostic.sessionHash, index: idx }).frame)
+    }
+    assert.equal(frames.some(f => f?.kind === 'interaction-error'), false)
+    assert.ok(frames.length > 0)
+  } finally {
+    responder = prevResponder
+    await hub.close()
+    await responseHub.close()
+  }
+})

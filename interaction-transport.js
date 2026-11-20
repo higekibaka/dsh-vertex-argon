@@ -1,6 +1,7 @@
 import { shared } from './runtime.js'
 import { readBoundedJson } from './bounded-json.js'
 import { parseUpstreamRetryDelayMs } from './generate-content.js'
+import { normalizeUpstreamErrorCode } from './diagnostics.js'
 const { attributionHeaders } = await shared('@deepseek-ai/dsh-llm')
 
 // Raw REST avoids stale generated Interactions schemas; auth is refreshed per call.
@@ -31,6 +32,18 @@ export function interactionsEndpoint({ route, baseURL, project, location = 'glob
   }
   url.pathname = prefix + '/interactions'
   return url.href
+}
+
+export function inferInteractionsApiVersion(endpoint, route) {
+  if (typeof endpoint === 'string' && endpoint) {
+    try {
+      const pathname = new URL(endpoint).pathname
+      if (/(?:^|\/)v1beta1(?:\/|$)/i.test(pathname)) return 'v1beta1'
+      if (/(?:^|\/)v1beta(?:\/|$)/i.test(pathname)) return 'v1beta'
+      if (/(?:^|\/)v1(?:\/|$)/i.test(pathname)) return 'v1'
+    } catch {}
+  }
+  return route === 'google-vertex' ? 'v1beta1' : 'v1beta'
 }
 
 // Never retain upstream messages/stacks or arbitrary properties: they may echo credentials or input.
@@ -112,26 +125,49 @@ async function* decodeSSEEvents(response, status) {
   }
 }
 
-export function createInteractionsTransport({ endpoint, getHeaders, fetchImpl = globalThis.fetch, revision = INTERACTIONS_REVISION, timeoutMs = READ_TIMEOUT_MS, onResponse }) {
+const ERROR_BODY_MAX_BYTES = 65536
+const ERROR_BODY_TIMEOUT_MS = 10000
+
+function isJsonContentType(headers) {
+  const type = headers?.get?.('content-type')?.split(';')[0].trim().toLowerCase()
+  return Boolean(type && (type === 'application/json' || /^application\/[a-z0-9.+-]+\+json$/.test(type)))
+}
+
+function extractSafeErrorEnvelope(parsed) {
+  const root = Array.isArray(parsed) && parsed.length === 1 && parsed[0] && typeof parsed[0] === 'object' ? parsed[0] : parsed
+  if (!root || typeof root !== 'object' || Array.isArray(root)) return undefined
+  return root.error && typeof root.error === 'object' && !Array.isArray(root.error) ? root.error : root
+}
+
+export function createInteractionsTransport({ endpoint, getHeaders, fetchImpl = globalThis.fetch, revision = INTERACTIONS_REVISION, timeoutMs = READ_TIMEOUT_MS, onResponse, onErrorBody }) {
   const base = new URL(endpoint)
   if (revision !== null && !/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(revision)) throw new Error('Invalid Interactions API revision.')
-  async function request(method, url, body, stream, signal, timeout = timeoutMs, preDispatchSignal, maxResponseBytes) {
+  async function request(method, url, body, stream, signal, timeout, preDispatchSignal, maxResponseBytes) {
     let effective, preparing, headers, serialized, onAbort
     try {
       signal?.throwIfAborted()
       preDispatchSignal?.throwIfAborted()
-      const timeoutSignal = AbortSignal.timeout(timeout)
-      effective = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+      if (timeout !== undefined && timeout !== null) {
+        const timeoutSignal = AbortSignal.timeout(timeout)
+        effective = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+      } else {
+        effective = signal
+      }
       // Stop can cancel preparation, but must not abandon a dispatched create before its ID arrives.
-      preparing = preDispatchSignal ? AbortSignal.any([effective, preDispatchSignal]) : effective
-      const auth = Promise.resolve().then(() => { preparing.throwIfAborted(); return getHeaders() })
-      const stopped = new Promise((_, reject) => {
-        onAbort = () => reject(preparing.reason)
-        preparing.addEventListener('abort', onAbort, { once: true })
-        if (preparing.aborted) onAbort()
-      })
-      const authHeaders = await Promise.race([auth, stopped])
-      preparing.throwIfAborted()
+      preparing = preDispatchSignal ? (effective ? AbortSignal.any([effective, preDispatchSignal]) : preDispatchSignal) : effective
+      let authHeaders
+      if (preparing) {
+        const auth = Promise.resolve().then(() => { preparing.throwIfAborted(); return getHeaders() })
+        const stopped = new Promise((_, reject) => {
+          onAbort = () => reject(preparing.reason)
+          preparing.addEventListener('abort', onAbort, { once: true })
+          if (preparing.aborted) onAbort()
+        })
+        authHeaders = await Promise.race([auth, stopped])
+        preparing.throwIfAborted()
+      } else {
+        authHeaders = await Promise.resolve().then(() => getHeaders())
+      }
       headers = new Headers(authHeaders)
       // Headers normalizes casing, so SDK spelling cannot duplicate attribution.
       // The host attribution contract owns product identity, not authentication.
@@ -140,29 +176,60 @@ export function createInteractionsTransport({ endpoint, getHeaders, fetchImpl = 
       headers.set('Accept', stream ? 'text/event-stream' : 'application/json')
       if (revision === null) headers.delete('Api-Revision')
       else headers.set('Api-Revision', revision)
-      preparing.throwIfAborted()
+      preparing?.throwIfAborted()
       serialized = body === undefined ? undefined : JSON.stringify(body)
       if (body !== undefined && serialized === undefined) throw new TypeError('Interactions request body is not JSON serializable.')
-      preparing.throwIfAborted()
+      preparing?.throwIfAborted()
     } catch (error) {
       throw transportError(error, 'pre-dispatch')
-    } finally { if (onAbort) preparing.removeEventListener('abort', onAbort) }
+    } finally { if (onAbort && preparing) preparing.removeEventListener('abort', onAbort) }
     let response, status
     try {
       // Once fetch is invoked, even ECONNRESET leaves submission uncertain. Never retry here.
-      response = await fetchImpl(url, { method, headers, body: serialized, signal: effective, redirect: 'error' })
+      response = await fetchImpl(url, { method, headers, body: serialized, ...(effective ? { signal: effective } : {}), redirect: 'error' })
       status = response.status
       if (!response.ok) {
-        // Provider errors can echo prompts; do not propagate their untrusted body.
-        try { await response.body?.cancel() } catch {}
-        const code = status === 402 ? 'PAYMENT_REQUIRED' : status === 429 ? 'RATE_LIMIT' : status >= 500 ? 'SERVER' : 'INVALID_REQUEST'
+        // Read only bounded JSON for allowlisted error codes & RetryInfo; never
+        // echo untrusted upstream error.message into Error.message or diagnostics.
+        let parsed
+        if (isJsonContentType(response.headers)) {
+          const errorTimeout = AbortSignal.timeout(ERROR_BODY_TIMEOUT_MS)
+          const errorSignal = effective ? AbortSignal.any([effective, errorTimeout]) : errorTimeout
+          try { parsed = await readBoundedJson(response, ERROR_BODY_MAX_BYTES, errorSignal) }
+          catch { try { await response.body?.cancel() } catch {} }
+        } else {
+          try { await response.body?.cancel() } catch {}
+        }
+        const errorObj = extractSafeErrorEnvelope(parsed)
+        const statusCode = normalizeUpstreamErrorCode(errorObj?.status)
+        const bodyCode = normalizeUpstreamErrorCode(errorObj?.code)
+        const upstreamCodes = []
+        if (statusCode) upstreamCodes.push(statusCode)
+        if (bodyCode && !upstreamCodes.includes(bodyCode)) upstreamCodes.push(bodyCode)
+        const primaryUpstreamCode = upstreamCodes[0]
+        const operation = method === 'GET' ? 'get' : method === 'DELETE' ? 'delete' : url.href === base.href ? 'create' : 'cancel'
+        if (parsed !== undefined && typeof onErrorBody === 'function') {
+          try { onErrorBody(status, parsed, { operation, stream }) } catch (_error) { /* Optional diagnostic observation cannot change request execution. */ }
+        }
+        const fallbackCode = status === 402 ? 'PAYMENT_REQUIRED' : status === 429 ? 'RATE_LIMIT' : status >= 500 ? 'SERVER' : 'INVALID_REQUEST'
+        const causeCodes = status === 402
+          ? ['PAYMENT_REQUIRED', ...upstreamCodes.filter(c => c !== 'PAYMENT_REQUIRED')]
+          : (upstreamCodes.length ? upstreamCodes : [fallbackCode])
+        let causeChain
+        for (let i = causeCodes.length - 1; i >= 0; i--) {
+          causeChain = causeChain ? { name: 'ApiError', code: causeCodes[i], cause: causeChain } : { name: 'ApiError', code: causeCodes[i] }
+        }
         const message = status === 402
           ? 'Google Interactions request rejected for billing (HTTP 402 Payment Required). Check your Google prepaid credit balance and add credits if depleted. Do not retry automatically; requests cannot succeed until credits are added.'
-          : 'Google Interactions request failed (HTTP ' + status + ').'
-        // Only the documented bounded retry hint is read; the provider body is
-        // never parsed, so an echoing error body cannot reach diagnostics.
-        const retryDelayMs = parseUpstreamRetryDelayMs({ headers: response.headers })
-        const rejected = transportError({ name: 'ApiError', code }, 'fetch', status, message)
+          : 'Google Interactions request failed (HTTP ' + status + (primaryUpstreamCode ? ' ' + primaryUpstreamCode : '') + ').'
+        const retryDelayMs = parseUpstreamRetryDelayMs({
+          headers: response.headers,
+          ...(errorObj ? { details: errorObj.details, retryDelay: errorObj.retryDelay, quotaResetDelay: errorObj.quotaResetDelay } : {}),
+        })
+        const rejected = transportError(causeChain, 'fetch', status, message)
+        rejected.code = fallbackCode
+        if (primaryUpstreamCode) rejected.upstreamCode = primaryUpstreamCode
+        if (upstreamCodes.length) rejected.upstreamCodes = [...upstreamCodes]
         if (retryDelayMs !== undefined) rejected.retryDelayMs = retryDelayMs
         throw rejected
       }
@@ -192,7 +259,7 @@ export function createInteractionsTransport({ endpoint, getHeaders, fetchImpl = 
         signal?.throwIfAborted()
         preDispatchSignal?.throwIfAborted()
         stream = body.stream === true
-        timeout = body.background && !stream ? 60000 : timeoutMs
+        timeout = stream ? undefined : (body.background ? 60000 : timeoutMs)
       } catch (error) { throw transportError(error, 'pre-dispatch') }
       return request('POST', base, body, stream, signal, timeout, preDispatchSignal)
     },
@@ -200,7 +267,7 @@ export function createInteractionsTransport({ endpoint, getHeaders, fetchImpl = 
       const url = resource(id)
       if (stream) url.searchParams.set('stream', 'true')
       if (last_event_id) url.searchParams.set('last_event_id', last_event_id)
-      return request('GET', url, undefined, stream, signal, timeoutMs, undefined, maxResponseBytes)
+      return request('GET', url, undefined, stream, signal, stream ? undefined : timeoutMs, undefined, maxResponseBytes)
     },
     cancel(id, { signal } = {}) { return request('POST', new URL(resource(id).href + '/cancel'), {}, false, signal, 30000) },
     delete(id, { signal } = {}) { return request('DELETE', resource(id), undefined, false, signal, 30000) },
