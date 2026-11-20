@@ -4,7 +4,20 @@ export const HOST_SHUTDOWN_CODE = 'ARGON_HOST_SHUTDOWN'
 // An in-stream error event whose code is not listed here is treated as a remote
 // terminal state: the cloud task is already over, so no reconnect and no /cancel.
 // 'unknown' stays recoverable because an unclassified frame proves nothing.
-const RECOVERABLE_STREAM_ERROR_CODES = ['authentication', 'unavailable', 'internal', 'deadline_exceeded', 'gateway_timeout', 'resource_exhausted', 'aborted', 'unknown']
+const RECOVERABLE_STREAM_ERROR_CODES = [
+  'authentication',
+  'unavailable',
+  'service_unavailable',
+  'internal',
+  'deadline_exceeded',
+  'gateway_timeout',
+  'resource_exhausted',
+  'rate_limit_exceeded',
+  'too_many_requests',
+  'quota_exceeded',
+  'aborted',
+  'unknown',
+]
 
 export function normalizeStreamErrorCode(code) {
   return String(code ?? 'unknown').replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 64)

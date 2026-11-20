@@ -75,13 +75,31 @@ const test = (name, fn) => nodeTest(name, async (...args) => {
 test('supportsInteractionsToolRetrieval enforces exact Google model, route, protocol, and mode allowlist', () => {
   assert.deepEqual([...TOOL_RETRIEVAL_MODES], ['off', 'explicit', 'auto'])
 
-  // Allowed: Gemini API + Interactions + Argon/Hydrogen + explicit/auto (including models/ prefix & upstream ID)
-  for (const model of [GOOGLE_API_MODEL, GOOGLE_API_HYDROGEN_MODEL, 'models/gemini-4-argon-google', 'models/GEMINI-4-HYDROGEN-GOOGLE', 'gemini-4-argon', 'gemini-4-hydrogen']) {
+  // Allowed: Gemini API + Interactions v1beta + Argon/Carbon/Hydrogen/Neon + explicit/auto (including models/ prefix & upstream ID)
+  for (const model of [
+    GOOGLE_API_MODEL,
+    GOOGLE_API_CARBON_MODEL,
+    GOOGLE_API_HYDROGEN_MODEL,
+    GOOGLE_API_NEON_MODEL,
+    'models/gemini-4-argon-google',
+    'models/gemini-4-carbon-google',
+    'models/GEMINI-4-HYDROGEN-GOOGLE',
+    'models/GEMINI-4-NEON-GOOGLE',
+    'gemini-4-argon',
+    'gemini-4-carbon',
+    'gemini-4-hydrogen',
+    'gemini-4-neon',
+  ]) {
     for (const mode of ['explicit', 'auto']) {
       assert.equal(
         supportsInteractionsToolRetrieval({ model, route: 'google-generative-ai', protocol: 'interactions', mode }),
         true,
         `${model} (${mode}) should be supported`,
+      )
+      assert.equal(
+        supportsInteractionsToolRetrieval({ model, route: 'google-generative-ai', protocol: 'interactions', mode, apiVersion: 'v1' }),
+        false,
+        `${model} (${mode}) must fall back on explicit /v1/interactions`,
       )
     }
     assert.equal(
@@ -98,14 +116,13 @@ test('supportsInteractionsToolRetrieval enforces exact Google model, route, prot
     )
   }
 
-  // Disallowed: Carbon & Neon on both routes, Vertex on all models, unknown/invalid modes
-  for (const model of [CARBON_MODEL, GOOGLE_API_CARBON_MODEL, NEON_MODEL, GOOGLE_API_NEON_MODEL, MODEL, HYDROGEN_MODEL]) {
-    const route = model.endsWith('-google') ? 'google-generative-ai' : 'google-vertex'
+  // Disallowed: Vertex AI on all four models, unknown models, invalid modes
+  for (const model of [MODEL, CARBON_MODEL, HYDROGEN_MODEL, NEON_MODEL]) {
     for (const mode of ['off', 'explicit', 'auto']) {
       assert.equal(
-        supportsInteractionsToolRetrieval({ model, route, protocol: 'interactions', mode }),
+        supportsInteractionsToolRetrieval({ model, route: 'google-vertex', protocol: 'interactions', mode }),
         false,
-        `${model} on ${route} (${mode}) must be unsupported`,
+        `${model} on google-vertex (${mode}) must be unsupported`,
       )
     }
   }
@@ -144,11 +161,11 @@ test('adapter getProfiles cache key, resolveModel, and prepareCall expose toolUp
     }
   }
 
-  // explicit + interactions: only Argon-Google & Hydrogen-Google get toolUpdate
+  // explicit + interactions: all four Gemini API models (Argon/Carbon/Hydrogen/Neon) get toolUpdate; Vertex models never do
   await checkModel(GOOGLE_API_MODEL, true)
+  await checkModel(GOOGLE_API_CARBON_MODEL, true)
   await checkModel(GOOGLE_API_HYDROGEN_MODEL, true)
-  await checkModel(GOOGLE_API_CARBON_MODEL, false)
-  await checkModel(GOOGLE_API_NEON_MODEL, false)
+  await checkModel(GOOGLE_API_NEON_MODEL, true)
   await checkModel(MODEL, false)
   await checkModel(CARBON_MODEL, false)
   await checkModel(HYDROGEN_MODEL, false)
@@ -157,17 +174,23 @@ test('adapter getProfiles cache key, resolveModel, and prepareCall expose toolUp
   // Live toggle to 'off' invalidates getProfiles cache and removes toolUpdate immediately
   liveCfg.interactionsToolRetrieval = 'off'
   await checkModel(GOOGLE_API_MODEL, false)
+  await checkModel(GOOGLE_API_CARBON_MODEL, false)
   await checkModel(GOOGLE_API_HYDROGEN_MODEL, false)
+  await checkModel(GOOGLE_API_NEON_MODEL, false)
 
   // Live toggle to 'auto' restores toolUpdate
   liveCfg.interactionsToolRetrieval = 'auto'
   await checkModel(GOOGLE_API_MODEL, true)
+  await checkModel(GOOGLE_API_CARBON_MODEL, true)
   await checkModel(GOOGLE_API_HYDROGEN_MODEL, true)
+  await checkModel(GOOGLE_API_NEON_MODEL, true)
 
   // GenerateContent protocol never exposes toolUpdate
   liveCfg.googleProtocol = 'generate-content'
   await checkModel(GOOGLE_API_MODEL, false)
+  await checkModel(GOOGLE_API_CARBON_MODEL, false)
   await checkModel(GOOGLE_API_HYDROGEN_MODEL, false)
+  await checkModel(GOOGLE_API_NEON_MODEL, false)
 })
 
 test('buildInteractionRequest handles explicit/auto/off modes, short_description gating, client tool_search, and unsupported model stripping', async () => {
@@ -240,16 +263,44 @@ test('buildInteractionRequest handles explicit/auto/off modes, short_description
   })
   assert.equal(coreReq.tools.some(t => t.type === 'tool_search' || t.defer_loading), false)
 
-  // 3) Unsupported models (Carbon, Neon), Vertex AI, and mode:'off' strip defer_loading/short_description and omit tool_search
-  for (const [model, route, mode] of [
-    [GOOGLE_API_CARBON_MODEL, 'google-generative-ai', 'auto'],
-    [GOOGLE_API_NEON_MODEL, 'google-generative-ai', 'auto'],
-    [MODEL, 'google-vertex', 'auto'],
-    [HYDROGEN_MODEL, 'google-vertex', 'explicit'],
-    [GOOGLE_API_MODEL, 'google-generative-ai', 'off'],
+  // 2b) Carbon-Google & Neon-Google also enable Tool Retrieval on Gemini API Interactions v1beta
+  for (const model of [GOOGLE_API_CARBON_MODEL, GOOGLE_API_NEON_MODEL]) {
+    const modelExplicit = await buildInteractionRequest(baseOpts(model), {
+      route: 'google-generative-ai',
+      interactionsToolRetrieval: 'explicit',
+    })
+    assert.deepEqual(modelExplicit.tools[0], { type: 'tool_search' }, `${model} explicit must inject tool_search`)
+    const modelExpMap = byName(modelExplicit)
+    assert.equal(modelExpMap.argon_inspect.defer_loading, true)
+    assert.equal(modelExpMap.argon_inspect.short_description, 'Inspect Argon diagnostics')
+    assert.equal(modelExpMap.mcp__github_search.defer_loading, undefined)
+
+    const modelAuto = await buildInteractionRequest(baseOpts(model), {
+      route: 'google-generative-ai',
+      interactionsToolRetrieval: 'auto',
+    })
+    assert.deepEqual(modelAuto.tools[0], { type: 'tool_search' }, `${model} auto must inject tool_search`)
+    const modelAutoMap = byName(modelAuto)
+    assert.equal(modelAutoMap.bash.defer_loading, undefined)
+    assert.equal(modelAutoMap.sv_render.defer_loading, undefined)
+    assert.equal(modelAutoMap.argon_inspect.defer_loading, true)
+    assert.equal(modelAutoMap.mcp__github_search.defer_loading, true)
+    assert.equal(modelAutoMap.custom_plugin_tool.defer_loading, true)
+    assert.equal(modelAutoMap.custom_plugin_tool.short_description, 'Custom short')
+  }
+
+  // 3) Vertex AI (all models), explicit /v1/interactions (apiVersion:'v1'), and mode:'off' strip defer_loading/short_description and omit tool_search
+  for (const [model, route, mode, apiVersion] of [
+    [MODEL, 'google-vertex', 'auto', undefined],
+    [CARBON_MODEL, 'google-vertex', 'auto', undefined],
+    [HYDROGEN_MODEL, 'google-vertex', 'explicit', undefined],
+    [NEON_MODEL, 'google-vertex', 'auto', undefined],
+    [GOOGLE_API_CARBON_MODEL, 'google-generative-ai', 'auto', 'v1'],
+    [GOOGLE_API_NEON_MODEL, 'google-generative-ai', 'auto', 'v1'],
+    [GOOGLE_API_MODEL, 'google-generative-ai', 'off', undefined],
   ]) {
-    const stripped = await buildInteractionRequest(baseOpts(model), { route, interactionsToolRetrieval: mode })
-    assert.equal(stripped.tools.some(t => t.type === 'tool_search'), false, `${model}/${route}/${mode}`)
+    const stripped = await buildInteractionRequest(baseOpts(model), { route, interactionsToolRetrieval: mode, ...(apiVersion ? { apiVersion } : {}) })
+    assert.equal(stripped.tools.some(t => t.type === 'tool_search'), false, `${model}/${route}/${mode}/${apiVersion ?? 'default'}`)
     for (const tool of stripped.tools) {
       assert.equal('defer_loading' in tool, false)
       assert.equal('short_description' in tool, false)
@@ -398,17 +449,32 @@ test('developer/system tool-addition blocks for deferred tools are omitted from 
   }, { route: 'google-generative-ai', interactionsToolRetrieval: 'explicit' })
   assert.equal(cleanSystem.system_instruction, undefined)
 
-  // Unsupported model (Carbon): argon_inspect is NOT deferred, so tool-addition text stays intact
-  const unsupported = await buildInteractionRequest(opts, {
-    route: 'google-generative-ai',
+  // Carbon-Google & Neon-Google also defer argon_inspect and omit its tool-addition from system_instruction
+  for (const model of [GOOGLE_API_CARBON_MODEL, GOOGLE_API_NEON_MODEL]) {
+    const googleReq = await buildInteractionRequest({ ...opts, model }, {
+      route: 'google-generative-ai',
+      interactionsToolRetrieval: 'explicit',
+    })
+    assert.ok(googleReq.tools.some(t => t.type === 'tool_search'), `${model} must inject tool_search`)
+    assert.equal(googleReq.system_instruction, 'Base system prompt.\n\nKeep this note.\n[Tool availability update: tool-addition bash]')
+    assert.equal(googleReq.system_instruction.includes('argon_inspect'), false)
+  }
+
+  // Unsupported routes/endpoints (Vertex AI & explicit v1): argon_inspect is NOT deferred, so tool-addition text stays intact
+  const vertexCarbonReq = await buildInteractionRequest({ ...opts, model: CARBON_MODEL }, {
+    route: 'google-vertex',
     interactionsToolRetrieval: 'explicit',
   })
-  const carbonReq = await buildInteractionRequest({ ...opts, model: GOOGLE_API_CARBON_MODEL }, {
+  assert.equal(vertexCarbonReq.tools.some(t => t.type === 'tool_search'), false)
+  assert.ok(vertexCarbonReq.system_instruction.includes('[Tool availability update: tool-addition argon_inspect]'))
+
+  const v1NeonReq = await buildInteractionRequest({ ...opts, model: GOOGLE_API_NEON_MODEL }, {
     route: 'google-generative-ai',
     interactionsToolRetrieval: 'explicit',
+    apiVersion: 'v1',
   })
-  assert.ok(unsupported.tools.some(t => t.type === 'tool_search'))
-  assert.ok(carbonReq.system_instruction.includes('[Tool availability update: tool-addition argon_inspect]'))
+  assert.equal(v1NeonReq.tools.some(t => t.type === 'tool_search'), false)
+  assert.ok(v1NeonReq.system_instruction.includes('[Tool availability update: tool-addition argon_inspect]'))
 })
 
 test('stateless tool_search + processing + multimodal turn replays verbatim in Interactions and degrades cleanly in GenerateContent', async () => {
@@ -527,7 +593,7 @@ test('stateless tool_search + processing + multimodal turn replays verbatim in I
   assert.ok(JSON.stringify(sentBodies[1].input).includes('[Previously executed tool argon_inspect; call fc-1]'))
 })
 
-test('end-to-end DSH LlmRuntime + projectToolUpdates preserves deferLoading for Argon-Google and strips for Carbon-Google', async () => {
+test('end-to-end DSH LlmRuntime + projectToolUpdates preserves deferLoading for Gemini API models (Argon/Carbon/Neon) and strips for Vertex AI', async () => {
   const wire = []
   globalThis.fetch = async (input, init) => {
     wire.push({ url: String(typeof input === 'string' ? input : input.url), body: JSON.parse(init.body) })
@@ -579,19 +645,44 @@ test('end-to-end DSH LlmRuntime + projectToolUpdates preserves deferLoading for 
       assert.equal(argonWire.system_instruction, 'Host system prompt.')
       assert.equal(argonWire.system_instruction.includes('mcp__late_tool'), false)
 
-      // 2) Carbon-Google: host prepareCall omits toolUpdate, host strips deferLoading, wire sends normal tools with zero tool_search/defer_loading
-      const preparedCarbon = await runtimeCtx.llm.prepareCall({ provider: PROVIDER, model: GOOGLE_API_CARBON_MODEL })
-      assert.equal(preparedCarbon.toolUpdate, undefined)
-      const outCarbon = await collect(preparedCarbon.stream({
-        ...preparedCarbon.config,
-        system: 'Host system prompt.',
-        messages: [userMsg, devMsg],
-        tools: [bashTool, inspectTool, dynamicTool],
-        toolHistory,
-      }))
-      assert.equal(outCarbon.at(-1).reason.kind, 'stop')
-      const carbonWire = wire.at(-1).body
-      assert.equal(carbonWire.tools.some(t => t.type === 'tool_search' || t.defer_loading), false)
+      // 2) Carbon-Google & Neon-Google: host prepareCall exposes toolUpdate:'addition-only', preserves deferLoading:true, injects tool_search, filters developer tool-addition
+      for (const model of [GOOGLE_API_CARBON_MODEL, GOOGLE_API_NEON_MODEL]) {
+        const preparedGoogle = await runtimeCtx.llm.prepareCall({ provider: PROVIDER, model })
+        assert.equal(preparedGoogle.toolUpdate, 'addition-only', `${model} must expose toolUpdate`)
+        const projectedGoogle = projectToolUpdates([userMsg, devMsg], [bashTool, inspectTool, dynamicTool], preparedGoogle.toolUpdate, toolHistory)
+        assert.equal(projectedGoogle.tools.find(t => t.name === 'argon_inspect').deferLoading, true)
+        assert.equal(projectedGoogle.tools.find(t => t.name === 'mcp__late_tool').deferLoading, true)
+        const outGoogle = await collect(preparedGoogle.stream({
+          ...preparedGoogle.config,
+          system: 'Host system prompt.',
+          messages: [userMsg, devMsg],
+          tools: [bashTool, inspectTool, dynamicTool],
+          toolHistory,
+        }))
+        assert.equal(outGoogle.at(-1).reason.kind, 'stop')
+        const googleWire = wire.at(-1).body
+        assert.deepEqual(googleWire.tools[0], { type: 'tool_search' })
+        assert.equal(googleWire.tools.find(t => t.name === 'argon_inspect').defer_loading, true)
+        assert.equal(googleWire.tools.find(t => t.name === 'mcp__late_tool').defer_loading, true)
+        assert.equal(googleWire.system_instruction, 'Host system prompt.')
+        assert.equal(googleWire.system_instruction.includes('mcp__late_tool'), false)
+      }
+
+      // 3) Vertex AI (Carbon/Neon): host prepareCall omits toolUpdate, host strips deferLoading, wire sends normal tools with zero tool_search/defer_loading
+      for (const vertexModel of [CARBON_MODEL, NEON_MODEL]) {
+        const preparedVertex = await runtimeCtx.llm.prepareCall({ provider: PROVIDER, model: vertexModel })
+        assert.equal(preparedVertex.toolUpdate, undefined, `${vertexModel} on Vertex must omit toolUpdate`)
+        const outVertex = await collect(preparedVertex.stream({
+          ...preparedVertex.config,
+          system: 'Host system prompt.',
+          messages: [userMsg, devMsg],
+          tools: [bashTool, inspectTool, dynamicTool],
+          toolHistory,
+        }))
+        assert.equal(outVertex.at(-1).reason.kind, 'stop')
+        const vertexWire = wire.at(-1).body
+        assert.equal(vertexWire.tools.some(t => t.type === 'tool_search' || t.defer_loading), false)
+      }
     } finally {
       unregister()
     }
@@ -739,9 +830,11 @@ test('P1-5 & P2: full deep-equal roundtrip with processing_*, all 4 multimodal c
   }, { route: 'google-generative-ai', interactionsToolRetrieval: 'explicit' })
   assert.equal(mismatchedCompleted.input.some(s => s.type === 'function_call'), false)
 
-  // P2: explicit /v1/interactions custom baseURL disables Tool Retrieval & toolUpdate: 'addition-only'
-  assert.equal(supportsInteractionsToolRetrieval({ model: GOOGLE_API_MODEL, route: 'google-generative-ai', protocol: 'interactions', mode: 'auto', apiVersion: 'v1' }), false)
-  assert.equal(supportsInteractionsToolRetrieval({ model: GOOGLE_API_MODEL, route: 'google-generative-ai', protocol: 'interactions', mode: 'auto', apiVersion: 'v1beta' }), true)
+  // P2: explicit /v1/interactions custom baseURL disables Tool Retrieval & toolUpdate: 'addition-only' across Argon/Carbon/Neon
+  for (const model of [GOOGLE_API_MODEL, GOOGLE_API_CARBON_MODEL, GOOGLE_API_HYDROGEN_MODEL, GOOGLE_API_NEON_MODEL]) {
+    assert.equal(supportsInteractionsToolRetrieval({ model, route: 'google-generative-ai', protocol: 'interactions', mode: 'auto', apiVersion: 'v1' }), false)
+    assert.equal(supportsInteractionsToolRetrieval({ model, route: 'google-generative-ai', protocol: 'interactions', mode: 'auto', apiVersion: 'v1beta' }), true)
+  }
   const v1Wire = []
   globalThis.fetch = async (input, init) => {
     v1Wire.push({ url: typeof input === 'string' ? input : (input?.href ?? input?.url ?? String(input)), body: JSON.parse(init.body) })
@@ -758,13 +851,15 @@ test('P1-5 & P2: full deep-equal roundtrip with processing_*, all 4 multimodal c
     interactionsToolRetrieval: 'auto',
     routes: { ...allRoutes, googleBaseUrl: 'https://generativelanguage.googleapis.com/v1/interactions' },
   }), undefined, undefined, d => v1Diag = d)
-  const v1Prepared = await v1Adapter.prepareCall(PROVIDER, GOOGLE_API_MODEL)
-  assert.equal(v1Prepared.model.toolUpdate, undefined)
-  const v1Resolved = await v1Adapter.resolveModel(PROVIDER, GOOGLE_API_MODEL)
-  assert.equal(v1Resolved.toolUpdate, undefined)
-  const v1Out = await collect(v1Prepared.stream(turn1Opts))
-  assert.equal(v1Out.at(-1).reason.kind, 'stop')
-  assert.equal(v1Diag.apiVersion, 'v1')
-  assert.equal(v1Wire[0].url, 'https://generativelanguage.googleapis.com/v1/interactions')
-  assert.equal(v1Wire[0].body.tools.some(t => t.type === 'tool_search' || t.defer_loading), false)
+  for (const v1Model of [GOOGLE_API_MODEL, GOOGLE_API_CARBON_MODEL, GOOGLE_API_NEON_MODEL]) {
+    const v1Prepared = await v1Adapter.prepareCall(PROVIDER, v1Model)
+    assert.equal(v1Prepared.model.toolUpdate, undefined)
+    const v1Resolved = await v1Adapter.resolveModel(PROVIDER, v1Model)
+    assert.equal(v1Resolved.toolUpdate, undefined)
+    const v1Out = await collect(v1Prepared.stream({ ...turn1Opts, model: v1Model }))
+    assert.equal(v1Out.at(-1).reason.kind, 'stop')
+    assert.equal(v1Diag.apiVersion, 'v1')
+    assert.equal(v1Wire.at(-1).url, 'https://generativelanguage.googleapis.com/v1/interactions')
+    assert.equal(v1Wire.at(-1).body.tools.some(t => t.type === 'tool_search' || t.defer_loading), false)
+  }
 })

@@ -1249,3 +1249,138 @@ test('generator suspended at yield during host shutdown .return() reports host-s
   await hub.close()
 })
 
+test('in-stream transient error codes (service_unavailable, too_many_requests, rate_limit_exceeded, quota_exceeded) are classified as recoverable without cancelling remote task', async () => {
+  const {
+    isRecoverableStreamErrorCode,
+    interactionExitReason,
+    cancelsRemoteInteraction,
+  } = await import('../interaction-lifecycle.js')
+  const { createInteractionStateHub, durableInteractionTransport } = await import('../interaction-state.js')
+
+  for (const code of ['service_unavailable', 'SERVICE_UNAVAILABLE', 'too_many_requests', 'rate_limit_exceeded', 'quota_exceeded']) {
+    assert.equal(isRecoverableStreamErrorCode(code), true, `${code} must be recoverable`)
+  }
+  for (const code of ['UNAUTHENTICATED', 'invalid_request', 'model_not_found', 'permission_denied']) {
+    assert.equal(isRecoverableStreamErrorCode(code), false, `${code} must remain non-recoverable`)
+  }
+
+  const recoverableErr = Object.assign(new Error('Interactions returned an error event (service_unavailable).'), {
+    code: 'ARGON_INTERACTIONS_PROTOCOL',
+    recoverableStreamError: true,
+  })
+  assert.equal(recoverableErr.remoteTerminalError, undefined)
+  assert.equal(interactionExitReason(recoverableErr), 'read-interrupted')
+  assert.equal(cancelsRemoteInteraction(interactionExitReason(recoverableErr)), false)
+
+  // 1) Stored background stream receiving { type: 'error', error: { code: 'service_unavailable' } } reconnects via GET without duplicating POST or cancelling.
+  let okExitReason
+  const recovered = await run(
+    [
+      { ...created, event_id: 'su-1' },
+      { ...start(0, 'model_output'), event_id: 'su-2' },
+      { ...delta(0, 'text', { text: 'part-A' }), event_id: 'su-3' },
+      { type: 'error', event_id: 'su-4', error: { code: 'service_unavailable', message: 'backend busy' } },
+    ],
+    {
+      settings: { store: true, background: true, onExit: reason => { okExitReason = reason } },
+      reconnect: [
+        { ...delta(0, 'text', { text: 'part-B' }), event_id: 'su-5' },
+        { ...stop(0), event_id: 'su-6' },
+        { ...done(), event_id: 'su-7' },
+      ],
+    },
+  )
+  assert.equal(recovered.text, 'part-Apart-B')
+  assert.equal(recovered.finish.reason.kind, 'stop')
+  assert.equal(okExitReason, 'completed')
+  assert.equal(recovered.calls.filter(c => c.method === 'create').length, 1)
+  assert.equal(recovered.calls.filter(c => c.method === 'get').length, 1)
+  assert.equal(recovered.calls.filter(c => c.method === 'cancel').length, 0)
+
+  // 2) Repeated service_unavailable exhausting retries exits with read-interrupted (not protocol-error or remote-error), never cancels, and retains background handle.
+  const rows = new Map()
+  const hub = createInteractionStateHub()
+  hub.attach({
+    table: () => ({
+      get: k => rows.get(k),
+      get size() { return rows.size },
+      entries: () => rows.entries(),
+      put: async (k, v) => rows.set(k, v),
+      delete: async k => rows.delete(k),
+    }),
+    close: async () => {},
+  })
+  try {
+    const identity = hub.identity({ sessionId: 's-su-exhaust', endpoint: 'https://example.test/interactions', principalHash: 'd'.repeat(64), body: { input: 'su' } })
+    let cancels = 0, probes = 0, gets = 0, exhaustExit
+    const base = {
+      create: async () => stream([{ ...created, event_id: 'sue-1' }]),
+      get: async (_id, reqOpts) => {
+        if (!reqOpts?.stream) { probes++; return { id: 'remote-1', status: 'failed' } }
+        gets++
+        return stream([{ type: 'error', event_id: `sue-r${gets}`, error: { code: 'service_unavailable' } }])
+      },
+      cancel: async () => { cancels++; return { status: 'cancelled' } },
+    }
+    const durable = durableInteractionTransport(base, hub, identity)
+    const chunks = []
+    for await (const chunk of streamInteractions(options(), {
+      route: 'google-generative-ai',
+      background: true,
+      store: true,
+      transport: durable,
+      reconnectBackoff: { initialDelayMs: 0 },
+      onExit: reason => { exhaustExit = reason },
+    })) chunks.push(chunk)
+    await durable.finish({ complete: false, reason: exhaustExit })
+    assert.equal(exhaustExit, 'read-interrupted')
+    assert.equal(chunks.at(-1).reason.kind, 'error')
+    assert.equal(chunks.at(-1).reason.failure.code, 'ARGON_BACKGROUND_READ_INTERRUPTED')
+    assert.equal(cancels, 0)
+    assert.equal(probes, 0)
+    // 1 initial durable GET stream + 3 reconnect GET attempts before exhaustion
+    assert.equal(gets, 4)
+    assert.equal(rows.size, 1)
+    assert.equal(rows.get(identity.key)?.interactionId, 'remote-1')
+  } finally {
+    await hub.close()
+  }
+
+  // 3) Stateless stream receiving { type: 'error', error: { code: 'service_unavailable' } } exits read-interrupted without repeating POST.
+  let statelessExit
+  const stateless = await run(
+    [
+      { ...created, event_id: 'ss-1' },
+      { type: 'error', error: { code: 'service_unavailable' } },
+    ],
+    { settings: { store: false, background: false, onExit: reason => { statelessExit = reason } } },
+  )
+  assert.equal(stateless.finish.reason.kind, 'error')
+  assert.equal(statelessExit, 'read-interrupted')
+  assert.equal(stateless.calls.filter(c => c.method === 'create').length, 1)
+  assert.equal(stateless.calls.filter(c => c.method === 'cancel').length, 0)
+
+  // 4) Related transient rate/quota codes also reconnect cleanly on stored streams.
+  for (const code of ['too_many_requests', 'rate_limit_exceeded', 'quota_exceeded']) {
+    const out = await run(
+      [
+        { ...created, event_id: `${code}-1` },
+        { ...start(0, 'model_output'), event_id: `${code}-2` },
+        { ...delta(0, 'text', { text: 'X' }), event_id: `${code}-3` },
+        { type: 'error', event_id: `${code}-4`, error: { code } },
+      ],
+      {
+        settings: { store: true, background: true },
+        reconnect: [
+          { ...delta(0, 'text', { text: 'Y' }), event_id: `${code}-5` },
+          { ...stop(0), event_id: `${code}-6` },
+          { ...done(), event_id: `${code}-7` },
+        ],
+      },
+    )
+    assert.equal(out.text, 'XY', `${code} should reconnect and finish`)
+    assert.equal(out.finish.reason.kind, 'stop')
+    assert.equal(out.calls.filter(c => c.method === 'cancel').length, 0)
+  }
+})
+

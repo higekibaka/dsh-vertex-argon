@@ -2,6 +2,16 @@
 
 All notable changes to **Gemini 4 Adapter** (`dsh-vertex-argon`) are documented in this file.
 
+## [2.3.1] - 2026-11-20
+
+### Changed
+- **Interactions Tool Retrieval Expanded to Carbon & Neon (`interactions-input.js`, `client.js`, docs & tests)**:
+  - Expanded `TOOL_RETRIEVAL_FAMILIES` from `['argon', 'hydrogen']` to all four official Gemini 4 families (`['argon', 'carbon', 'hydrogen', 'neon']`) for Gemini API (`google-generative-ai`) Interactions `v1beta`, following live two-turn streaming stateless replay verification on `gemini-4-carbon` and `gemini-4-neon`. Vertex AI (`google-vertex`), GenerateContent, and custom gateways pinned to `/v1/interactions` continue to fall back safely to full tool loading.
+
+### Fixed
+- **Recoverable Classification for In-Stream `service_unavailable` & Rate-Limit Errors (`interaction-lifecycle.js`, `test/interactions.test.mjs`)**:
+  - Added `'service_unavailable'`, `'rate_limit_exceeded'`, `'too_many_requests'`, and `'quota_exceeded'` to `RECOVERABLE_STREAM_ERROR_CODES` so upstream transient in-stream error frames (such as `code: "service_unavailable"`) are classified as recoverable `read-interrupted` failures rather than remote terminal protocol errors (`protocol-error`), enabling stored/background reconnects and preventing erroneous remote `/cancel` calls while preserving stateless no-resubmit safety after HTTP 200 SSE headers.
+
 ## [2.3.0] - 2026-11-20
 
 ### Added

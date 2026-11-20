@@ -4,7 +4,7 @@
 
 **面向 [DeepSeek Harness](<https://github.com/deepseek-ai/deepseek-harness>) 的 Google 官方双通道（Vertex AI + Gemini Developer API）Gemini 4 适配器，原生支持 Argon、Carbon、Hydrogen 与 Neon 八模型路由、GenerateContent / Interactions 双协议、65K+ 多跳长解码与请求级诊断。**
 
-- **当前版本**：`2.3.0`（[CHANGELOG.md](<CHANGELOG.md>)）
+- **当前版本**：`2.3.1`（[CHANGELOG.md](<CHANGELOG.md>)）
 - **npm 包名**：`dsh-vertex-argon`（保留既有包名、官方通道路由与本地存储域 ID，官方通道用户可直接原地升级；`2.0.0` 已移除 `1.6.x` 非官方反代通道）
 - **运行要求**：DSH `>=0.2.0-rc.2`，Node.js `^22.19.0 || >=24.0.0`（见 [package.json](<package.json>)）
 
@@ -16,7 +16,7 @@
 
 - **双官方通道 × 八模型路由**：同时接入 Google Cloud **Vertex AI**（`gemini-4-argon` / `gemini-4-carbon` / `gemini-4-hydrogen` / `gemini-4-neon`）与 **Gemini Developer API**（`gemini-4-argon-google` / `gemini-4-carbon-google` / `gemini-4-hydrogen-google` / `gemini-4-neon-google`），两通道凭据与网关严格隔离，绝不暗中互借或静默回退。
 - **65K+ 多跳长解码与流自愈**：单跳上限 `65,536` tokens，最大输出预算可达 `1,048,576`（最多 32 跳）；首个检查点前实时流式输出，支持检查点尾段回滚续传、逐跳四阶段超时看门狗、零交付首包重试、仅思考结束单次续答自愈，以及 `MALFORMED_FUNCTION_CALL` 后 `VALIDATED` → `AUTO` 工具模式自动退避。
-- **Interactions 协议、韧性加固与 Tool Retrieval**：支持前台流式及显式授权后的云端后台执行；内置 `creating` 预写防重计费锁、`last_event_id` 断点续读、`2026-05-20` 独立生命周期事件兼容、同会话历史死锁非流式对账、逐跳分阶段看门狗、无状态建连阶段重试、`validated` → `auto` 400 自动退避、非 2xx 安全白名单错误提取、多态步骤/内容块带签名回放，以及面向 Gemini API Argon / Hydrogen 的服务端 Tool Retrieval（`tool_search` + `defer_loading`）。
+- **Interactions 协议、韧性加固与 Tool Retrieval**：支持前台流式及显式授权后的云端后台执行；内置 `creating` 预写防重计费锁、`last_event_id` 断点续读、`2026-05-20` 独立生命周期事件兼容、同会话历史死锁非流式对账、逐跳分阶段看门狗、无状态建连阶段重试、`validated` → `auto` 400 自动退避、非 2xx 安全白名单错误提取、多态步骤/内容块带签名回放，以及面向 Gemini API 四模型（Argon / Carbon / Hydrogen / Neon）的服务端 Tool Retrieval（`tool_search` + `defer_loading`）。
 - **签名保真与跨模型安全降级**：完整保留并回放 `thoughtSignature` / `thought_signature`（含无文本独立签名块）；Argon / Carbon 原生映射 `low` / `medium` / `high` 三档（`max` 收敛为 `high`），Hydrogen / Neon 额外放行 `xhigh` 第四档（`max` 收敛为 `xhigh` 并剥离显式 `cachedContent` / `cached_content`，永不下发 `thinkingBudget`）；在 Argon ↔ Carbon ↔ Hydrogen ↔ Neon 或跨通道切换时自动将旧工具历史安全降级为文本记录并清洗污染块。
 - **Gemini 4 诊断面板与只读工具**：在右侧栏、会话详情页与单条回复底部提供请求摘要、基础 Token 水位（严格区分首跳上下文水位与跨跳累计用量）、11 列逐跳轨迹、分页原始响应证据、云端 Interaction ID 只读查询与全局恢复锁管理，并向智能体提供延迟加载的只读工具 `argon_inspect`。
 
@@ -107,8 +107,7 @@ Interactions 协议除云端后台恢复（`creating` 预写锁、`last_event_id
 
 | 官方通道 `route` | 协议 | 模型 | Tool Retrieval 行为 |
 |---|---|---|---|
-| `google-generative-ai` | `interactions`（`v1beta`） | `gemini-4-argon-google` / `gemini-4-hydrogen-google` | 支持（`explicit` / `auto` 下向宿主声明 `toolUpdate: 'addition-only'` 并注入服务端 `tool_search`；若自定义网关 URL 显式锁定 `/v1/interactions` 非 `v1beta`，则自动回退常规全量模式） |
-| `google-generative-ai` | `interactions` | `gemini-4-carbon-google` / `gemini-4-neon-google` | 自动回退常规全量加载（剥离 `defer_loading`，不会触发上游 `400`） |
+| `google-generative-ai` | `interactions`（`v1beta`） | `gemini-4-argon-google` / `gemini-4-carbon-google` / `gemini-4-hydrogen-google` / `gemini-4-neon-google` | 支持（`explicit` / `auto` 下向宿主声明 `toolUpdate: 'addition-only'` 并注入服务端 `tool_search`；若自定义网关 URL 显式锁定 `/v1/interactions` 非 `v1beta`，则自动回退常规全量模式） |
 | `google-vertex` | `interactions` | 全部四模型 | 自动回退常规全量加载（Vertex AI 文档尚未背书，不会触发上游 `400`） |
 | 任一官方通道 | `generate-content` | 全部八模型 | 不适用（Google Tool Retrieval 仅 Interactions `v1beta` 支持） |
 
@@ -132,7 +131,7 @@ Interactions 协议除云端后台恢复（`creating` 预写锁、`last_event_id
 | 协议与服务层级 | `vertexPaygoOnly` | `false` | 仅为 Vertex AI GenerateContent 附加 PayGo 共享池请求头 |
 | Interactions 后台与工具检索 | `allowInteractionStorage` | `false` | 允许向 Google 发送 `store: true` 云端存储许可（后台模式前置条件） |
 | Interactions 后台与工具检索 | `interactionsBackground` | `false` | 启用 Interactions 云端后台执行与断点恢复 |
-| Interactions 后台与工具检索 | `interactionsToolRetrieval` | `explicit` | `off` / `explicit` / `auto`；仅 Gemini API + Interactions 下的 Argon / Hydrogen 生效，其余模型与 Vertex AI 自动回退全量加载 |
+| Interactions 后台与工具检索 | `interactionsToolRetrieval` | `explicit` | `off` / `explicit` / `auto`；仅 Gemini API + Interactions `v1beta` 下的全系四模型（Argon / Carbon / Hydrogen / Neon）生效，Vertex AI 与显式锁定 `/v1/interactions` 的自定义网关自动回退全量加载 |
 | 诊断与高级 | `retainRawResponses` | `false` | 允许本地留存解析后的上游 JSON 响应帧（关闭不影响既有记录） |
 
 ### 服务层级与 Vertex PayGo 能力矩阵

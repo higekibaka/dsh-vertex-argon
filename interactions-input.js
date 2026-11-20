@@ -8,7 +8,7 @@ export const CORE_RESIDENT_TOOLS = Object.freeze([
   'run_code', 'web_search', 'web_fetch',
 ])
 const CORE_RESIDENT_TOOL_SET = new Set(CORE_RESIDENT_TOOLS)
-const TOOL_RETRIEVAL_FAMILIES = new Set(['argon', 'hydrogen'])
+const TOOL_RETRIEVAL_FAMILIES = new Set(['argon', 'carbon', 'hydrogen', 'neon'])
 const ALLOWED_TOOL_CHOICES = new Set(['auto', 'any', 'none', 'validated'])
 const ALLOWED_REPLAY_STEP_TYPES = new Set([
   'thought', 'model_output', 'function_call',

@@ -759,7 +759,7 @@ test('Interactions Tool Retrieval defaults to explicit, switches cleanly across 
     assert.ok(hint,'tool retrieval hint must render')
     const hintText=hint.children.join('')
     assert.equal(hintText,r.dictionary.toolRetrievalHint)
-    for(const token of ['Gemini API','Interactions','Argon','Hydrogen','addition-only','tool_search','Carbon','Neon','Vertex AI','400']){
+    for(const token of ['Gemini API','Interactions','v1beta','Argon','Carbon','Hydrogen','Neon','addition-only','tool_search','Vertex AI','/v1/interactions','400']){
       assert.ok(hintText.includes(token),`${language} hint must mention ${token}`)
     }
 
