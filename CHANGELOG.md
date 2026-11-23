@@ -2,6 +2,15 @@
 
 All notable changes to **Gemini 4 Adapter** (`dsh-vertex-argon`) are documented in this file.
 
+## [2.3.2] - 2026-11-24
+
+### Fixed
+- **Frozen / Read-Only Third-Party Provider Protection (`adapter.js`, `test/adapter.test.mjs`, fixes #7)**:
+  - Added prototype-chain writability checks (`canAssignProviderProp`) for both `stream` and `streamSimple` in `installGemini4PiAiPatch`'s `wrapProvider`, cleanly skipping frozen providers (such as `dsh-codex-subscription`), read-only/getter-only properties, and inherited methods on non-extensible (`Object.seal` / `Object.preventExtensions`) provider instances instead of throwing `TypeError: Cannot assign to read only property 'stream'` during host `current()` calls.
+  - Wrapped `stream`/`streamSimple` patching in `try/catch` with rollback (deleting inherited shadow properties or restoring own originals) so partial patches are never left behind or recorded in `patchedProviders`, and guarded `removeOwner` restoration per property against post-patch freezing.
+- **Same-Model Unsigned `toolCall` History Degradation (`google-signatures.js`, `test/signature-only.test.mjs`)**:
+  - Updated `createGoogleSignatureBridge` to degrade same-model assistant turns whose first `toolCall` lacks a valid base64 `thoughtSignature` into text transcripts (with turn-scoped `toolResult` pairing and `ARGON_SIGNATURE_REPLAY` on pending calls), preventing upstream HTTP 400 errors on legacy or damaged histories while strictly preserving 1:1 parallel function-call signature boundaries (never duplicating the first `toolCall`'s signature onto sibling calls).
+
 ## [2.3.1] - 2026-11-20
 
 ### Changed

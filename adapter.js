@@ -706,12 +706,34 @@ export function installGemini4PiAiPatch(recordDiagnostic, configInput = {}, resp
     if (typeof thinking.level === 'string') return { ...options, reasoning: thinking.level }
     return options
   }
+  const canAssignProviderProp = (obj, prop) => {
+    try {
+      if (Object.isFrozen(obj)) return false
+      let cur = obj
+      while (cur !== null && cur !== undefined) {
+        const desc = Object.getOwnPropertyDescriptor(cur, prop)
+        if (desc) {
+          if (desc.writable === false) return false
+          if (!('writable' in desc) && typeof desc.set !== 'function') return false
+          if (cur !== obj && !Object.isExtensible(obj)) return false
+          return true
+        }
+        cur = Object.getPrototypeOf(cur)
+      }
+      return Object.isExtensible(obj)
+    } catch {
+      return false
+    }
+  }
   const wrapProvider = (piProvider, defaultReasoning) => {
     if (!piProvider || typeof piProvider.streamSimple !== 'function' || typeof piProvider.stream !== 'function') return
     ensureGemini4Capabilities(piProvider)
     if (piProvider.id === PROVIDER || patchedProviders.has(piProvider)) return
+    if (!canAssignProviderProp(piProvider, 'stream') || !canAssignProviderProp(piProvider, 'streamSimple')) return
     const origStream = piProvider.stream
     const origStreamSimple = piProvider.streamSimple
+    const hadOwnStream = Object.prototype.hasOwnProperty.call(piProvider, 'stream')
+    const hadOwnStreamSimple = Object.prototype.hasOwnProperty.call(piProvider, 'streamSimple')
     const dispatchGemini4 = (requestModel, context, options = {}) => {
       const activeOwner = currentOwner()
       const cfg = resolveConfigValues(activeOwner?.configInput)
@@ -730,9 +752,21 @@ export function installGemini4PiAiPatch(recordDiagnostic, configInput = {}, resp
       if (gen.active && isGemini4Model(requestModel)) return dispatchGemini4(requestModel, context, mapStreamThinkingOption(options))
       return origStream.call(this, requestModel, context, options)
     }
-    patchedProviders.set(piProvider, { origStream, patchedStream, origStreamSimple, patchedStreamSimple })
-    piProvider.stream = patchedStream
-    piProvider.streamSimple = patchedStreamSimple
+    let streamAssigned = false
+    try {
+      piProvider.stream = patchedStream
+      streamAssigned = true
+      piProvider.streamSimple = patchedStreamSimple
+    } catch {
+      if (streamAssigned) {
+        try {
+          if (!hadOwnStream && Object.prototype.hasOwnProperty.call(piProvider, 'stream')) delete piProvider.stream
+          else piProvider.stream = origStream
+        } catch {}
+      }
+      return
+    }
+    patchedProviders.set(piProvider, { origStream, patchedStream, origStreamSimple, patchedStreamSimple, hadOwnStream, hadOwnStreamSimple })
   }
   const isNativeGemini4Target = (instance, provider, model) =>
     gen.active &&
@@ -789,9 +823,19 @@ export function installGemini4PiAiPatch(recordDiagnostic, configInput = {}, resp
       if (proto.current === patchedCurrent) proto.current = origCurrent
       if (origPrepareCall && proto.prepareCall === patchedPrepareCall) proto.prepareCall = origPrepareCall
       if (origProtoStream && proto.stream === patchedProtoStream) proto.stream = origProtoStream
-      for (const [piProvider, { origStream, patchedStream, origStreamSimple, patchedStreamSimple }] of patchedProviders) {
-        if (piProvider.stream === patchedStream) piProvider.stream = origStream
-        if (piProvider.streamSimple === patchedStreamSimple) piProvider.streamSimple = origStreamSimple
+      for (const [piProvider, { origStream, patchedStream, origStreamSimple, patchedStreamSimple, hadOwnStream, hadOwnStreamSimple }] of patchedProviders) {
+        try {
+          if (piProvider.stream === patchedStream) {
+            if (!hadOwnStream && Object.prototype.hasOwnProperty.call(piProvider, 'stream')) delete piProvider.stream
+            else piProvider.stream = origStream
+          }
+        } catch {}
+        try {
+          if (piProvider.streamSimple === patchedStreamSimple) {
+            if (!hadOwnStreamSimple && Object.prototype.hasOwnProperty.call(piProvider, 'streamSimple')) delete piProvider.streamSimple
+            else piProvider.streamSimple = origStreamSimple
+          }
+        } catch {}
       }
       patchedProviders.clear()
       for (const [m, saved] of patchedModels) {

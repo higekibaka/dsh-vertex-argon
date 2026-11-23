@@ -93,8 +93,12 @@ export function createGoogleSignatureBridge(context, model) {
     const hasCodes = codes.some(code => code !== undefined)
     const brokenCodec = hasCodes && (!same || codes.some((code, idx) => code !== undefined && (!code || message.content[idx].text !== '' || code.contentDigest !== digest(message.content) || code.historyDigest !== previousHistory)))
     const hasForeignTurnContent = !same && message.content.some(block => block.type === 'toolCall' || block.type === 'thinking')
+    // Gemini 3/4 协议要求单次或并行 functionCall 回合由首个 functionCall 携带合法 base64 thoughtSignature；
+    // 同模型历史若首个 toolCall 缺失或含非 base64 签名，也降级为文本转录避免上游 400（绝不跨 parallel toolCall 复制签名）。
+    const firstToolCall = same ? message.content.find(block => block.type === 'toolCall') : undefined
+    const hasUnsignedToolTurn = Boolean(firstToolCall && !base64(firstToolCall.thoughtSignature))
     let next = message
-    if (brokenCodec || hasForeignTurnContent) {
+    if (brokenCodec || hasForeignTurnContent || hasUnsignedToolTurn) {
       next = unsigned(message, index, allMessages, claimedIndices, demotedByResultIndex)
     } else {
       for (const block of message.content) {

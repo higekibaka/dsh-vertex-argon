@@ -1,9 +1,9 @@
-# Gemini 4 Adapter（dsh-vertex-argon）发版状态与验证账本（v2.3.1）
+# Gemini 4 Adapter（dsh-vertex-argon）发版状态与验证账本（v2.3.2）
 
-- **用户工程版本**：`2.3.1`（展示品牌名 **Gemini 4 Adapter**，底层包名保持 `dsh-vertex-argon`），以 [package.json](<../../package.json>) 为准。
+- **用户工程版本**：`2.3.2`（展示品牌名 **Gemini 4 Adapter**，底层包名保持 `dsh-vertex-argon`），以 [package.json](<../../package.json>) 为准。
 - **声明兼容**：DSH `>=0.2.0-rc.2`；Node.js `^22.19.0 || >=24.0.0`。以 [package.json](<../../package.json>) 为准。
-- **本轮范围**：`v2.3.1` 将 Gemini API Interactions `v1beta` 的服务端 Tool Retrieval 放开至全部四款 Gemini 4 官方模型（Argon / Carbon / Hydrogen / Neon，Vertex AI 与 `/v1/interactions` 自定义网关仍自动回退全量加载），并在 `interaction-lifecycle.js` 的可恢复流内错误码集合中补齐 `service_unavailable` 及同源限流/配额瞬态码（`rate_limit_exceeded` / `too_many_requests` / `quota_exceeded`）。
-- **验证状态**：2026-11-20 完成 `v2.3.1` 发版前离线全量回归：挂载本机既有 React `19.2.0` 路径作为 `NODE_PATH` 时，**37 个测试文件，736 项测试，736 通过，0 失败，0 跳过**；`git diff --check` 退出码 `0`。
+- **本轮范围**：`v2.3.2` 修复 Issue #7（`installGemini4PiAiPatch` 中 `wrapProvider` 对冻结或只读第三方 `piProvider` 裸赋值 `.stream`/`.streamSimple` 导致 `dsh-codex-subscription` 等插件启用崩溃），并在 `google-signatures.js` 吸收 PR #6 的合理部分（同模型首个 `toolCall` 缺合法 base64 `thoughtSignature` 时按回合边界安全降级，同时严守并行函数调用 1:1 签名边界不跨 part 复制）。
+- **验证状态**：2026-11-24 完成 `v2.3.2` 发版前离线全量回归：挂载本机既有 React `19.2.0` 路径作为 `NODE_PATH` 时，**37 个测试文件，741 项测试，741 通过，0 失败，0 跳过**；`git diff --check` 退出码 `0`。
 
 ## 1. 生产文件边界
 
@@ -81,6 +81,10 @@
   - **改动清单**：[interactions-input.js](<../../interactions-input.js>) 将 `TOOL_RETRIEVAL_FAMILIES` 扩展为 `new Set(['argon', 'carbon', 'hydrogen', 'neon'])`，在官方 Gemini API Interactions `v1beta` 下向 Carbon 与 Neon 开放 Tool Retrieval（保持 Vertex AI、GenerateContent 与显式 `/v1/interactions` 自定义网关自动回退全量加载边界不变）；[interaction-lifecycle.js](<../../interaction-lifecycle.js>) 将 `RECOVERABLE_STREAM_ERROR_CODES` 补齐 `'service_unavailable'` 及同源限流/配额瞬态码 `'rate_limit_exceeded'`、`'too_many_requests'`、`'quota_exceeded'`，确保流内 `{ type: 'error', error: { code: 'service_unavailable' } }` 识别为 `recoverableStreamError: true`、不设置 `remoteTerminalError`、退出原因为 `'read-interrupted'` 且不误取消远端后台任务；同步更新 [package.json](<../../package.json>)（`2.3.1`）、[CHANGELOG.md](<../../CHANGELOG.md>)、[client.js](<../../client.js>)（中英文 `toolRetrievalHint`）、[README.md](<../../README.md>)、[AGENTS.md](<../../AGENTS.md>)、[docs/implementation/README.md](<README.md>)、[DECISIONS.md](<DECISIONS.md>) 与本文档（[locale/zh.json](<../../locale/zh.json>) 与 [locale/en.json](<../../locale/en.json>) 经核对已覆盖四模型及工具按需检索，未改动）。
   - **更新与新增用例**：[tool-retrieval.test.mjs](<../../test/tool-retrieval.test.mjs>) 扩展 Carbon / Neon 在 Gemini API Interactions `v1beta` 下启用 Tool Retrieval、`toolUpdate: 'addition-only'`、过滤 deferred `tool-addition` 与端到端 `LlmRuntime` 覆盖，并强化 Vertex AI 与显式 `/v1/interactions` 回退断言；[client.test.mjs](<../../test/client.test.mjs>) 补充 `v1beta` 与 `/v1/interactions` 文案断言；[interactions.test.mjs](<../../test/interactions.test.mjs>) 新增 `service_unavailable` 及同源瞬态流内错误恢复、重试耗尽保留后台句柄（`read-interrupted` / 零 `/cancel`）及无状态不重发 `POST` 用例。
   - **离线实测（2026-11-20，Asia/Shanghai，Node.js `v24.12.0`，挂载本机既有 React `19.2.0` `NODE_PATH`，`--test-isolation=none`）**：**37 个测试文件，736 项测试，736 通过，0 失败，0 跳过**；`git diff --check` 退出码 `0`。
+- **2026-11-24 `v2.3.2` 发版补记（Issue #7 冻结/只读第三方 Provider 防护与 PR #6 同模型无签名 `toolCall` 降级兜底）**：
+  - **改动清单**：[adapter.js](<../../adapter.js>) 在 `installGemini4PiAiPatch` 中新增 `canAssignProviderProp(obj, prop)` 沿原型链检查 `stream` 与 `streamSimple` 可写性（拦截 `Object.freeze`、只读属性、getter-only 与不可扩展对象的继承方法），将赋值包进 `try/catch` 并在第二步失败时回滚第一步（继承遮蔽 `delete`、自有属性还原）杜绝半补丁与污染 `patchedProviders`，同时为 `removeOwner` 还原逐属性加 `try/catch` 防御；[google-signatures.js](<../../google-signatures.js>) 在 `createGoogleSignatureBridge` 新增 `hasUnsignedToolTurn`，对同模型（`same === true`）首个 `toolCall` 缺失或含非 base64 `thoughtSignature` 的历史回合走既有 `unsigned(...)` 回合边界降级（严守并行调用 1:1 签名边界，绝不跨 part 复制签名）；同步更新 [package.json](<../../package.json>)（`2.3.2`）、[CHANGELOG.md](<../../CHANGELOG.md>)、[docs/implementation/README.md](<README.md>)、[DECISIONS.md](<DECISIONS.md>) 与本文档。
+  - **新增用例**：[adapter.test.mjs](<../../test/adapter.test.mjs>) 新增 Issue #7 冻结/只读/getter-only/抛错 setter 回滚/不可扩展原型链/混合 snapshot 端到端与卸载前冻结回归用例（61/61）；[signature-only.test.mjs](<../../test/signature-only.test.mjs>) 新增 4 组同模型无签名/非 base64 降级、并行 1:1 签名不复制验证、首无次有降级及 pending 报错回归用例（44/44）。
+  - **离线实测（2026-11-24，Asia/Shanghai，Node.js `v24.12.0`，挂载本机既有 React `19.2.0` `NODE_PATH`，`--test-isolation=none`）**：**37 个测试文件，741 项测试，741 通过，0 失败，0 跳过**；`git diff --check` 退出码 `0`。
 - **发布清单预检（上一轮，当时未生成发布包）**：`npm pack --dry-run --json --ignore-scripts --cache .tmp/npm-cache` 退出码 0，清单 32 个文件；不包含退休模块、测试、工程缓存或宣传视频。仅预检，未生成发布包、安装或发布。
 - **差异检查**：`git diff --check` 退出码 0；保留用户原有版本/兼容范围改动及未跟踪的宣传视频内容。
 - **工具定义开销**：同一真实宿主首轮组装测试的固定估算由 542 降至 503 tokens（减少 39）；这不是 Google CountTokens 测量。

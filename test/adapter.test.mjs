@@ -2205,3 +2205,266 @@ nodeTest('P1-丙: generateContentHistory demotes same-route signed polluted text
   assert.deepEqual(outCodec.messages[1].content, [{ type: 'text', text: 'Y' }])
   assert.equal(outCodec.messages[2].role, 'user')
 })
+
+test('issue #7: installGemini4PiAiPatch safely skips frozen/read-only/non-extensible third-party providers without breaking writable Gemini 4 providers', async () => {
+  const makeProfile = (provider, piProvider, configuredMaxTokens = new Map()) => ({
+    provider,
+    displayName: provider,
+    piProvider,
+    reasoning: 'medium',
+    streamIdleTimeoutMs: 300000,
+    maxRequestImageBytes: 20971520,
+    requestImagePixelBudget: 4194304,
+    requestImageMaxBytes: 1048576,
+    retryPolicy: resolveRetryPolicy(undefined, 'test'),
+    modelErrors: new Map(),
+    configuredMaxTokens,
+  })
+  const makeAdapter = profiles => new PiAiAdapter({
+    profiles: () => profiles,
+    resolveApiKey: async () => 'fixture-key',
+    auth: { authContext: { env: async key => key === 'GOOGLE_CLOUD_API_KEY' ? 'fixture-key' : undefined, fileExists: async () => false } },
+  })
+
+  // 1. Object.freeze third-party provider (e.g. dsh-codex-subscription): does not throw, keeps original methods, and does not enter patchedProviders.
+  const frozenOrigStream = () => 'codex-stream'
+  const frozenOrigSimple = () => 'codex-simple'
+  let frozenGetterReads = 0
+  const frozenCodex = Object.freeze({
+    id: 'codex-subscription',
+    name: 'Codex Subscription',
+    getModels: () => [],
+    stream: frozenOrigStream,
+    streamSimple: frozenOrigSimple,
+  })
+  const frozenGetterProvider = Object.freeze(Object.defineProperties({
+    id: 'codex-subscription-getter',
+    getModels: () => [],
+  }, {
+    stream: { get() { frozenGetterReads++; return frozenOrigStream }, enumerable: true },
+    streamSimple: { get() { frozenGetterReads++; return frozenOrigSimple }, enumerable: true },
+  }))
+
+  // 2a. Only streamSimple is writable: false -> skips cleanly without half-patching stream.
+  const partialRoStream = () => 'partial-ro-stream'
+  const partialRoSimple = () => 'partial-ro-simple'
+  let partialRoStreamWrites = 0
+  let partialRoStreamVal = partialRoStream
+  const partialReadOnlyProvider = { id: 'partial-ro', getModels: () => [] }
+  Object.defineProperty(partialReadOnlyProvider, 'stream', {
+    get() { return partialRoStreamVal },
+    set(v) { partialRoStreamWrites++; partialRoStreamVal = v },
+    enumerable: true,
+    configurable: true,
+  })
+  Object.defineProperty(partialReadOnlyProvider, 'streamSimple', {
+    value: partialRoSimple,
+    writable: false,
+    enumerable: true,
+    configurable: true,
+  })
+
+  // 2b. Only streamSimple is getter-only -> skips cleanly without half-patching stream.
+  const getterOnlyStream = () => 'getter-only-stream'
+  const getterOnlySimple = () => 'getter-only-simple'
+  const getterOnlySimpleProvider = { id: 'getter-only-simple', getModels: () => [], stream: getterOnlyStream }
+  Object.defineProperty(getterOnlySimpleProvider, 'streamSimple', {
+    get() { return getterOnlySimple },
+    enumerable: true,
+    configurable: true,
+  })
+
+  // 2c. streamSimple setter throws -> rolls back stream assignment and never leaves provider in patchedProviders.
+  const throwingOrigStream = () => 'throwing-stream'
+  const throwingOrigSimple = () => 'throwing-simple'
+  let throwingStreamWrites = 0
+  let throwingStreamVal = throwingOrigStream
+  let throwingSimpleReads = 0
+  const throwingSetterProvider = { id: 'throwing-setter', getModels: () => [] }
+  Object.defineProperty(throwingSetterProvider, 'stream', {
+    get() { return throwingStreamVal },
+    set(v) { throwingStreamWrites++; throwingStreamVal = v },
+    enumerable: true,
+    configurable: true,
+  })
+  Object.defineProperty(throwingSetterProvider, 'streamSimple', {
+    get() { throwingSimpleReads++; return throwingOrigSimple },
+    set() { throw new TypeError('read-only setter') },
+    enumerable: true,
+    configurable: true,
+  })
+
+  // 3. Object.seal / Object.preventExtensions with stream/streamSimple on prototype (own writable id ensures !Object.isFrozen).
+  const sharedProtoStream = () => 'proto-stream'
+  const sharedProtoSimple = () => 'proto-simple'
+  const writableProto = {
+    getModels() { return [] },
+    stream: sharedProtoStream,
+    streamSimple: sharedProtoSimple,
+  }
+  const sealedProtoProvider = Object.seal(Object.assign(Object.create(writableProto), { id: 'sealed-proto' }))
+  const nonExtProtoProvider = Object.preventExtensions(Object.assign(Object.create(writableProto), { id: 'non-ext-proto' }))
+  assert.equal(Object.isFrozen(sealedProtoProvider), false)
+  assert.equal(Object.isExtensible(sealedProtoProvider), false)
+  assert.equal(Object.isFrozen(nonExtProtoProvider), false)
+  assert.equal(Object.isExtensible(nonExtProtoProvider), false)
+
+  // 4. Prototype defines non-writable or getter-only stream on extensible instances -> safely skipped.
+  const protoRoStream = () => 'proto-ro-stream'
+  const protoRoSimple = () => 'proto-ro-simple'
+  const roStreamProto = { getModels() { return [] }, streamSimple: protoRoSimple }
+  Object.defineProperty(roStreamProto, 'stream', { value: protoRoStream, writable: false, enumerable: true })
+  const roProtoInstance = Object.assign(Object.create(roStreamProto), { id: 'ro-proto-inst' })
+
+  const getterStreamProto = { getModels() { return [] }, streamSimple: protoRoSimple }
+  Object.defineProperty(getterStreamProto, 'stream', { get() { return protoRoStream }, enumerable: true })
+  const getterProtoInstance = Object.assign(Object.create(getterStreamProto), { id: 'getter-proto-inst' })
+
+  // 5. Writable extensible prototype-based provider + native google & google-vertex Gemini 4 providers in the same snapshot.
+  const classProtoInstance = Object.assign(Object.create(writableProto), { id: 'writable-proto-inst' })
+  const laterFrozenProvider = { id: 'later-frozen', getModels: () => [], stream: () => 'later-s', streamSimple: () => 'later-ss' }
+
+  const rawNeon = {
+    id: NEON_MODEL,
+    name: 'Gemini 4 Neon',
+    provider: 'google',
+    api: 'google-generative-ai',
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+    reasoning: false,
+    input: ['text', 'image'],
+    contextWindow: 1048576,
+    maxTokens: 65536,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  }
+  const rawArgon = {
+    id: MODEL,
+    name: 'Gemini 4 Argon',
+    provider: 'google-vertex',
+    api: 'google-vertex',
+    baseUrl: 'https://{location}-aiplatform.googleapis.com',
+    reasoning: false,
+    input: ['text', 'image'],
+    contextWindow: 1048576,
+    maxTokens: 65536,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  }
+  const nativeGoogle = { ...googleProvider(), id: 'google', name: 'Google', getModels: () => [rawNeon] }
+  const nativeVertex = { ...googleVertexProvider(), id: 'google-vertex', name: 'Vertex', getModels: () => [rawArgon] }
+  const origGoogleStream = nativeGoogle.stream
+  const origGoogleSimple = nativeGoogle.streamSimple
+  const origVertexStream = nativeVertex.stream
+  const origVertexSimple = nativeVertex.streamSimple
+
+  const profiles = new Map([
+    ['codex-subscription', makeProfile('codex-subscription', frozenCodex)],
+    ['codex-subscription-getter', makeProfile('codex-subscription-getter', frozenGetterProvider)],
+    ['partial-ro', makeProfile('partial-ro', partialReadOnlyProvider)],
+    ['getter-only-simple', makeProfile('getter-only-simple', getterOnlySimpleProvider)],
+    ['throwing-setter', makeProfile('throwing-setter', throwingSetterProvider)],
+    ['sealed-proto', makeProfile('sealed-proto', sealedProtoProvider)],
+    ['non-ext-proto', makeProfile('non-ext-proto', nonExtProtoProvider)],
+    ['ro-proto-inst', makeProfile('ro-proto-inst', roProtoInstance)],
+    ['getter-proto-inst', makeProfile('getter-proto-inst', getterProtoInstance)],
+    ['writable-proto-inst', makeProfile('writable-proto-inst', classProtoInstance)],
+    ['later-frozen', makeProfile('later-frozen', laterFrozenProvider)],
+    ['google', makeProfile('google', nativeGoogle, new Map([[NEON_MODEL, 65536]]))],
+    ['google-vertex', makeProfile('google-vertex', nativeVertex, new Map([[MODEL, 65536]]))],
+  ])
+  const piAdapter = makeAdapter(profiles)
+
+  const unpatch = installGemini4PiAiPatch()
+  mode = 'text'
+  try {
+    assert.doesNotThrow(() => piAdapter.current())
+
+    // Frozen & read-only providers remain completely untouched.
+    assert.equal(frozenCodex.stream, frozenOrigStream)
+    assert.equal(frozenCodex.streamSimple, frozenOrigSimple)
+    assert.equal(frozenGetterProvider.stream, frozenOrigStream)
+    assert.equal(frozenGetterProvider.streamSimple, frozenOrigSimple)
+
+    assert.equal(partialReadOnlyProvider.stream, partialRoStream)
+    assert.equal(partialReadOnlyProvider.streamSimple, partialRoSimple)
+    assert.equal(partialRoStreamWrites, 0)
+
+    assert.equal(getterOnlySimpleProvider.stream, getterOnlyStream)
+    assert.equal(getterOnlySimpleProvider.streamSimple, getterOnlySimple)
+
+    // Throwing setter attempted stream write once, then rolled it back cleanly.
+    assert.equal(throwingSetterProvider.stream, throwingOrigStream)
+    assert.equal(throwingSetterProvider.streamSimple, throwingOrigSimple)
+    assert.equal(throwingStreamWrites, 2)
+
+    assert.equal(sealedProtoProvider.stream, sharedProtoStream)
+    assert.equal(sealedProtoProvider.streamSimple, sharedProtoSimple)
+    assert.equal(Object.hasOwn(sealedProtoProvider, 'stream'), false)
+    assert.equal(Object.hasOwn(sealedProtoProvider, 'streamSimple'), false)
+
+    assert.equal(nonExtProtoProvider.stream, sharedProtoStream)
+    assert.equal(nonExtProtoProvider.streamSimple, sharedProtoSimple)
+    assert.equal(Object.hasOwn(nonExtProtoProvider, 'stream'), false)
+    assert.equal(Object.hasOwn(nonExtProtoProvider, 'streamSimple'), false)
+
+    assert.equal(roProtoInstance.stream, protoRoStream)
+    assert.equal(roProtoInstance.streamSimple, protoRoSimple)
+    assert.equal(Object.hasOwn(roProtoInstance, 'stream'), false)
+    assert.equal(Object.hasOwn(roProtoInstance, 'streamSimple'), false)
+
+    assert.equal(getterProtoInstance.stream, protoRoStream)
+    assert.equal(getterProtoInstance.streamSimple, protoRoSimple)
+    assert.equal(Object.hasOwn(getterProtoInstance, 'stream'), false)
+    assert.equal(Object.hasOwn(getterProtoInstance, 'streamSimple'), false)
+
+    // Writable extensible prototype instance and native google / google-vertex providers WERE wrapped.
+    assert.notEqual(classProtoInstance.stream, sharedProtoStream)
+    assert.notEqual(classProtoInstance.streamSimple, sharedProtoSimple)
+    assert.notEqual(nativeGoogle.stream, origGoogleStream)
+    assert.notEqual(nativeGoogle.streamSimple, origGoogleSimple)
+    assert.notEqual(nativeVertex.stream, origVertexStream)
+    assert.notEqual(nativeVertex.streamSimple, origVertexSimple)
+    assert.equal(rawNeon.reasoning, true)
+    assert.equal(rawNeon.thinkingLevelMap.xhigh, 'xhigh')
+    assert.equal(rawArgon.reasoning, true)
+    assert.equal(rawArgon.thinkingLevelMap.high, 'high')
+
+    // End-to-end streaming through both wrapped native providers works normally.
+    const googleOut = await collect(piAdapter.stream({ ...req('xhigh', NEON_MODEL), provider: 'google' }))
+    assert.equal(googleOut.at(-1).reason.kind, 'stop')
+    assert.deepEqual(wire.at(-1).body.generationConfig.thinkingConfig, { thinkingLevel: 'XHIGH', includeThoughts: true })
+
+    const vertexOut = await collect(piAdapter.stream({ ...req('high', MODEL), provider: 'google-vertex' }))
+    assert.equal(vertexOut.at(-1).reason.kind, 'stop')
+    assert.deepEqual(wire.at(-1).body.generationConfig.thinkingConfig, { thinkingLevel: 'HIGH', includeThoughts: true })
+
+    // Freeze a previously-wrapped third-party provider before unpatch() to verify removeOwner resilience.
+    Object.freeze(laterFrozenProvider)
+
+    // Track getter/setter touches during unpatch() to prove skipped providers were never stored in patchedProviders.
+    const frozenReadsBeforeUnpatch = frozenGetterReads
+    const throwingReadsBeforeUnpatch = throwingSimpleReads
+    const throwingWritesBeforeUnpatch = throwingStreamWrites
+
+    assert.doesNotThrow(() => unpatch())
+
+    assert.equal(frozenGetterReads, frozenReadsBeforeUnpatch)
+    assert.equal(throwingSimpleReads, throwingReadsBeforeUnpatch)
+    assert.equal(throwingStreamWrites, throwingWritesBeforeUnpatch)
+  } finally {
+    mode = 'tool'
+    unpatch()
+  }
+
+  // Writable native providers and prototype instance are completely restored after unpatch().
+  assert.equal(nativeGoogle.stream, origGoogleStream)
+  assert.equal(nativeGoogle.streamSimple, origGoogleSimple)
+  assert.equal(nativeVertex.stream, origVertexStream)
+  assert.equal(nativeVertex.streamSimple, origVertexSimple)
+  assert.equal(rawNeon.reasoning, false)
+  assert.equal('thinkingLevelMap' in rawNeon, false)
+  assert.equal(rawArgon.reasoning, false)
+  assert.equal('thinkingLevelMap' in rawArgon, false)
+  assert.equal(classProtoInstance.stream, sharedProtoStream)
+  assert.equal(classProtoInstance.streamSimple, sharedProtoSimple)
+  assert.equal(Object.hasOwn(classProtoInstance, 'stream'), false)
+  assert.equal(Object.hasOwn(classProtoInstance, 'streamSimple'), false)
+})

@@ -1,4 +1,4 @@
-# Gemini 4 Adapter（dsh-vertex-argon）核心技术决定与协议合同（v2.3.1）
+# Gemini 4 Adapter（dsh-vertex-argon）核心技术决定与协议合同（v2.3.2）
 
 本文区分当前实现合同与历史实测；验证来源与本轮结果见 [STATUS.md](<STATUS.md>)。
 
