@@ -128,13 +128,13 @@ test('protocol controls default to GenerateContent without granting cloud storag
   await r.close()
 })
 test('reset restores both protocols and revokes background/storage options',async()=>{
-  const r=render({googleProtocol:'interactions',vertexProtocol:'interactions',interactionsBackground:true,allowInteractionStorage:true,interactionsToolRetrieval:'auto'})
+  const r=render({googleProtocol:'interactions',vertexProtocol:'interactions',interactionsBackground:true,allowInteractionStorage:true,interactionsToolRetrieval:'auto',allowGeminiFilesApi:true})
   assert.equal(typeof r.dictionary.resetDefaults,'string')
   const resets=r.all.filter(x=>x.type==='button'&&x.children.includes(r.dictionary.resetDefaults))
   assert.equal(resets.length,1)
   await resets[0].props.onClick()
-  assert.equal(r.writes.length,14)
-  assert.deepEqual(Object.fromEntries(r.writes),{showInModelPicker:true,reasoning:'medium',longDecode:true,maxTokens:65536,contextWindow:1048576,googleProtocol:'generate-content',vertexProtocol:'generate-content',interactionsBackground:false,allowInteractionStorage:false,interactionsToolRetrieval:'explicit',retainRawResponses:false,googleServiceTier:'standard',vertexServiceTier:'standard',vertexPaygoOnly:false})
+  assert.equal(r.writes.length,15)
+  assert.deepEqual(Object.fromEntries(r.writes),{showInModelPicker:true,reasoning:'medium',longDecode:true,maxTokens:65536,contextWindow:1048576,googleProtocol:'generate-content',vertexProtocol:'generate-content',interactionsBackground:false,allowInteractionStorage:false,interactionsToolRetrieval:'explicit',allowGeminiFilesApi:false,retainRawResponses:false,googleServiceTier:'standard',vertexServiceTier:'standard',vertexPaygoOnly:false})
   await r.close()
 })
 test('incompatible Vertex budget is visibly warned, never silently clamped',async()=>{
@@ -311,10 +311,10 @@ test('tier writes use the real revision-fenced ConfigFormController and Host sch
     try {
       await panel.mount()
       await button(panel.draw(),r.dictionary.resetDefaults).props.onClick()
-      // 重置仍逐字段提交：含 interactionsToolRetrieval 共 14 次写，且都不再出现 proxy* 字段。
+      // 重置仍逐字段提交：含 interactionsToolRetrieval 与 allowGeminiFilesApi 共 15 次写，且都不再出现 proxy* 字段。
       const resetOps=calls.slice(3).flatMap(call=>call.ops.map(op=>op.path[0]))
-      assert.equal(calls.length,17)
-      assert.deepEqual(resetOps.sort(),['allowInteractionStorage','contextWindow','googleProtocol','googleServiceTier','interactionsBackground','interactionsToolRetrieval','longDecode','maxTokens','reasoning','retainRawResponses','showInModelPicker','vertexPaygoOnly','vertexProtocol','vertexServiceTier'].sort())
+      assert.equal(calls.length,18)
+      assert.deepEqual(resetOps.sort(),['allowGeminiFilesApi','allowInteractionStorage','contextWindow','googleProtocol','googleServiceTier','interactionsBackground','interactionsToolRetrieval','longDecode','maxTokens','reasoning','retainRawResponses','showInModelPicker','vertexPaygoOnly','vertexProtocol','vertexServiceTier'].sort())
       assert.equal(Object.keys(controller.getSnapshot().value).some(key=>key.startsWith('proxy')),false)
     } finally { panel.close() }
 
@@ -330,6 +330,7 @@ test('in-flight tier save blocks retained competing settings and reset callbacks
     await tierButton(r,'googleServiceTier','priority').props.onClick()
     await protocolButton(r,'google','generate-content').props.onClick()
     await toolRetrievalButton(r,'auto').props.onClick()
+    await filesApiButton(r).props.onClick()
     await r.all.find(x=>x.type==='button'&&x.children.includes(r.dictionary.resetDefaults)).props.onClick()
     assert.deepEqual(calls,[['googleServiceTier','flex']])
     settle(true);await pending
@@ -732,11 +733,12 @@ test('settings expose no dedicated reverse-proxy surface after removal',async()=
     }finally{panel.close();await r.close()}
   }
   assert.equal(Object.keys(Config({})).some(key=>key.startsWith('proxy')),false)
-  assert.equal(Object.keys(Config({})).length,14)
+  assert.equal(Object.keys(Config({})).length,15)
 })
 
 const toolRetrievalGroup=r=>r.all.find(x=>x.props['data-tool-retrieval-field']==='interactionsToolRetrieval')
 const toolRetrievalButton=(r,mode)=>toolRetrievalGroup(r).children.find(x=>x.children.includes(r.dictionary['toolRetrieval_'+mode]))
+const filesApiButton=r=>r.all.find(x=>x.props['data-files-api-field']==='allowGeminiFilesApi')
 
 test('Interactions Tool Retrieval defaults to explicit, switches cleanly across modes, and documents scope in zh/en',async()=>{
   assert.equal(Config({}).interactionsToolRetrieval.get(),'explicit')
@@ -808,5 +810,70 @@ test('Interactions Tool Retrieval defaults to explicit, switches cleanly across 
     assert.equal(controller.getSnapshot().value.interactionsToolRetrieval,'off')
     await r.all.find(x=>x.type==='button'&&x.children.includes(r.dictionary.resetDefaults)).props.onClick()
     assert.equal(controller.getSnapshot().value.interactionsToolRetrieval,'explicit')
+  }finally{await r.close();await controller.dispose()}
+})
+
+test('Gemini Files API upload consent defaults off, requires writable form, revokes on reset, and documents scope in zh/en',async()=>{
+  assert.equal(Config({}).allowGeminiFilesApi.get(),false)
+  assert.equal(Config({allowGeminiFilesApi:true}).allowGeminiFilesApi.get(),true)
+
+  for(const language of ['zh','en']){
+    const r=render({},true,{language})
+    const toggle=filesApiButton(r)
+    assert.ok(toggle,'allowGeminiFilesApi toggle must render in section 4')
+    assert.equal(toggle.props.role,'switch')
+    assert.equal(toggle.props['aria-checked'],false)
+    assert.equal(toggle.props['aria-labelledby'],'argon-files-api-label')
+    assert.equal(toggle.props['aria-describedby'],'argon-files-api-hint')
+    assert.equal(toggle.props.disabled,false)
+    assert.equal(r.writes.length,0)
+
+    const hint=r.all.find(x=>x.props.id==='argon-files-api-hint')
+    assert.ok(hint,'allowGeminiFilesApi hint must render')
+    const hintText=hint.children.join('')
+    assert.equal(hintText,r.dictionary.filesApiHint)
+    for(const token of ['Gemini API','*-google','argon_slice_file','PDF','Interactions','GenerateContent','48','Vertex AI']){
+      assert.ok(hintText.includes(token),`${language} filesApiHint must mention ${token}`)
+    }
+
+    await toggle.props.onClick()
+    assert.deepEqual(r.writes,[['allowGeminiFilesApi',true]])
+    r.setForm({writable:false})
+    await toggle.props.onClick()
+    assert.equal(r.writes.length,1,'retained filesApi callback must stop when form becomes read-only')
+    await r.close()
+
+    const readonly=render({allowGeminiFilesApi:true},false,{language})
+    const roToggle=filesApiButton(readonly)
+    assert.equal(roToggle.props['aria-checked'],true)
+    assert.equal(roToggle.props.disabled,true)
+    await roToggle.props.onClick()
+    assert.equal(readonly.writes.length,0)
+    await readonly.close()
+
+    const enabled=render({allowGeminiFilesApi:true},true,{language})
+    await enabled.all.find(x=>x.type==='button'&&x.children.includes(enabled.dictionary.resetDefaults)).props.onClick()
+    assert.deepEqual(enabled.writes.find(([key])=>key==='allowGeminiFilesApi'),['allowGeminiFilesApi',false])
+    await enabled.close()
+  }
+
+  const {ConfigFormController}=await hostClientModule('@deepseek-ai/dsh-client-ui-settings','packages/client/ui-settings/src/client/config-form.ts')
+  const resolve=value=>Object.fromEntries(Object.entries(Config(value)).map(([key,item])=>[key,item.get()]))
+  let namespace={ns:'local-vertex-argon',revision:1,value:resolve({})}
+  const listeners=new Set()
+  const mirror={getSnapshot:()=>({view:{writable:true,namespaces:[namespace]}}),subscribe:listener=>{listeners.add(listener);return()=>listeners.delete(listener)},acceptView:view=>{namespace=view;for(const listener of listeners)listener()},load:async()=>{}}
+  const ctx={remote:{settings:{mutate:async(_ns,ops,revision)=>{
+    const value={...namespace.value}
+    for(const op of ops)value[op.path[0]]=op.value
+    return{ok:true,value:{...namespace,revision:revision+1,value:resolve(value)}}
+  }}}}
+  const controller=new ConfigFormController(ctx,{namespace:namespace.ns,decode:resolve},mirror,{})
+  const r=render({},true,{formController:controller})
+  try{
+    assert.equal(controller.getSnapshot().value.allowGeminiFilesApi,false)
+    await filesApiButton(r).props.onClick()
+    assert.equal(controller.getSnapshot().value.allowGeminiFilesApi,true)
+    await r.all.find(x=>x.type==='button'&&x.children.includes(r.dictionary.resetDefaults)).props.onClick()
+    assert.equal(controller.getSnapshot().value.allowGeminiFilesApi,false)
   }finally{await r.close();await controller.dispose()}
 })

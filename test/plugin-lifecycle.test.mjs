@@ -88,11 +88,13 @@ test('new configuration preserves legacy defaults and validates protocol enum',(
  assert.equal(cfg.vertexProtocol.get(),'generate-content')
  assert.equal(cfg.interactionsBackground.get(),false)
  assert.equal(cfg.allowInteractionStorage.get(),false)
+ assert.equal(cfg.allowGeminiFilesApi.get(),false)
  assert.equal(cfg.interactionsToolRetrieval.get(),'explicit')
  assert.equal(cfg.maxTokens.get(),65536)
  assert.throws(()=>plugin.Config({googleProtocol:'auto-fallback'}))
  assert.throws(()=>plugin.Config({interactionsToolRetrieval:'invalid'}))
  assert.throws(()=>resolveConfigValues({allowInteractionStorage:'false'}),/explicit booleans/)
+ assert.throws(()=>resolveConfigValues({allowGeminiFilesApi:'true'}),/explicit boolean/)
 })
 test('raw storage attach failure closes its newly opened domain reservation',async()=>{
  const rootDisposers=[],storageInitializers=[],childDisposers=[];let closed=0
@@ -225,5 +227,258 @@ test('plugin entry wires live native settings and its response hub into the insp
    }
   } finally {await fiber.dispose()}
  } finally {globalThis.fetch=originalFetch;await ctx.fiber.dispose()}
+})
+
+test('file slicing tool stays absent by default, hot-toggles via volatile updates, survives tools reload, and disposes cleanly', async () => {
+ const cfg={allowGeminiFilesApi:false}
+ const live={allowGeminiFilesApi:{get:()=>cfg.allowGeminiFilesApi}}
+ const ctx=new Context()
+ await ctx.plugin(LlmRuntime)
+ await ctx.plugin(SystemPrompt)
+ let registry=ctx.plugin(ToolRuntime);await registry
+ try {
+  const fiber=ctx.plugin({inject:['llm'],apply:child=>plugin.apply(child,live)});await fiber
+  try {
+   assert.equal(ctx.tools.get('argon_slice_file'),undefined,'default-off consent must not register argon_slice_file')
+   assert.equal(ctx.tools.schemas().some(tool=>tool.name==='argon_slice_file'),false)
+
+   cfg.allowGeminiFilesApi=true
+   ctx.emit('loader/volatile-update')
+   assert.ok(ctx.tools.get('argon_slice_file'),'enabling allowGeminiFilesApi must hot-register argon_slice_file')
+   const schema=ctx.tools.schemas().find(tool=>tool.name==='argon_slice_file')
+   assert.equal(schema?.deferLoading,true)
+
+   await registry.dispose()
+   registry=ctx.plugin(ToolRuntime);await registry
+   assert.ok(ctx.tools.get('argon_slice_file'),'argon_slice_file must re-register when tools service reloads while enabled')
+   assert.equal(ctx.tools.schemas().find(tool=>tool.name==='argon_slice_file')?.deferLoading,true)
+
+   cfg.allowGeminiFilesApi=false
+   ctx.emit('loader/volatile-update')
+   assert.equal(ctx.tools.get('argon_slice_file'),undefined,'disabling allowGeminiFilesApi must hot-unregister argon_slice_file')
+
+   cfg.allowGeminiFilesApi=true
+   ctx.emit('loader/volatile-update')
+   assert.ok(ctx.tools.get('argon_slice_file'))
+  } finally {
+   await fiber.dispose()
+  }
+  assert.equal(ctx.tools.get('argon_slice_file'),undefined,'disposing plugin must clean up argon_slice_file')
+
+  // Direct mount with allowGeminiFilesApi: true registers immediately with deferLoading: true.
+  const optedInFiber=ctx.plugin(plugin,{allowGeminiFilesApi:true});await optedInFiber
+  try {
+   const schema=ctx.tools.schemas().find(tool=>tool.name==='argon_slice_file')
+   assert.ok(schema)
+   assert.equal(schema.deferLoading,true)
+  } finally {
+   await optedInFiber.dispose()
+  }
+  assert.equal(ctx.tools.get('argon_slice_file'),undefined)
+ } finally {
+  await ctx.fiber.dispose()
+ }
+})
+
+test('file slicing tool registration failure does not poison lastSnap and disabling revokes in-flight consent', async () => {
+ const { mkdirSync, mkdtempSync, writeFileSync, rmSync } = await import('node:fs')
+ const { join } = await import('node:path')
+ const tmpBase = join(import.meta.dirname, '..', '.tmp')
+ mkdirSync(tmpBase, { recursive: true })
+ const dir = mkdtempSync(join(tmpBase, 'argon-slice-lifecycle-'))
+ const pdfPath = join(dir, 'sample.pdf')
+ writeFileSync(pdfPath, '%PDF-1.4\nfixture\n')
+ const originalFetch = globalThis.fetch
+ const cfg = { allowGeminiFilesApi: false }
+ const live = { allowGeminiFilesApi: { get: () => cfg.allowGeminiFilesApi } }
+ const listeners = new Map()
+ let registeredTools = new Map()
+ let failNextRegister = true
+ let registerAttempts = 0
+ const rootDisposers = []
+ const toolDisposers = []
+ const ctx = {
+  get: key => key === 'launchEnvironment' ? { get: name => name === 'GOOGLE_API_KEY' ? { value: 'fixture-key' } : undefined } : undefined,
+  llm: { registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) },
+  effect: fn => { const d = fn(); if (typeof d === 'function') rootDisposers.push(d) },
+  on: (event, fn) => {
+   if (!listeners.has(event)) listeners.set(event, [])
+   listeners.get(event).push(fn)
+  },
+  emit: (event, ...args) => { for (const fn of listeners.get(event) ?? []) fn(...args) },
+  inject: (keys, fn) => {
+   if (keys.length === 1 && keys[0] === 'tools') {
+    fn({
+     logger: { warn: () => {} },
+     effect: ef => { const d = ef(); if (typeof d === 'function') toolDisposers.push(d) },
+     tools: {
+      register: tool => {
+       registerAttempts++
+       if (failNextRegister) {
+        failNextRegister = false
+        throw new Error('transient register failure')
+       }
+       registeredTools.set(tool.name, tool)
+       return () => { registeredTools.delete(tool.name) }
+      },
+     },
+    })
+   }
+  },
+ }
+ let uploadStartedResolve
+ const uploadStarted = new Promise(resolve => { uploadStartedResolve = resolve })
+ let fetchAborted = false
+ globalThis.fetch = (_url, init) => new Promise((_resolve, reject) => {
+  uploadStartedResolve()
+  const onAbort = () => {
+   fetchAborted = true
+   reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+  }
+  if (init?.signal?.aborted) onAbort()
+  else init?.signal?.addEventListener('abort', onAbort, { once: true })
+ })
+ try {
+  plugin.apply(ctx, live)
+  assert.equal(registeredTools.has('argon_slice_file'), false)
+
+  // First volatile update fails tools.register; must NOT poison lastSnap.
+  cfg.allowGeminiFilesApi = true
+  ctx.emit('loader/volatile-update')
+  assert.equal(registerAttempts, 1)
+  assert.equal(registeredTools.has('argon_slice_file'), false)
+
+  // Retrying volatile update with the SAME config value must retry registration and succeed.
+  ctx.emit('loader/volatile-update')
+  assert.equal(registerAttempts, 2)
+  assert.equal(registeredTools.has('argon_slice_file'), true)
+
+  // Start an upload through the registered tool, then disable allowGeminiFilesApi mid-flight.
+  const tool = registeredTools.get('argon_slice_file')
+  const execPromise = tool.execute(
+   { path: pdfPath, startPage: 1, endPage: 1 },
+   {
+    callId: 'revoke-inflight-1',
+    agent: { id: 'sess-revoke', modelSelection: { current: () => ({ provider: PROVIDER, model: 'gemini-4-neon-google' }) } },
+    signal: new AbortController().signal,
+   },
+  )
+  await uploadStarted
+  cfg.allowGeminiFilesApi = false
+  ctx.emit('loader/volatile-update')
+  assert.equal(registeredTools.has('argon_slice_file'), false, 'disabling allowGeminiFilesApi must unregister tool')
+  const toolResult = await execPromise
+  assert.equal(fetchAborted, true, 'disabling allowGeminiFilesApi must trigger revokeConsent and abort in-flight upload')
+  assert.equal(toolResult.ok, false)
+  assert.equal(toolResult.code, 'ARGON_FILE_SLICING_DISABLED')
+ } finally {
+  globalThis.fetch = originalFetch
+  for (const d of toolDisposers.reverse()) await d()
+  for (const d of rootDisposers.reverse()) await d()
+  rmSync(dir, { recursive: true, force: true })
+ }
+})
+
+test('initial mount registration failure retries on same-snapshot volatile update and revokeConsent survives unrelated config throw', async () => {
+ const { mkdirSync, mkdtempSync, writeFileSync, rmSync } = await import('node:fs')
+ const { join } = await import('node:path')
+ const tmpBase = join(import.meta.dirname, '..', '.tmp')
+ mkdirSync(tmpBase, { recursive: true })
+ const dir = mkdtempSync(join(tmpBase, 'argon-slice-mount-retry-'))
+ const pdfPath = join(dir, 'sample.pdf')
+ writeFileSync(pdfPath, '%PDF-1.4\nfixture\n')
+ const originalFetch = globalThis.fetch
+ const cfg = { allowGeminiFilesApi: true, throwReasoning: false }
+ const live = {
+  allowGeminiFilesApi: { get: () => cfg.allowGeminiFilesApi },
+  reasoning: {
+   get: () => {
+    if (cfg.throwReasoning) throw new Error('unrelated config getter failure')
+    return 'medium'
+   },
+  },
+ }
+ const listeners = new Map()
+ const registeredTools = new Map()
+ let failNextRegister = true
+ let registerAttempts = 0
+ const rootDisposers = []
+ const toolDisposers = []
+ const ctx = {
+  get: key => key === 'launchEnvironment' ? { get: name => name === 'GOOGLE_API_KEY' ? { value: 'fixture-key' } : undefined } : undefined,
+  llm: { registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) },
+  effect: fn => { const d = fn(); if (typeof d === 'function') rootDisposers.push(d) },
+  on: (event, fn) => {
+   if (!listeners.has(event)) listeners.set(event, [])
+   listeners.get(event).push(fn)
+  },
+  emit: (event, ...args) => { for (const fn of listeners.get(event) ?? []) fn(...args) },
+  inject: (keys, fn) => {
+   if (keys.length === 1 && keys[0] === 'tools') {
+    fn({
+     logger: { warn: () => {} },
+     effect: ef => { const d = ef(); if (typeof d === 'function') toolDisposers.push(d) },
+     tools: {
+      register: tool => {
+       registerAttempts++
+       if (failNextRegister) {
+        failNextRegister = false
+        throw new Error('initial mount register failure')
+       }
+       registeredTools.set(tool.name, tool)
+       return () => { registeredTools.delete(tool.name) }
+      },
+     },
+    })
+   }
+  },
+ }
+ let uploadStartedResolve
+ const uploadStarted = new Promise(resolve => { uploadStartedResolve = resolve })
+ let fetchAborted = false
+ globalThis.fetch = (_url, init) => new Promise((_resolve, reject) => {
+  uploadStartedResolve()
+  const onAbort = () => {
+   fetchAborted = true
+   reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+  }
+  if (init?.signal?.aborted) onAbort()
+  else init?.signal?.addEventListener('abort', onAbort, { once: true })
+ })
+ try {
+  // Initial mount with allowGeminiFilesApi: true fails tools.register; must NOT leave orphan syncer.
+  plugin.apply(ctx, live)
+  assert.equal(registerAttempts, 1)
+  assert.equal(registeredTools.has('argon_slice_file'), false)
+
+  // Same-snapshot volatile update must retry because sliceToolSyncFailed is true!
+  ctx.emit('loader/volatile-update')
+  assert.equal(registerAttempts, 2)
+  assert.equal(registeredTools.has('argon_slice_file'), true)
+
+  // Start an upload, then revoke allowGeminiFilesApi while another unrelated config getter throws.
+  const tool = registeredTools.get('argon_slice_file')
+  const execPromise = tool.execute(
+   { path: pdfPath, startPage: 1, endPage: 1 },
+   {
+    callId: 'revoke-on-unrelated-throw-1',
+    agent: { id: 'sess-throw-revoke', modelSelection: { current: () => ({ provider: PROVIDER, model: 'gemini-4-neon-google' }) } },
+    signal: new AbortController().signal,
+   },
+  )
+  await uploadStarted
+  cfg.allowGeminiFilesApi = false
+  cfg.throwReasoning = true
+  assert.throws(() => ctx.emit('loader/volatile-update'), /unrelated config getter failure/)
+  const toolResult = await execPromise
+  assert.equal(fetchAborted, true, 'revokeConsent must fire before resolveConfigValues even if another config getter throws')
+  assert.equal(toolResult.ok, false)
+  assert.equal(toolResult.code, 'ARGON_FILE_SLICING_DISABLED')
+ } finally {
+  globalThis.fetch = originalFetch
+  for (const d of toolDisposers.reverse()) await d()
+  for (const d of rootDisposers.reverse()) await d()
+  rmSync(dir, { recursive: true, force: true })
+ }
 })
 

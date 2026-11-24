@@ -1,11 +1,11 @@
-# Gemini 4 Adapter（dsh-vertex-argon）实现架构与模块边界（v2.3.2）
+# Gemini 4 Adapter（dsh-vertex-argon）实现架构与模块边界（v2.4.0）
 
 本目录描述当前本地工程；实现合同见 [DECISIONS.md](<DECISIONS.md>)，本轮验证与历史实测分开记录于 [STATUS.md](<STATUS.md>)。文档更新不表示插件已安装、已发布或新增了云端验证。
 
 ## 1. 插件与宿主边界
 
 - 展示品牌名 **Gemini 4 Adapter**（诊断面板显示为 **Gemini 4 诊断** / **Gemini 4 diagnostics**）；底层 npm 包名保持 `dsh-vertex-argon`，Host 注册名 `local-vertex-argon`，Provider ID `google-vertex-argon`。
-- 当前工程版本 `2.3.2`，支持 DSH `>=0.2.0-rc.2`；Node.js `^22.19.0 || >=24.0.0`。元数据以 [package.json](<../../package.json>) 为准。
+- 当前工程版本 `2.4.0`，支持 DSH `>=0.2.0-rc.2`；Node.js `^22.19.0 || >=24.0.0`。元数据以 [package.json](<../../package.json>) 为准。
 - 仅使用宿主公开的 `llm`、`storageDomain`、`typert`、`settings`、`tools` 与 Web Client Slots，不修改宿主源码、已安装归档或 profile。
 - `installGemini4PiAiPatch` 同时守护原生 `google` / `google-vertex` 的 `PiAiAdapter.prototype.prepareCall` / `stream`、`piProvider.stream` / `streamSimple` 与已声明 Gemini 4 模型的 `thinkingLevelMap`；不引入隐式辅助模型请求。
 
@@ -38,8 +38,8 @@ flowchart TD
 
 ### 入口与配置
 
-- [index.js](<../../index.js>)：14 项 `volatile` 配置（含 `interactionsToolRetrieval`）、存储域、Typert 服务、请求关联事件与延迟加载工具注册。配置完整表见 [主文档](<../../README.md#完整配置14-项>)。
-- [client.js](<../../client.js>)：设置页面（含 Interactions 工具按需检索三档控制与 14 项默认重置）、右侧栏/会话主视图/回复快捷入口，以及 **Debug / Operations** 两个工作区；不挂载范围聚合仪表盘。
+- [index.js](<../../index.js>)：15 项 `volatile` 配置（含 `interactionsToolRetrieval` 与默认关闭的 `allowGeminiFilesApi`）、存储域、Typert 服务、请求关联事件、文件切片注册表生命周期与延迟加载工具注册（`argon_slice_file` 仅在 `allowGeminiFilesApi: true` 时热注册）。配置完整表见 [主文档](<../../README.md#完整配置15-项>)。
+- [client.js](<../../client.js>)：设置页面（含 Interactions 工具按需检索三档控制、Gemini Files API 文件切片上传显式授权开关与 15 项默认重置）、右侧栏/会话主视图/回复快捷入口，以及 **Debug / Operations** 两个工作区；不挂载范围聚合仪表盘。
 - [runtime.js](<../../runtime.js>)：从现有宿主解析 `@deepseek-ai/*`、`@earendil-works/pi-ai`、`@google/genai`、`zod` 等依赖。
 
 ### 路由、连接与服务层级
@@ -62,9 +62,10 @@ flowchart TD
 - [interaction-state.js](<../../interaction-state.js>) / [interaction-lifecycle.js](<../../interaction-lifecycle.js>)：`creating` 预写锁、恢复状态、轮询生命周期。
 - [interaction-query.js](<../../interaction-query.js>)：已知 Cloud Interaction ID 的只读单次 `GET`，仅 Google/Vertex。
 
-### 结构化输出
+### 结构化输出与文件切片
 
 - [structured-output.js](<../../structured-output.js>) / [bounded-json.js](<../../bounded-json.js>)：严格 JSON Schema 校验、字节/深度/节点边界与双协议格式转换，不新增独立付费命令。
+- [files-transport.js](<../../files-transport.js>) / [file-slicing.js](<../../file-slicing.js>) / [file-slicing-tool.js](<../../file-slicing-tool.js>)：面向 Gemini API 官方四模型（`*-google`）的显式授权文件切片闭环——原始 REST 8 MiB 分块续传与 `PROCESSING → ACTIVE` 轮询（同源及资源名校验、拒绝 Vertex 保留环境变量名、无原始错误回显）、PDF/Office/表格/音视频参数校验与双协议序列化、纯内存有界会话/去重注册表（48h 钳制、单会话最多 6 活跃切片卸载、`sliceId` 1:1 绑定、引用计数共享取消与 `revokeConsent()` 即时中止），以及按需热注册的延迟工具 `argon_slice_file`。
 
 ### 诊断与 Inspector
 

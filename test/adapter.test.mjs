@@ -884,9 +884,10 @@ test('abort, config validation, legacy max listener migration and scoped registr
   assert.equal(Config({}).maxTokens.get(), MAX_SINGLE_CALL_TOKENS)
   assert.equal(Config({ maxTokens: MAX_LONG_DECODE_TOKENS }).maxTokens.get(), MAX_LONG_DECODE_TOKENS)
   assert.equal(Config({}).contextWindow.get(), 1048576)
-  // 反代分支已删除：配置共 14 项（含 interactionsToolRetrieval），不再有 proxy* 字段。
-  assert.equal(Object.keys(Config({})).length, 14)
+  // 反代分支已删除：配置共 15 项（含 interactionsToolRetrieval 与 allowGeminiFilesApi），不再有 proxy* 字段。
+  assert.equal(Object.keys(Config({})).length, 15)
   assert.equal(Config({}).interactionsToolRetrieval.get(), 'explicit')
+  assert.equal(Config({}).allowGeminiFilesApi.get(), false)
   assert.equal(Object.keys(Config({})).some(key => key.startsWith('proxy')), false)
   assert.throws(() => Config({ reasoning: 'max' }))
   assert.throws(() => Config({ maxTokens: MAX_LONG_DECODE_TOKENS + 1 }))

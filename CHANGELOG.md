@@ -2,6 +2,24 @@
 
 All notable changes to **Gemini 4 Adapter** (`dsh-vertex-argon`) are documented in this file.
 
+## [2.4.0] - 2026-11-24
+
+### Added
+- **Opt-In Gemini Files API File Slicing Controls Across Both Protocols (`files-transport.js`, `file-slicing.js`, `file-slicing-tool.js`, `index.js`, `adapter.js`, `interaction-adapter.js`, `interactions-input.js`, `client.js`, `locale/{zh,en}.json`)**:
+  - Added the 15th volatile configuration field `allowGeminiFilesApi` (default `false`), with an explicit Section 4 Settings toggle, bilingual zh/en disclosures, read-only/in-flight gating, and 15-field Reset Defaults support.
+  - Dynamically registers the deferred tool `argon_slice_file` (`deferLoading: true`) only when `allowGeminiFilesApi: true` (hot-registering/unregistered on `loader/volatile-update`, surviving `tools` service reloads, and retrying cleanly after transient registration errors).
+  - Supports server-side file slicing for Gemini Developer API models (`gemini-4-argon-google`, `gemini-4-carbon-google`, `gemini-4-hydrogen-google`, `gemini-4-neon-google`) across both **Interactions (`v1beta`)** (`function_result.result` static `processing` blocks) and **GenerateContent** (`functionResponse.parts` with `fileData`, `documentMetadata`/`spreadsheetMetadata`/`videoMetadata`/`audioMetadata`, `mediaResolution`, and `response.slice_media: { $ref }`), covering PDFs, Microsoft Office & OpenDocument files (`.docx`, `.doc`, `.dotx`, `.odt`, `.pptx`, `.ppt`, `.odp`, `.xlsx`, `.xls`, `.ods`), videos, and audio.
+  - Implemented raw REST 8 MiB chunked resumable uploads, `PROCESSING → ACTIVE` polling, and `DELETE` in `files-transport.js` without upgrading or duplicating the host `@google/genai` SDK instance, maintaining full compatibility with `@google/genai@2.21.0`.
+- **Bounded Deduplication, Instance Binding & History Offloading (`file-slicing.js`)**:
+  - Added pure in-memory bounded upload deduplication keyed by `(principalHash, endpointBase, sha256, mimeType)` with a local 48-hour expiry ceiling, ref-counted shared `AbortController` cancellation (so one caller cancelling does not kill concurrent waiters on the same file, while full cancellation or consent revocation evicts and aborts the flight immediately), and `maxInFlightUploads = 4` concurrency bounds.
+  - Added random per-slice `sliceId` 1:1 occurrence binding, unique per-call `displayName`, session-global 6-slice active window offloading (preventing resurrection on truncated histories), 48-hour expiry notices, and plain-text JSON `output.render` persistence with zero new `storageDomain`s.
+
+### Security & Hardening
+- **Strict Channel, Credential, Path & TOCTOU Isolation (`files-transport.js`, `file-slicing-tool.js`, `file-slicing.js`, `adapter.js`, `interaction-adapter.js`, `interactions-input.js`, `index.js`)**:
+  - Enforced Gemini API (`*-google`) route exclusivity via authoritative `modelSelection.current()` and pre-flight `/v1/interactions` gating; Vertex AI routes, non-Gemini models, and reserved Vertex/ADC environment variable names (`GOOGLE_CLOUD_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_CLOUD_PROJECT`, `GCLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`) are strictly rejected.
+  - Enforced fail-closed `fs.hostPathFromProcessPath` resolution, pre-open regular-file checks, single open file-handle reuse across stat/hash/upload, bounded chunk sizes (`<= 8 MiB`), pre-finalize streaming SHA-256 and EOF non-growth verification, idempotent endpoint normalization, strict same-origin and resource-name URI checks, and allowlisted non-2xx error extraction without echoing raw upstream `error.message`.
+  - Revoking `allowGeminiFilesApi` immediately triggers `revokeConsent()` to abort in-flight uploads (even if an unrelated config getter throws during `loader/volatile-update`) and stops outbound URI injection dynamically at request build time on both protocols; GenerateContent binds `endpointBase` to the provider's fixed `configured.baseUrl`; Interactions refuses pi-ai alias fallback, GenerateContent refuses ambiguous normalization collisions, `{ ok: false }` tool outputs are skipped, and `degradeToolSearchInputSteps` uses a per-`call_id` FIFO queue to replace only `argon_slice_file` slice blocks.
+
 ## [2.3.2] - 2026-11-24
 
 ### Fixed

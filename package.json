@@ -1,6 +1,6 @@
 {
   "name": "dsh-vertex-argon",
-  "version": "2.3.2",
+  "version": "2.4.0",
   "description": "Gemini 4 Adapter for DSH: official Vertex AI & Gemini API channels (Argon, Carbon, Hydrogen & Neon), resilient long decode, explicit service tiers, and request diagnostics.",
   "license": "MIT",
   "repository": {
@@ -49,6 +49,9 @@
     "interaction-image.js",
     "interactions.js",
     "interactions-input.js",
+    "files-transport.js",
+    "file-slicing.js",
+    "file-slicing-tool.js",
     "CHANGELOG.md"
   ],
   "engines": {

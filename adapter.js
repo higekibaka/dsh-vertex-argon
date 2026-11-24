@@ -21,6 +21,8 @@ import { createInteractionQuery } from './interaction-query.js'
 import { interactionsEndpoint, inferInteractionsApiVersion } from './interaction-transport.js'
 import { assertPreparedStructuredOutput } from './structured-output.js'
 import { continueArgonRequestStream, STREAM_READ_TIMEOUT_MS, LONG_DECODE_SYMBOL as ARGON_LONG_DECODE_SYMBOL } from './generate-content.js'
+import { geminiApiPrincipalHash, filesBaseEndpoint } from './files-transport.js'
+import { SLICE_TOOL_NAME } from './file-slicing.js'
 export { MAX_CONTINUATION_HOPS, RECONNECT_INITIAL_DELAY_MS, RECONNECT_MAX_DELAY_MS, RECONNECT_JITTER_RATIO, computeReconnectDelayMs } from './generate-content.js'
 const { LlmAdapter, LlmError, resolveRetryPolicy, resolveImageAttachmentAccess } = await shared('@deepseek-ai/dsh-llm')
 const { PiAiAdapter } = await shared('@deepseek-ai/dsh-llm-pi-ai')
@@ -517,6 +519,121 @@ export function assertGemini4MaxTokens(options, requestModel, longDecode = true)
   }
 }
 
+function parseSliceToolOutputJson(value) {
+  if (typeof value !== 'string' || !value.trim()) return null
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function injectGenerateContentFileSlices(body, { sessionId, requestModel, sliceContext }) {
+  if (requestModel?.api !== 'google-generative-ai' || !sliceContext?.fileSliceHub || !Array.isArray(body?.contents)) {
+    return body
+  }
+  const entries = []
+  for (let contentIdx = 0; contentIdx < body.contents.length; contentIdx++) {
+    const content = body.contents[contentIdx]
+    if (!Array.isArray(content?.parts)) continue
+    for (let partIdx = 0; partIdx < content.parts.length; partIdx++) {
+      const part = content.parts[partIdx]
+      const fr = part?.functionResponse
+      if (
+        !fr ||
+        typeof fr !== 'object' ||
+        fr.name !== SLICE_TOOL_NAME ||
+        fr.response?.error ||
+        typeof fr.id !== 'string' ||
+        !fr.id.length
+      ) {
+        continue
+      }
+      const parsed = parseSliceToolOutputJson(fr.response?.output)
+      if (parsed?.ok === false) continue
+      entries.push({
+        key: `${contentIdx}:${partIdx}`,
+        callId: fr.id,
+        ...(typeof parsed?.sliceId === 'string' && parsed.sliceId.length > 0 ? { sliceId: parsed.sliceId } : {}),
+        isError: false,
+      })
+    }
+  }
+  if (entries.length === 0) return body
+  const allowGeminiFilesApi = typeof sliceContext.getAllowGeminiFilesApi === 'function'
+    ? sliceContext.getAllowGeminiFilesApi() === true
+    : sliceContext.allowGeminiFilesApi === true
+  const endpointBase = typeof sliceContext.getGoogleEndpointBase === 'function'
+    ? sliceContext.getGoogleEndpointBase()
+    : sliceContext.endpointBase
+  const resolved = sliceContext.fileSliceHub.resolveForRequest({
+    sessionId,
+    route: 'google-generative-ai',
+    principalHash: sliceContext.principalHash,
+    ...(endpointBase ? { endpointBase } : {}),
+    allowGeminiFilesApi,
+    protocol: 'generate-content',
+    entries,
+  })
+  if (!(resolved instanceof Map) || resolved.size === 0) return body
+  let anyContentChanged = false
+  const nextContents = body.contents.map((content, contentIdx) => {
+    if (!Array.isArray(content?.parts)) return content
+    let contentChanged = false
+    const nextParts = content.parts.map((part, partIdx) => {
+      const fr = part?.functionResponse
+      if (
+        !fr ||
+        typeof fr !== 'object' ||
+        fr.name !== SLICE_TOOL_NAME ||
+        fr.response?.error ||
+        typeof fr.id !== 'string' ||
+        !fr.id.length
+      ) {
+        return part
+      }
+      const res = resolved.get(`${contentIdx}:${partIdx}`)
+      if (!res) return part
+      if (res.status === 'active' && res.part) {
+        contentChanged = true
+        const baseResponse = fr.response && typeof fr.response === 'object' && !Array.isArray(fr.response) ? fr.response : {}
+        const clonedPart = JSON.parse(JSON.stringify(res.part))
+        return {
+          ...part,
+          functionResponse: {
+            ...fr,
+            parts: [...(Array.isArray(fr.parts) ? fr.parts : []), clonedPart],
+            response: {
+              ...baseResponse,
+              slice_media: { $ref: res.displayName },
+            },
+          },
+        }
+      }
+      if ((res.status === 'offloaded' || res.status === 'expired' || res.status === 'disabled') && typeof res.notice === 'string' && res.notice.length > 0) {
+        contentChanged = true
+        const baseResponse = fr.response && typeof fr.response === 'object' && !Array.isArray(fr.response) ? fr.response : {}
+        return {
+          ...part,
+          functionResponse: {
+            ...fr,
+            response: {
+              ...baseResponse,
+              slice_notice: res.notice,
+            },
+          },
+        }
+      }
+      return part
+    })
+    if (!contentChanged) return content
+    anyContentChanged = true
+    return { ...content, parts: nextParts }
+  })
+  return anyContentChanged ? { ...body, contents: nextContents } : body
+}
+
 export function gemini4StreamSimple(
   nativeStream,
   requestModel,
@@ -529,6 +646,7 @@ export function gemini4StreamSimple(
   servicePolicy = { tier: 'standard', headers: {} },
   captureOptions = {},
   structuredOutput,
+  sliceContext,
 ) {
   assertPreparedStructuredOutput(structuredOutput)
   if (!isGemini4ApiClientPatched()) ensureGemini4ApiClientPatch()
@@ -589,6 +707,7 @@ export function gemini4StreamSimple(
         }
         body = signatures.restorePayload(body)
         if (structuredOutput) body = structuredOutput.generateContent(body)
+        body = injectGenerateContentFileSlices(body, { sessionId: options.sessionId, requestModel, sliceContext })
         // Gemini 4 Hydrogen / Neon 官方不支持显式缓存（cachedContents），残留字段会被上游拒绝。
         if (supportsXhigh) {
           delete body.cachedContent
@@ -872,6 +991,8 @@ export function resolveConfigValues(raw = {}) {
   const vertexPaygoOnly = readVal(source?.vertexPaygoOnly) ?? false
   const retainRawResponses = readVal(source?.retainRawResponses) ?? false
   if (typeof retainRawResponses !== 'boolean') throw new LlmError('Raw response retention consent must be an explicit boolean.', 'INVALID_CONFIG')
+  const allowGeminiFilesApi = readVal(source?.allowGeminiFilesApi) ?? false
+  if (typeof allowGeminiFilesApi !== 'boolean') throw new LlmError('Gemini Files API upload consent must be an explicit boolean.', 'INVALID_CONFIG')
   if (![googleServiceTier, vertexServiceTier].every(tier => SERVICE_TIERS.includes(tier))) throw new LlmError('Invalid Argon service tier.', 'INVALID_CONFIG')
   if (typeof vertexPaygoOnly !== 'boolean') throw new LlmError('Vertex PayGo-only selection must be a boolean.', 'INVALID_CONFIG')
   const interactionsBackground = readVal(source?.interactionsBackground) ?? false
@@ -910,6 +1031,7 @@ export function resolveConfigValues(raw = {}) {
     vertexServiceTier,
     vertexPaygoOnly,
     retainRawResponses,
+    allowGeminiFilesApi,
     interactionsBackground,
     allowInteractionStorage,
     interactionsToolRetrieval,
@@ -941,7 +1063,7 @@ function freezeDescriptor(descriptor) {
 }
 
 /** Serve the official Vertex AI and Gemini API models in one plugin group. */
-export function argonProvider(nativeVertex, models, defaultLevel = undefined, nativeGoogle = googleProvider(), longDecode = true, recordDiagnostic, serviceConfig = {}, responseHub, structuredOutput) {
+export function argonProvider(nativeVertex, models, defaultLevel = undefined, nativeGoogle = googleProvider(), longDecode = true, recordDiagnostic, serviceConfig = {}, responseHub, structuredOutput, fileSliceHub, slicePolicy) {
   const frozenModels = (Array.isArray(models) ? models : [models]).map(freezeDescriptor)
   const modelMap = new Map(frozenModels.map(m => [m.id, m]))
   return {
@@ -979,6 +1101,15 @@ export function argonProvider(nativeVertex, models, defaultLevel = undefined, na
         const apiKey = rawEnv?.__GOOGLE_API_KEY__
         if (!apiKey) throw new LlmError('Gemini API credentials are not configured.', 'MISSING_CREDENTIAL')
         const policy = resolveServicePolicy(serviceConfig, 'google-generative-ai', 'generate-content')
+        const sliceContext = fileSliceHub
+          ? {
+              fileSliceHub,
+              allowGeminiFilesApi: serviceConfig.allowGeminiFilesApi === true,
+              ...(typeof slicePolicy?.getAllowGeminiFilesApi === 'function' ? { getAllowGeminiFilesApi: slicePolicy.getAllowGeminiFilesApi } : {}),
+              getGoogleEndpointBase: () => filesBaseEndpoint({ baseURL: configured.baseUrl }),
+              principalHash: geminiApiPrincipalHash(apiKey),
+            }
+          : undefined
         return gemini4StreamSimple(
           (m, c, o) => nativeGoogle.stream(m, c, o),
           effectiveModel,
@@ -989,7 +1120,7 @@ export function argonProvider(nativeVertex, models, defaultLevel = undefined, na
           longDecode,
           recordDiagnostic,
           policy,
-          { responseHub, retainRawResponses: serviceConfig.retainRawResponses }, structuredOutput,
+          { responseHub, retainRawResponses: serviceConfig.retainRawResponses }, structuredOutput, sliceContext,
         )
       }
       if (effectiveModel.api !== 'google-vertex') {
@@ -1120,7 +1251,7 @@ export function createConfiguredInteractionQuery(ctx, configInput) {
 
 // Optional constructor-owned format is for an explicit auxiliary result request;
 // it is not a user default or a hidden extension of Host GenerateOptions.
-export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertexProvider(), nativeGoogle = googleProvider(), recordDiagnostic, taskHub, responseHub, structuredOutput) {
+export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertexProvider(), nativeGoogle = googleProvider(), recordDiagnostic, taskHub, responseHub, structuredOutput, fileSliceHub) {
   assertPreparedStructuredOutput(structuredOutput)
   resolveConfigValues(configInput)
   const environment = launchEnvironmentOf(ctx)
@@ -1160,6 +1291,7 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
       vt: cfg.vertexServiceTier,
       paygo: cfg.vertexPaygoOnly,
       raw: cfg.retainRawResponses,
+      filesApi: cfg.allowGeminiFilesApi,
       v: detected.hasVertex,
       g: detected.hasGoogle,
       va: detected.hasVertexArgon,
@@ -1332,7 +1464,12 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
     }
     const configuredMaxTokens = new Map(models.map(m => [m.id, cfg.maxTokens]))
     const configuredReasoning = cfg.hasExplicitReasoning ? cfg.reasoning : undefined
-    const provider = argonProvider({ ...nativeVertex, auth }, models, configuredReasoning, nativeGoogle, cfg.longDecode, recordDiagnostic, cfg, responseHub, structuredOutput)
+    const slicePolicy = fileSliceHub
+      ? {
+          getAllowGeminiFilesApi: () => resolveConfigValues(configInput).allowGeminiFilesApi === true,
+        }
+      : undefined
+    const provider = argonProvider({ ...nativeVertex, auth }, models, configuredReasoning, nativeGoogle, cfg.longDecode, recordDiagnostic, cfg, responseHub, structuredOutput, fileSliceHub, slicePolicy)
     cachedKey = key
     cachedProfiles = new Map([[PROVIDER, {
       provider: PROVIDER,
@@ -1362,6 +1499,6 @@ export function createArgonAdapter(ctx, configInput, nativeVertex = googleVertex
     const cfg = resolveConfigValues(configInput)
     return { ...cfg, routes: detectPiAiArgonRoutes(ctx, cfg.routes) }
   }
-  const interactionHandler = createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, getRoutes: cfg => cfg.routes, taskHub, recordDiagnostic, responseHub, structuredOutput })
+  const interactionHandler = createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, getRoutes: cfg => cfg.routes, taskHub, recordDiagnostic, responseHub, structuredOutput, fileSliceHub, getLiveConfig: configSnapshot })
   return new ArgonAdapter(inner, () => configSnapshot().showInModelPicker, interactionHandler, configSnapshot)
 }

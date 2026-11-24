@@ -4,11 +4,11 @@
 
 **面向 [DeepSeek Harness](<https://github.com/deepseek-ai/deepseek-harness>) 的 Google 官方双通道（Vertex AI + Gemini Developer API）Gemini 4 适配器，原生支持 Argon、Carbon、Hydrogen 与 Neon 八模型路由、GenerateContent / Interactions 双协议、65K+ 多跳长解码与请求级诊断。**
 
-- **当前版本**：`2.3.1`（[CHANGELOG.md](<CHANGELOG.md>)）
+- **当前版本**：`2.4.0`（[CHANGELOG.md](<CHANGELOG.md>)）
 - **npm 包名**：`dsh-vertex-argon`（保留既有包名、官方通道路由与本地存储域 ID，官方通道用户可直接原地升级；`2.0.0` 已移除 `1.6.x` 非官方反代通道）
 - **运行要求**：DSH `>=0.2.0-rc.2`，Node.js `^22.19.0 || >=24.0.0`（见 [package.json](<package.json>)）
 
-[快速开始](<#快速开始>) · [双官方通道与八模型](<#双官方通道与八模型>) · [GenerateContent 长解码](<#generatecontent长解码与四项韧性机制>) · [Interactions 韧性与 Tool Retrieval](<#interactions韧性加固与-tool-retrieval>) · [配置速查](<#完整配置14-项>) · [诊断与工具](<#gemini-4-诊断与-argon_inspect-工具>) · [长解码实测参考](<#历史实测参考奥德赛七号全年舰长日志>)
+[快速开始](<#快速开始>) · [双官方通道与八模型](<#双官方通道与八模型>) · [GenerateContent 长解码](<#generatecontent长解码与四项韧性机制>) · [Interactions 韧性与 Tool Retrieval](<#interactions韧性加固与-tool-retrieval>) · [Gemini API 文件切片](<#gemini-api-显式文件切片>) · [配置速查](<#完整配置15-项>) · [诊断与工具](<#gemini-4-诊断与-argon_inspect-工具>) · [长解码实测参考](<#历史实测参考奥德赛七号全年舰长日志>)
 
 ---
 
@@ -18,6 +18,7 @@
 - **65K+ 多跳长解码与流自愈**：单跳上限 `65,536` tokens，最大输出预算可达 `1,048,576`（最多 32 跳）；首个检查点前实时流式输出，支持检查点尾段回滚续传、逐跳四阶段超时看门狗、零交付首包重试、仅思考结束单次续答自愈，以及 `MALFORMED_FUNCTION_CALL` 后 `VALIDATED` → `AUTO` 工具模式自动退避。
 - **Interactions 协议、韧性加固与 Tool Retrieval**：支持前台流式及显式授权后的云端后台执行；内置 `creating` 预写防重计费锁、`last_event_id` 断点续读、`2026-05-20` 独立生命周期事件兼容、同会话历史死锁非流式对账、逐跳分阶段看门狗、无状态建连阶段重试、`validated` → `auto` 400 自动退避、非 2xx 安全白名单错误提取、多态步骤/内容块带签名回放，以及面向 Gemini API 四模型（Argon / Carbon / Hydrogen / Neon）的服务端 Tool Retrieval（`tool_search` + `defer_loading`）。
 - **签名保真与跨模型安全降级**：完整保留并回放 `thoughtSignature` / `thought_signature`（含无文本独立签名块）；Argon / Carbon 原生映射 `low` / `medium` / `high` 三档（`max` 收敛为 `high`），Hydrogen / Neon 额外放行 `xhigh` 第四档（`max` 收敛为 `xhigh` 并剥离显式 `cachedContent` / `cached_content`，永不下发 `thinkingBudget`）；在 Argon ↔ Carbon ↔ Hydrogen ↔ Neon 或跨通道切换时自动将旧工具历史安全降级为文本记录并清洗污染块。
+- **Gemini API 显式文件切片（双协议对等）**：默认关闭；显式开启 `allowGeminiFilesApi` 后热注册延迟工具 `argon_slice_file`，支持在 Gemini API 官方四模型（`*-google`）的 Interactions（`v1beta`）与 GenerateContent 双协议下对 PDF、Microsoft Office / OpenDocument 文档、电子表格、视频与音频按页码/表格范围/时间窗/内容层/分辨率切片读取，仅按所切片段计费，支持 48h 去重复用与 6 切片活跃窗口自动卸载；Vertex AI 通道不受影响。
 - **Gemini 4 诊断面板与只读工具**：在右侧栏、会话详情页与单条回复底部提供请求摘要、基础 Token 水位（严格区分首跳上下文水位与跨跳累计用量）、11 列逐跳轨迹、分页原始响应证据、云端 Interaction ID 只读查询与全局恢复锁管理，并向智能体提供延迟加载的只读工具 `argon_inspect`。
 
 ---
@@ -113,7 +114,22 @@ Interactions 协议除云端后台恢复（`creating` 预写锁、`last_event_id
 
 ---
 
-## 完整配置：14 项
+## Gemini API 显式文件切片
+
+开启设置项 `allowGeminiFilesApi`（默认关闭）后，插件热注册延迟工具 **`argon_slice_file`**（`deferLoading: true`），面向 **Gemini Developer API 四模型（`*-google`）** 在 **Interactions（`v1beta`）** 与 **GenerateContent** 双协议下原生支持服务端文件切片：
+
+- **支持格式与切片维度**：
+  - **文档与幻灯片**（`.pdf` / `.docx` / `.doc` / `.dotx` / `.odt` / `.pptx` / `.ppt` / `.odp`）：`startPage`、`endPage`、`contentLayers`（`page_text` / `page_image`）、`resolution`（`low` / `medium` / `high` / `ultra_high`）。
+  - **电子表格**（`.xlsx` / `.xls` / `.ods`）：`sheetIndex`、`visibleCells`（A1 区域如 `"A1:H50"`）、`contentLayers`（`data` / `formulas` / `visual`）、`resolution`（开启 `visual` 时）。
+  - **视频**（`.mp4` / `.mpeg` / `.mpg` / `.mov` / `.avi` / `.flv` / `.webm` / `.wmv` / `.3gp`）：`startOffset`、`endOffset`、`fps`（`0 < fps <= 24`）、`contentLayers`（`frames` / `audio` / `transcript`）、`resolution`（含 `frames` 时）。
+  - **音频**（`.wav` / `.mp3` / `.aiff` / `.aac` / `.ogg` / `.flac` / `.m4a`）：`startOffset`、`endOffset`。
+- **隐私与安全护栏**：
+  - 仅 Gemini API 官方四模型生效；Vertex AI、非 Gemini 4 模型与显式 `/v1/interactions` 网关均前置拒绝，绝不读取 Vertex 保留环境变量名。
+  - 会话日志仅落盘纯文本 JSON 摘要；本地文件采用单句柄定长校验与 `<= 8 MiB` 分块续传防 TOCTOU，按 `(principalHash, endpointBase, sha256, mimeType)` 48h 内去重复用；关闭开关后立即中止在途上传并停止新请求注入；单会话保留最近 6 个活跃切片，更早或过期切片自动降级为文本提示。
+
+---
+
+## 完整配置：15 项
 
 以下为 [index.js](<index.js>) 定义的全部实时生效配置（UI 设置面板见 [client.js](<client.js>)）：
 
@@ -129,9 +145,10 @@ Interactions 协议除云端后台恢复（`creating` 预写锁、`last_event_id
 | 协议与服务层级 | `googleServiceTier` | `standard` | `standard` / `flex` / `priority`（仅作用于 Gemini API） |
 | 协议与服务层级 | `vertexServiceTier` | `standard` | `standard` / `flex` / `priority`（受下方能力矩阵约束） |
 | 协议与服务层级 | `vertexPaygoOnly` | `false` | 仅为 Vertex AI GenerateContent 附加 PayGo 共享池请求头 |
-| Interactions 后台与工具检索 | `allowInteractionStorage` | `false` | 允许向 Google 发送 `store: true` 云端存储许可（后台模式前置条件） |
-| Interactions 后台与工具检索 | `interactionsBackground` | `false` | 启用 Interactions 云端后台执行与断点恢复 |
-| Interactions 后台与工具检索 | `interactionsToolRetrieval` | `explicit` | `off` / `explicit` / `auto`；仅 Gemini API + Interactions `v1beta` 下的全系四模型（Argon / Carbon / Hydrogen / Neon）生效，Vertex AI 与显式锁定 `/v1/interactions` 的自定义网关自动回退全量加载 |
+| Interactions 后台、工具检索与文件切片 | `allowInteractionStorage` | `false` | 允许向 Google 发送 `store: true` 云端存储许可（后台模式前置条件） |
+| Interactions 后台、工具检索与文件切片 | `interactionsBackground` | `false` | 启用 Interactions 云端后台执行与断点恢复 |
+| Interactions 后台、工具检索与文件切片 | `interactionsToolRetrieval` | `explicit` | `off` / `explicit` / `auto`；仅 Gemini API + Interactions `v1beta` 下的全系四模型（Argon / Carbon / Hydrogen / Neon）生效，Vertex AI 与显式锁定 `/v1/interactions` 的自定义网关自动回退全量加载 |
+| Interactions 后台、工具检索与文件切片 | `allowGeminiFilesApi` | `false` | 显式授权将本地文件上传至 Google Files API（云端托管最长 48 小时）并热注册 `argon_slice_file` 工具；仅 Gemini API 官方四模型生效，覆盖 Interactions（`v1beta`）与 GenerateContent 双协议 |
 | 诊断与高级 | `retainRawResponses` | `false` | 允许本地留存解析后的上游 JSON 响应帧（关闭不影响既有记录） |
 
 ### 服务层级与 Vertex PayGo 能力矩阵

@@ -5,6 +5,7 @@ import { createArgonDiagnosticTracker } from './diagnostics.js'
 import { interactionExitReason } from './interaction-lifecycle.js'
 import { resolveServicePolicy } from './service-level.js'
 import { resolveGemini4ReasoningLevel, defaultReasoningForModel } from './interactions-input.js'
+import { filesBaseEndpoint } from './files-transport.js'
 // 循环导入：adapter.js 只在本模块的函数被调用时才读取这些绑定，函数声明本身已提升。
 import { isGoogleApiModel, officialUpstreamModel } from './adapter.js'
 
@@ -29,7 +30,7 @@ export function assertInteractionOptions(options, cfg, route) {
   return { maxTokens: max, reasoning: level }
 }
 
-export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, getRoutes, taskHub, recordDiagnostic, responseHub, structuredOutput }) {
+export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, getRoutes, taskHub, recordDiagnostic, responseHub, structuredOutput, fileSliceHub, getLiveConfig }) {
   return async function* interactions(options, cfg) {
     const route = isGoogleApiModel(options.model) ? 'google-generative-ai' : 'google-vertex'
     const requestController = new AbortController()
@@ -253,7 +254,25 @@ export function createInteractionsHandler({ ctx, GoogleGenAI, resolveSecret, get
         return block
       }) }))
       const { streamInteractions } = await import('./interactions.js')
-      for await (const chunk of streamInteractions({ ...options, maxTokens: controls.maxTokens, messages, signal }, { route, upstreamModel, apiVersion: connection.apiVersion, ...controls, longDecode: cfg.longDecode, interactionsToolRetrieval: cfg.interactionsToolRetrieval, ...(options.phaseTimeouts ? { phaseTimeouts: options.phaseTimeouts } : {}), serviceTier: route === 'google-generative-ai' ? servicePolicy.tier : undefined, background: cfg.interactionsBackground, store: cfg.allowInteractionStorage, transport, resolveImage, structuredOutput, onEvent: observed, onCaptureSnapshot: captureObservedSnapshot, onRestoreSnapshot: restoreObservedSnapshot, onResetObserver: resetObservedUsage, onReconnectDelay: ms => { pendingBackoffMs = ms }, onCreateRetry: ({ trigger }) => { nextCreateTrigger = trigger }, onTerminal: () => { complete = true }, onExit: reason => { exitReason = reason } })) {
+      const resolveToolSlices = fileSliceHub
+        ? entriesOrIds => {
+            if (route !== 'google-generative-ai' || connection.apiVersion === 'v1') return new Map()
+            const liveCfg = typeof getLiveConfig === 'function' ? getLiveConfig() : cfg
+            const allowGeminiFilesApi = liveCfg?.allowGeminiFilesApi === true
+            const endpointBase = filesBaseEndpoint({ baseURL: routes?.googleBaseUrl })
+            const isEntries = Array.isArray(entriesOrIds) && entriesOrIds.length > 0 && typeof entriesOrIds[0] === 'object'
+            return fileSliceHub.resolveForRequest({
+              sessionId: options.sessionId,
+              route,
+              principalHash: connection.principalHash,
+              endpointBase,
+              allowGeminiFilesApi,
+              protocol: 'interactions',
+              ...(isEntries ? { entries: entriesOrIds } : { toolCallIds: entriesOrIds }),
+            })
+          }
+        : undefined
+      for await (const chunk of streamInteractions({ ...options, maxTokens: controls.maxTokens, messages, signal }, { route, upstreamModel, apiVersion: connection.apiVersion, ...controls, longDecode: cfg.longDecode, interactionsToolRetrieval: cfg.interactionsToolRetrieval, ...(options.phaseTimeouts ? { phaseTimeouts: options.phaseTimeouts } : {}), serviceTier: route === 'google-generative-ai' ? servicePolicy.tier : undefined, background: cfg.interactionsBackground, store: cfg.allowInteractionStorage, transport, resolveImage, ...(resolveToolSlices ? { resolveToolSlices } : {}), structuredOutput, onEvent: observed, onCaptureSnapshot: captureObservedSnapshot, onRestoreSnapshot: restoreObservedSnapshot, onResetObserver: resetObservedUsage, onReconnectDelay: ms => { pendingBackoffMs = ms }, onCreateRetry: ({ trigger }) => { nextCreateTrigger = trigger }, onTerminal: () => { complete = true }, onExit: reason => { exitReason = reason } })) {
         if (chunk.type === 'usage') {
           recordUsage()
           // Only an observed first-hop input watermark can be normalized for the

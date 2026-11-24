@@ -187,7 +187,7 @@ window.__ModuleLoader__.load({
         customValueTag: ' · 自定义当前值',
         effectiveBudget: '静态有效配置上限（含历史安全预留）',
         effectiveClampedHint: '（长解码已关闭，有效上限 ≤ 65,536 且受窗口预留限制，原配置值保留）',
-        interactionsTitle: '4. Interactions 存储许可、后台执行与工具检索',
+        interactionsTitle: '4. Interactions 存储许可、后台执行、工具检索与文件切片',
         storageLabel: '允许 Interactions 在 Google 端存储任务数据',
         storageHint: '采用 Interactions 的通道共用此许可。任何后台执行都须先授权存储（store: true）；关闭只影响新请求，不删除已有云端记录，也不等于所有平台零留存。',
         backgroundLabel: 'Interactions 后台执行',
@@ -197,6 +197,8 @@ window.__ModuleLoader__.load({
         toolRetrieval_explicit: '按工具声明延迟（默认）',
         toolRetrieval_auto: '自动延迟外部与 MCP 工具',
         toolRetrievalHint: '仅在 Gemini API 通道 + Interactions v1beta 协议下的 Gemini 4 全系模型（Argon / Carbon / Hydrogen / Neon）生效：开启后向宿主声明 addition-only 动态工具能力，并注入服务端 tool_search 按需加载延迟工具；Vertex AI 通道与显式锁定 /v1/interactions 的自定义网关自动回退为常规全量加载，不会触发上游 400。',
+        filesApiLabel: '允许 Gemini Files API 文件切片上传（仅 Gemini API）',
+        filesApiHint: '默认关闭。开启后将注册 argon_slice_file 工具，支持在 Gemini API（*-google）模型下通过 Interactions 与 GenerateContent 双协议对 PDF、Office 文档、电子表格、视频与音频按需切片读取；本地文件会上传至 Google Files API（云端托管最长 48 小时，关闭后新请求立即停止注入）。Vertex AI 通道不受影响且不会上传文件。',
         resetDefaults: '恢复插件默认值',
         saving: '保存中…',
         saved: '已保存；正在运行的请求不受影响',
@@ -277,7 +279,7 @@ window.__ModuleLoader__.load({
         customValueTag: ' · Custom value',
         effectiveBudget: 'Static effective budget cap (with history reserve)',
         effectiveClampedHint: ' (Long Decode is off; effective cap is ≤ 65,536 and bounded by window reserve while keeping your configured value)',
-        interactionsTitle: '4. Interactions Storage, Background & Tool Retrieval',
+        interactionsTitle: '4. Interactions Storage, Background, Tool Retrieval & File Slicing',
         storageLabel: 'Allow Google to store Interactions task data',
         storageHint: 'Shared by routes using Interactions. All background execution requires explicit storage consent (store: true). Disabling affects future requests only; it neither deletes existing cloud records nor guarantees zero retention on every platform.',
         backgroundLabel: 'Interactions background execution',
@@ -287,6 +289,8 @@ window.__ModuleLoader__.load({
         toolRetrieval_explicit: 'Explicit deferred (Default)',
         toolRetrieval_auto: 'Auto-defer external & MCP',
         toolRetrievalHint: 'Active only for Gemini 4 models (Argon, Carbon, Hydrogen, and Neon) on the Gemini API route with the Interactions v1beta protocol: declares addition-only dynamic tool capability to the Host and injects server-side tool_search to load deferred tools on demand. Vertex AI routes and custom gateways pinned to /v1/interactions automatically fall back to standard full tool loading without triggering upstream 400 errors.',
+        filesApiLabel: 'Allow Gemini Files API file-slicing uploads (Gemini API only)',
+        filesApiHint: 'Off by default. Enabling registers the argon_slice_file tool for on-demand PDF, Office document, spreadsheet, video, and audio slicing on Gemini API (*-google) models across both Interactions and GenerateContent. Local files are uploaded to the Google Files API (hosted up to 48 hours; disabling immediately stops URI injection on new requests). Vertex AI models are unaffected and never upload files.',
         resetDefaults: 'Restore Plugin Defaults',
         saving: 'Saving…',
         saved: 'Saved; in-flight requests are unaffected',
@@ -1147,6 +1151,7 @@ window.__ModuleLoader__.load({
       const background = val.interactionsBackground === true
       const allowStorage = val.allowInteractionStorage === true
       const toolRetrieval = TOOL_RETRIEVAL_MODES.includes(val.interactionsToolRetrieval) ? val.interactionsToolRetrieval : 'explicit'
+      const allowFilesApi = val.allowGeminiFilesApi === true
       const retainRaw = val.retainRawResponses === true
       const googleTier = val.googleServiceTier ?? 'standard'
       const vertexTier = val.vertexServiceTier ?? 'standard'
@@ -1194,9 +1199,10 @@ window.__ModuleLoader__.load({
           const ok8 = await setField('interactionsBackground', false)
           const ok9 = await setField('allowInteractionStorage', false)
           const ok14 = await setField('interactionsToolRetrieval', 'explicit')
+          const ok15 = await setField('allowGeminiFilesApi', false)
           const ok10 = await setField('retainRawResponses', false)
           if (!alive.current) return
-          setNotice(ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11 && ok12 && ok13 && ok14 ? 'saved' : 'error')
+          setNotice(ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11 && ok12 && ok13 && ok14 && ok15 ? 'saved' : 'error')
         } catch { if (alive.current) setNotice('error') }
         finally { writing.current = false; if (alive.current) setPending(false) }
       }
@@ -1401,6 +1407,17 @@ window.__ModuleLoader__.load({
             ),
           ),
           h('p', { className: 'muted', id: 'argon-tool-retrieval-hint' }, t('toolRetrievalHint')),
+          h('div', { className: 'row', style: { marginTop: '12px' } },
+            h('strong', { id: 'argon-files-api-label' }, t('filesApiLabel')),
+            h('button', {
+              type: 'button', role: 'switch', 'aria-checked': allowFilesApi,
+              'aria-labelledby': 'argon-files-api-label',
+              'aria-describedby': 'argon-files-api-hint',
+              'data-files-api-field': 'allowGeminiFilesApi',
+              disabled, onClick: () => updateField('allowGeminiFilesApi', !allowFilesApi),
+            }, t(allowFilesApi ? 'longDecodeOn' : 'longDecodeOff')),
+          ),
+          h('p', { className: 'muted', id: 'argon-files-api-hint' }, t('filesApiHint')),
           h('div', { className: 'row', style: { marginTop: '10px' } },
             h('span', {
               className: 'status' + (notice === 'error' || notice === 'tierNotVerified' ? ' error' : ''),

@@ -5,7 +5,11 @@ import { createResponseHub, responseDomain } from './response-store.js'
 import { inspectorInvocations } from './inspector-service.js'
 import { createInspectorTool } from './inspector-tool.js'
 import { createRequestAssociationHub } from './request-association.js'
+import { createFileSliceHub } from './file-slicing.js'
+import { createFileSlicingTool } from './file-slicing-tool.js'
 const { default: z } = await shared('@deepseek-ai/schemastery')
+const { GoogleGenAI } = await shared('@google/genai')
+const { launchEnvironmentOf } = await shared('@deepseek-ai/dsh-launch-environment')
 import {
   createArgonAdapter,
   createConfiguredInteractionQuery,
@@ -40,6 +44,7 @@ export const Config = z.object({
   vertexServiceTier: z.union(SERVICE_TIERS).default('standard').volatile(),
   vertexPaygoOnly: z.boolean().default(false).volatile(),
   retainRawResponses: z.boolean().default(false).volatile(),
+  allowGeminiFilesApi: z.boolean().default(false).volatile(),
   interactionsBackground: z.boolean().default(false).volatile(),
   allowInteractionStorage: z.boolean().default(false).volatile(),
   interactionsToolRetrieval: z.union(['off', 'explicit', 'auto']).default('explicit').volatile(),
@@ -53,10 +58,12 @@ export function apply(ctx, config) {
   ctx.effect(() => () => associations.close(), 'vertex-argon: request association lifetime')
   const taskHub = createInteractionStateHub()
   const responseHub = createResponseHub()
+  const fileSliceHub = createFileSliceHub()
   const query = createConfiguredInteractionQuery(ctx, () => config)
   ctx.effect(() => () => query.close(), 'vertex-argon: read-only query lifetime')
   ctx.effect(() => () => responseHub.close(), 'vertex-argon: raw response memory lifetime')
   ctx.effect(() => () => taskHub.close(), 'vertex-argon: background interaction recovery lifetime')
+  ctx.effect(() => () => fileSliceHub.close(), 'vertex-argon: file slicing lifetime')
   ctx.inject?.(['storageDomain'], async storageCtx => {
     let disposed = false, domain
     storageCtx.effect(() => async () => { disposed = true; await responseHub.detach(domain) }, 'vertex-argon: opt-in raw response retention')
@@ -119,8 +126,75 @@ export function apply(ctx, config) {
   ctx.inject?.(['tools', 'vertexArgonDiagnostics'], toolCtx => {
     toolCtx.effect(() => toolCtx.tools.register(createInspectorTool(toolCtx.vertexArgonDiagnostics)), 'vertex-argon: read-only inspection tool')
   })
+  const environment = launchEnvironmentOf(ctx)
+  const resolveSecret = async secretName => {
+    const cred = await ctx?.get?.('credentials')?.resolve?.(secretName)
+    if (cred?.value) return cred.value
+    return environment.get(secretName)?.value
+  }
+  const readRawAllowFilesApi = raw => {
+    const source = typeof raw === 'function' ? raw() : raw
+    const field = source?.allowGeminiFilesApi
+    return (field && typeof field === 'object' && typeof field.get === 'function') ? field.get() : field
+  }
+  const sliceToolSyncers = new Set()
+  let sliceToolSyncFailed = false
+  const syncSliceTools = () => {
+    let allSucceeded = true
+    for (const sync of [...sliceToolSyncers]) {
+      try {
+        sync()
+      } catch {
+        allSucceeded = false
+      }
+    }
+    sliceToolSyncFailed = !allSucceeded
+    return allSucceeded
+  }
+  ctx.inject?.(['tools'], toolCtx => {
+    let disposeTool = null
+    let disposed = false
+    const sync = () => {
+      if (disposed) return
+      let enabled = false
+      try { enabled = resolveConfigValues(config).allowGeminiFilesApi === true } catch { enabled = false }
+      if (enabled && !disposeTool) {
+        disposeTool = toolCtx.tools.register(createFileSlicingTool({
+          ctx,
+          getConfig: () => resolveConfigValues(config),
+          getRoutes: () => {
+            const cfg = resolveConfigValues(config)
+            return detectPiAiArgonRoutes(ctx, cfg.routes)
+          },
+          resolveSecret,
+          GoogleGenAI,
+          fileSliceHub,
+        }))
+      } else if (!enabled && disposeTool) {
+        const release = disposeTool
+        disposeTool = null
+        release?.()
+      }
+    }
+    toolCtx.effect(() => {
+      sliceToolSyncers.add(sync)
+      return () => {
+        disposed = true
+        sliceToolSyncers.delete(sync)
+        const release = disposeTool
+        disposeTool = null
+        release?.()
+      }
+    }, 'vertex-argon: opt-in file slicing tool')
+    try {
+      sync()
+    } catch {
+      sliceToolSyncFailed = true
+      toolCtx.logger?.warn?.('Gemini 4 Adapter file slicing tool registration failed; will retry on configuration update.')
+    }
+  })
   const recordDiagnostic = record => hub.record(record)
-  const adapter = createArgonAdapter(ctx, () => config, undefined, undefined, recordDiagnostic, taskHub, responseHub)
+  const adapter = createArgonAdapter(ctx, () => config, undefined, undefined, recordDiagnostic, taskHub, responseHub, undefined, fileSliceHub)
   const unpatchPiAi = installGemini4PiAiPatch(recordDiagnostic, () => config, responseHub)
   let registration
   try {
@@ -141,10 +215,18 @@ export function apply(ctx, config) {
     throw error
   }
   if (typeof ctx.on === 'function') {
-    ctx.on('llm/stream', (options, next) => associations.stream(options, next))
+    ctx.on('llm/stream', (options, next) => {
+      if (options?.sessionId && options?.provider && options?.model) {
+        fileSliceHub.observeSessionRoute(options.sessionId, { provider: options.provider, model: options.model })
+      }
+      return associations.stream(options, next)
+    })
     ctx.on('agent/assistant-stream', payload => associations.frame(payload))
     ctx.on('session/event', (session, event) => associations.event(session, event))
-    ctx.on('agent/disposed', ({agent}) => associations.dispose(agent))
+    ctx.on('agent/disposed', ({agent}) => {
+      if (agent?.id) fileSliceHub.clearSession(agent.id)
+      associations.dispose(agent)
+    })
     ctx.on('agent/request', async (_payload, next) => {
       const proposed = await next()
       if (
@@ -180,9 +262,23 @@ export function apply(ctx, config) {
     followNativeAndSync()
     let lastSnap = JSON.stringify(resolveConfigValues(config))
     ctx.on('loader/volatile-update', () => {
-      const nextSnap = JSON.stringify(resolveConfigValues(config))
-      if (nextSnap === lastSnap) return
-      lastSnap = nextSnap
+      let rawAllowFiles = false
+      try {
+        rawAllowFiles = readRawAllowFilesApi(config) === true
+      } catch {
+        rawAllowFiles = false
+      }
+      if (!rawAllowFiles) {
+        fileSliceHub.revokeConsent()
+      }
+      const resolved = resolveConfigValues(config)
+      const nextSnap = JSON.stringify(resolved)
+      if (resolved.allowGeminiFilesApi !== true) {
+        fileSliceHub.revokeConsent()
+      }
+      if (nextSnap === lastSnap && !sliceToolSyncFailed) return
+      const synced = syncSliceTools()
+      if (synced) lastSnap = nextSnap
       if (typeof registration?.replace === 'function') registration.replace([PROVIDER])
       else ctx.emit?.('llm/adapters-updated')
     })

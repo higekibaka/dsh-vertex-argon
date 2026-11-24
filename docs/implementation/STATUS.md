@@ -1,9 +1,9 @@
-# Gemini 4 Adapter（dsh-vertex-argon）发版状态与验证账本（v2.3.2）
+# Gemini 4 Adapter（dsh-vertex-argon）发版状态与验证账本（v2.4.0）
 
-- **用户工程版本**：`2.3.2`（展示品牌名 **Gemini 4 Adapter**，底层包名保持 `dsh-vertex-argon`），以 [package.json](<../../package.json>) 为准。
+- **用户工程版本**：`2.4.0`（展示品牌名 **Gemini 4 Adapter**，底层包名保持 `dsh-vertex-argon`），以 [package.json](<../../package.json>) 为准。
 - **声明兼容**：DSH `>=0.2.0-rc.2`；Node.js `^22.19.0 || >=24.0.0`。以 [package.json](<../../package.json>) 为准。
-- **本轮范围**：`v2.3.2` 修复 Issue #7（`installGemini4PiAiPatch` 中 `wrapProvider` 对冻结或只读第三方 `piProvider` 裸赋值 `.stream`/`.streamSimple` 导致 `dsh-codex-subscription` 等插件启用崩溃），并在 `google-signatures.js` 吸收 PR #6 的合理部分（同模型首个 `toolCall` 缺合法 base64 `thoughtSignature` 时按回合边界安全降级，同时严守并行函数调用 1:1 签名边界不跨 part 复制）。
-- **验证状态**：2026-11-24 完成 `v2.3.2` 发版前离线全量回归：挂载本机既有 React `19.2.0` 路径作为 `NODE_PATH` 时，**37 个测试文件，741 项测试，741 通过，0 失败，0 跳过**；`git diff --check` 退出码 `0`。
+- **本轮范围**：`v2.4.0` 新增 Gemini Developer API 官方四模型（`*-google`）的显式授权文件切片能力（第 15 项配置 `allowGeminiFilesApi`、延迟热注册工具 `argon_slice_file`、8 MiB 分块续传与 `ACTIVE` 轮询客户端 `files-transport.js`、Interactions + GenerateContent 双协议原生切片注入与 6 切片活跃窗口卸载，经两轮 GPT-6.2 Astra xhigh 跨族审查与总工 Triage 全部必改项闭环）。
+- **验证状态**：2026-11-24 完成 `v2.4.0` 发版前离线全量回归：挂载本机既有 React `19.2.0` 路径作为 `NODE_PATH` 时，**41 个测试文件，782 项测试，782 通过，0 失败，0 跳过**；`git diff --check` 退出码 `0`（本轮为离线验证，无新增云端 live 请求）。
 
 ## 1. 生产文件边界
 
@@ -17,7 +17,7 @@
 | GenerateContent 与签名 | [generate-content.js](<../../generate-content.js>)、[google-signatures.js](<../../google-signatures.js>) |
 | Interactions 引擎 | [interactions.js](<../../interactions.js>)、[interaction-adapter.js](<../../interaction-adapter.js>)、[interactions-input.js](<../../interactions-input.js>)、[interaction-image.js](<../../interaction-image.js>)、[interaction-transport.js](<../../interaction-transport.js>) |
 | Interactions 状态与查询 | [interaction-state.js](<../../interaction-state.js>)、[interaction-lifecycle.js](<../../interaction-lifecycle.js>)、[interaction-query.js](<../../interaction-query.js>) |
-| 结构化输出辅助 | [structured-output.js](<../../structured-output.js>)、[bounded-json.js](<../../bounded-json.js>) |
+| 结构化输出与文件切片 | [structured-output.js](<../../structured-output.js>)、[bounded-json.js](<../../bounded-json.js>)、[files-transport.js](<../../files-transport.js>)、[file-slicing.js](<../../file-slicing.js>)、[file-slicing-tool.js](<../../file-slicing-tool.js>) |
 | 基本诊断与响应证据 | [diagnostics.js](<../../diagnostics.js>)、[diagnostic-store.js](<../../diagnostic-store.js>)、[response-store.js](<../../response-store.js>)、[request-association.js](<../../request-association.js>) |
 | Inspector 服务与工具 | [inspector-service.js](<../../inspector-service.js>)、[inspector-tool.js](<../../inspector-tool.js>) |
 | 发行文档 | [主文档](<../../README.md>)、[CHANGELOG.md](<../../CHANGELOG.md>)、[LICENSE](<../../LICENSE>) |
@@ -85,6 +85,11 @@
   - **改动清单**：[adapter.js](<../../adapter.js>) 在 `installGemini4PiAiPatch` 中新增 `canAssignProviderProp(obj, prop)` 沿原型链检查 `stream` 与 `streamSimple` 可写性（拦截 `Object.freeze`、只读属性、getter-only 与不可扩展对象的继承方法），将赋值包进 `try/catch` 并在第二步失败时回滚第一步（继承遮蔽 `delete`、自有属性还原）杜绝半补丁与污染 `patchedProviders`，同时为 `removeOwner` 还原逐属性加 `try/catch` 防御；[google-signatures.js](<../../google-signatures.js>) 在 `createGoogleSignatureBridge` 新增 `hasUnsignedToolTurn`，对同模型（`same === true`）首个 `toolCall` 缺失或含非 base64 `thoughtSignature` 的历史回合走既有 `unsigned(...)` 回合边界降级（严守并行调用 1:1 签名边界，绝不跨 part 复制签名）；同步更新 [package.json](<../../package.json>)（`2.3.2`）、[CHANGELOG.md](<../../CHANGELOG.md>)、[docs/implementation/README.md](<README.md>)、[DECISIONS.md](<DECISIONS.md>) 与本文档。
   - **新增用例**：[adapter.test.mjs](<../../test/adapter.test.mjs>) 新增 Issue #7 冻结/只读/getter-only/抛错 setter 回滚/不可扩展原型链/混合 snapshot 端到端与卸载前冻结回归用例（61/61）；[signature-only.test.mjs](<../../test/signature-only.test.mjs>) 新增 4 组同模型无签名/非 base64 降级、并行 1:1 签名不复制验证、首无次有降级及 pending 报错回归用例（44/44）。
   - **离线实测（2026-11-24，Asia/Shanghai，Node.js `v24.12.0`，挂载本机既有 React `19.2.0` `NODE_PATH`，`--test-isolation=none`）**：**37 个测试文件，741 项测试，741 通过，0 失败，0 跳过**；`git diff --check` 退出码 `0`。
+- **2026-11-24 `v2.4.0` 发版补记（Gemini API 显式文件切片，Interactions + GenerateContent 双协议）**：
+  - **新增模块**：[files-transport.js](<../../files-transport.js>)（原始 REST 8 MiB 分块续传、`GET`/`ACTIVE` 轮询、`DELETE`、同源与资源名强校验、拒绝 Vertex 保留环境变量名、无原始错误回显）、[file-slicing.js](<../../file-slicing.js>)（PDF/Office/表格/音视频 MIME 与参数校验、双协议序列化、纯内存有界会话与 48h 去重注册表、引用计数共享取消、`revokeConsent()`、随机 `sliceId` 1:1 绑定与 6 切片活跃窗口卸载）、[file-slicing-tool.js](<../../file-slicing-tool.js>)（按需热注册的延迟工具 `argon_slice_file`，fail-closed 路径映射、权威路由与 `/v1/interactions` 门控、单句柄定长哈希与 finalize 前摘要防 TOCTOU）。
+  - **集成改动**：[index.js](<../../index.js>) 新增第 15 项 `volatile` 配置 `allowGeminiFilesApi`（默认 `false`）、热注册/卸载 `argon_slice_file` 与异常配置提前 `revokeConsent()`；[adapter.js](<../../adapter.js>) 接入 GenerateContent `functionResponse.parts` + `$ref` 动态授权注入并绑定请求 `configured.baseUrl`；[interaction-adapter.js](<../../interaction-adapter.js>) 与 [interactions-input.js](<../../interactions-input.js>) 接入 Interactions `function_result.result` 动态授权注入、`/v1/interactions` 门控与 per-`call_id` FIFO 工具检索降级保护；[client.js](<../../client.js>)、[locale/zh.json](<../../locale/zh.json>)、[locale/en.json](<../../locale/en.json>) 补齐设置页开关、15 项重置与双语说明；[package.json](<../../package.json>) 升至 `2.4.0` 并在 `files` 白名单增补 3 个新模块，同步更新 [CHANGELOG.md](<../../CHANGELOG.md>)、[README.md](<../../README.md>)、[AGENTS.md](<../../AGENTS.md>)、[docs/implementation/README.md](<README.md>)、[DECISIONS.md](<DECISIONS.md>) 与本文档。
+  - **跨族独立审查与新增测试**：新增 [files-transport.test.mjs](<../../test/files-transport.test.mjs>)、[file-slicing.test.mjs](<../../test/file-slicing.test.mjs>)、[file-slicing-tool.test.mjs](<../../test/file-slicing-tool.test.mjs>)、[file-slicing-protocol.test.mjs](<../../test/file-slicing-protocol.test.mjs>) 并更新 [adapter.test.mjs](<../../test/adapter.test.mjs>)、[client.test.mjs](<../../test/client.test.mjs>)、[plugin-lifecycle.test.mjs](<../../test/plugin-lifecycle.test.mjs>)。经两轮 GPT-6.2 Astra（`xhigh`）独立只读审查及总工 Triage 全部必改项闭环。
+  - **离线实测（2026-11-24，Asia/Shanghai，Node.js `v24.12.0`，挂载本机既有 React `19.2.0` `NODE_PATH`，`--test-isolation=none`）**：**41 个测试文件，782 项测试，782 通过，0 失败，0 跳过**；`git diff --check` 退出码 `0`。本轮未联网、未发真实上游请求。
 - **发布清单预检（上一轮，当时未生成发布包）**：`npm pack --dry-run --json --ignore-scripts --cache .tmp/npm-cache` 退出码 0，清单 32 个文件；不包含退休模块、测试、工程缓存或宣传视频。仅预检，未生成发布包、安装或发布。
 - **差异检查**：`git diff --check` 退出码 0；保留用户原有版本/兼容范围改动及未跟踪的宣传视频内容。
 - **工具定义开销**：同一真实宿主首轮组装测试的固定估算由 542 降至 503 tokens（减少 39）；这不是 Google CountTokens 测量。

@@ -1,4 +1,4 @@
-# Gemini 4 Adapter（dsh-vertex-argon）核心技术决定与协议合同（v2.3.2）
+# Gemini 4 Adapter（dsh-vertex-argon）核心技术决定与协议合同（v2.4.0）
 
 本文区分当前实现合同与历史实测；验证来源与本轮结果见 [STATUS.md](<STATUS.md>)。
 
@@ -54,7 +54,7 @@
 - 等待连接、流迭代及帧 JSON 解析均需受约束；不能只给 `next()` 加时间限制而放任其他等待永久阻塞。
 - 只累计等待上游工作所用时间，不在 `yield` 后让消费方处理/暂停时间消耗超时预算。看门狗仅在首次进入 `thinking` / `transition` 阶段、收到非空文本、具名 `functionCall`、本跳有界集合 `seenSignatures`（上限 8,192）中未见的新签名、新检查点或首次终止信号时刷新预算；空帧、空思考帧、空 `{ functionCall: {} }`、交替空帧与重复签名不续期。
 - 用户取消立即停止，不进入自动恢复。阶段超时与用户取消必须区分；超时只能在满足安全重试条件时恢复。
-- `meta.phaseTimeouts` / `phaseTimeouts` 的 `initialTtft`、`thinking`、`transition`、`streaming` 均以毫秒计，可在离线测试中缩短；这是内部参数，不是额外用户配置项，完整配置为 14 项。
+- `meta.phaseTimeouts` / `phaseTimeouts` 的 `initialTtft`、`thinking`、`transition`、`streaming` 均以毫秒计，可在离线测试中缩短；这是内部参数，不是额外用户配置项，完整配置为 15 项。
 
 ### 3.3 零交付初始重试与检查点重连
 
@@ -108,6 +108,12 @@ Continue and provide the final response or tool call.
 - [adapter.js](<../../adapter.js>) 导出能力门控 `supportsInteractionsToolRetrieval({ model, route, protocol, mode, apiVersion })`：仅当 `mode !== 'off'`、`protocol === 'interactions'`、`route === 'google-generative-ai'`、`apiVersion !== 'v1'`（自定义网关 URL 显式锁定 `/v1/interactions` 非 `v1beta` 时同样回退为 `false`）且上游模型为官方 Gemini 4 四模型（`argon` / `carbon` / `hydrogen` / `neon`）时返回 `true`。此时 `getProfiles()`（缓存键纳入 `interactionsToolRetrieval`）与 `prepareCall()` 返回的模型元数据声明 `toolUpdate: 'addition-only'`，使宿主 `dsh-llm` 的 `projectToolUpdates` 原样保留 `tool.deferLoading === true`；Vertex AI 通道与显式 `/v1/interactions` 网关一律返回 `false`（不声明 `toolUpdate`，并剥离工具上的 `deferLoading` / `shortDescription`），避免向不支持通道或端点发送 `defer_loading` 触发上游 `400`。
 - `interactionsToolRetrieval` 三档（[index.js](<../../index.js>) 第 14 项 `volatile` 配置，默认 `'explicit'`）：`'off'` 关闭；`'explicit'` 仅延迟显式 `deferLoading: true` 工具；`'auto'` 额外对未显式关闭的外部/MCP/插件长尾工具（总工具数 `>= 2`）自动标记 `defer_loading: true`。本适配器仅支持 DSH 本地 `function` 工具（含宿主桥接的 `mcp__*` 函数工具）与服务端 `{"type":"tool_search"}`（存在至少 1 个 `defer_loading: true` 工具时在 `tools` 首位注入，严禁附带 `name`/`description`/`parameters`，各工具仍发送完整 `parameters` schema）；若显式传入原生远端 `mcp_server` 工具或客户端模式 `execution: 'client'` 的 `tool_search`，均在发包前直接拒绝。
 - 开启 `toolUpdate: 'addition-only'` 后，组装 `system_instruction` / `user_input` 时若 `system` / `developer` 消息含 `{ type: 'tool-addition', toolName }` 且命中本次请求的 `deferredToolNames` 集合，跳过写入 `[Tool availability update: tool-addition ...]` 文本（过滤后无剩余文本块则跳过整条消息），既保护提示词缓存前缀又避免诱发模型跳过 `tool_search` 直接调用延迟工具而报 `400 Server side tool call context must be circulated`。
+
+### 4.5 Gemini Files API 显式文件切片（双协议，仅 Gemini API 通道）
+
+- **显式授权与热生命周期**：[index.js](<../../index.js>) 第 15 项 `volatile` 配置 `allowGeminiFilesApi` 默认 `false`。未开启时不注册 `argon_slice_file` 工具、不读取/上传本地文件、不在出站请求注入远端 URI；开启后热注册为延迟工具（`deferLoading: true`）；关闭或卸载插件时立即调用 `fileSliceHub.revokeConsent()` 中止在途上传，且在 `loader/volatile-update` 先读原始授权位（即使其他配置 getter 抛错亦立即撤销）、先执行 `syncSliceTools()` 再推进 `lastSnap`（首装或热更注册异常时保留重试能力）。
+- **通道、协议与凭据隔离**：仅限 **Gemini API 官方四模型（`*-google`）** 生效，Vertex AI 通道与非 Gemini 4 模型在工具执行与适配器注入两端均显式拒绝；显式锁定 `/v1/interactions` 的自定义网关在工具上传前与 Interactions 注入前双重门控。`createGeminiFilesClient` 严格拒绝任何 Vertex 保留环境变量名（`GOOGLE_CLOUD_API_KEY`、`GOOGLE_APPLICATION_CREDENTIALS`、`GOOGLE_CLOUD_PROJECT`、`GCLOUD_PROJECT`、`GOOGLE_CLOUD_LOCATION`），`filesBaseEndpoint` 幂等归一，上传与返回 `uri` 强制与目标端点严格同源且路径匹配 `/{name}`。GenerateContent 的 `endpointBase` 绑定当前请求的 `configured.baseUrl`，避免中途切换网关导致跨网关 URI 串用。
+- **单句柄防 TOCTOU、限流与双协议精确绑定**：[file-slicing-tool.js](<../../file-slicing-tool.js>) 先查 `fs.hostPathFromProcessPath`（存在映射服务时映射失败或空值 fail-closed 拒绝，绝不回退 `resolve`）、校验 `modelSelection.current()` 权威路由、预检 `stat` 挡住非普通文件后再单次 `open('r')` 复用句柄完成定长哈希、分块上传（硬上限 `8 MiB`）与 finalize 前实际字节 SHA-256 及 EOF 无增长校验；[file-slicing.js](<../../file-slicing.js>) 以 `maxInFlightUploads = 4` 限流、采用引用计数共享 `AbortController`（单等待者取消不误杀同键其他等待者，全员取消或撤销立即从 `inFlight` 移除防后续调用继承中止句柄），缓存键覆盖 `(principalHash, endpointBase, sha256, mimeType)` 并将到期时间钳制在 `<= 48h`。会话日志 `output.render` 仅持久化纯文本 JSON（含随机 `sliceId`），不新增 `storageDomain`；双协议出站时动态重查授权，按随机 `sliceId` / 唯一 occurrence 1:1 注入（Interactions 写入 `function_result.result` 静态 `processing` 块，GenerateContent 写入 `functionResponse.parts` + `response.slice_media: { $ref }`），跳过 `{ ok: false }` 失败回执、Interactions 禁走 pi-ai 别名兜底、GenerateContent 对归一化碰撞歧义拒绝注入；单会话全局活跃窗口上限 `6`（超窗降级为卸载文本提示且截断历史不复活），`degradeToolSearchInputSteps` 按 per-`call_id` FIFO 队列仅替换 `argon_slice_file` 注入块不误伤其他工具媒体。
 
 ## 5. 精简诊断、存储兼容与 Inspector
 

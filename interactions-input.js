@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { SLICE_TOOL_NAME } from './file-slicing.js'
 export const INTERACTIONS_REPLAY_API = 'google-interactions-v1'
 export const TOOL_RETRIEVAL_MODES = Object.freeze(['off', 'explicit', 'auto'])
 export const DEFAULT_TOOL_RETRIEVAL_MODE = 'explicit'
@@ -326,13 +327,22 @@ function degradeToolSearchInputSteps(input) {
       continue
     }
     if (step?.type === 'function_result') {
-      const header = degradedCalls.get(step.call_id)
-      if (header !== undefined) {
-        degradedCalls.delete(step.call_id)
-        const resultParts = Array.isArray(step.result) ? step.result : [{ type: 'text', text: '[Tool completed without output.]' }]
+      const queue = degradedCalls.get(step.call_id)
+      const degradedInfo = queue?.shift()
+      if (queue && queue.length === 0) degradedCalls.delete(step.call_id)
+      if (degradedInfo !== undefined) {
+        const rawParts = Array.isArray(step.result) ? step.result : [{ type: 'text', text: '[Tool completed without output.]' }]
+        const resultParts = degradedInfo.name === SLICE_TOOL_NAME
+          ? rawParts.map(part => {
+              if (part && typeof part === 'object' && (part.processing !== undefined || ['document', 'video', 'audio'].includes(part.type))) {
+                return { type: 'text', text: '[File slice omitted after tool-search downgrade]' }
+              }
+              return part
+            })
+          : rawParts
         degraded.push({
           type: 'user_input',
-          content: [{ type: 'text', text: header + '\n[Result of previously executed tool call ' + step.call_id + (step.is_error ? '; error' : '') + ']' }, ...resultParts],
+          content: [{ type: 'text', text: degradedInfo.header + '\n[Result of previously executed tool call ' + step.call_id + (step.is_error ? '; error' : '') + ']' }, ...resultParts],
         })
       } else {
         degraded.push(step)
@@ -353,7 +363,17 @@ function degradeToolSearchInputSteps(input) {
         for (const block of s.content) if (block?.type === 'text' && typeof block.text === 'string' && block.text.length > 0) textContent.push({ type: 'text', text: block.text })
       } else if (s?.type === 'function_call') {
         const callId = s.id ?? s.call_id
-        if (callId) degradedCalls.set(callId, '[Previously executed tool ' + s.name + '; call ' + callId + ']\n' + JSON.stringify(s.arguments ?? {}))
+        if (callId) {
+          let queue = degradedCalls.get(callId)
+          if (!queue) {
+            queue = []
+            degradedCalls.set(callId, queue)
+          }
+          queue.push({
+            name: s.name,
+            header: '[Previously executed tool ' + s.name + '; call ' + callId + ']\n' + JSON.stringify(s.arguments ?? {}),
+          })
+        }
       }
     }
     degraded.push({ type: 'model_output', content: textContent.length ? textContent : [{ type: 'text', text: '[Previous model reasoning omitted.]' }] })
@@ -532,6 +552,62 @@ export async function buildInteractionRequest(options, settings = {}) {
       continue
     }
     throw new Error('Unsupported Interactions message role.')
+  }
+  if (typeof settings.resolveToolSlices === 'function') {
+    const parseSliceResult = resultBlocks => {
+      if (!Array.isArray(resultBlocks)) return null
+      const firstText = resultBlocks.find(b => b?.type === 'text' && typeof b.text === 'string')
+      if (!firstText || !firstText.text.trim()) return null
+      try {
+        const parsed = JSON.parse(firstText.text)
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
+      } catch {
+        return null
+      }
+    }
+    const nativeSliceTargets = []
+    for (let stepIdx = 0; stepIdx < input.length; stepIdx++) {
+      const step = input[stepIdx]
+      if (
+        step?.type !== 'function_result' ||
+        step.name !== SLICE_TOOL_NAME ||
+        step.is_error ||
+        typeof step.call_id !== 'string' ||
+        !step.call_id.length
+      ) {
+        continue
+      }
+      const parsed = parseSliceResult(step.result)
+      if (parsed?.ok === false) continue
+      const key = String(stepIdx)
+      nativeSliceTargets.push({
+        step,
+        key,
+        entry: {
+          key,
+          callId: step.call_id,
+          ...(typeof parsed?.sliceId === 'string' && parsed.sliceId.length > 0 ? { sliceId: parsed.sliceId } : {}),
+          isError: false,
+        },
+      })
+    }
+    if (nativeSliceTargets.length > 0) {
+      const rawResolved = settings.resolveToolSlices(nativeSliceTargets.map(t => t.entry))
+      const resolvedSlices = typeof rawResolved?.then === 'function' ? await rawResolved : rawResolved
+      if (resolvedSlices instanceof Map && resolvedSlices.size > 0) {
+        const keyedByIndex = nativeSliceTargets.some(t => resolvedSlices.has(t.key))
+        for (const { step, key } of nativeSliceTargets) {
+          const res = keyedByIndex ? resolvedSlices.get(key) : resolvedSlices.get(step.call_id)
+          if (!res) continue
+          if (!Array.isArray(step.result)) step.result = []
+          if (res.status === 'active' && res.block) {
+            step.result.push(copy(res.block))
+          } else if ((res.status === 'offloaded' || res.status === 'expired' || res.status === 'disabled') && typeof res.notice === 'string' && res.notice.length > 0) {
+            step.result.push({ type: 'text', text: res.notice })
+          }
+        }
+      }
+    }
   }
   if(!input.length)throw new Error('Interactions input must not be empty.')
   const request={model:upstreamModel,input,stream:true,background:Boolean(settings.background),store:Boolean(settings.store),generation_config:{max_output_tokens:max,thinking_level:level,thinking_summaries:'auto'}}
